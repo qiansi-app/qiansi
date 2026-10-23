@@ -14,7 +14,8 @@ files:
   - server-dist/**
   - icon.png
 extraResources:
-  - from: ../studio/dist
+  # Paths here are relative to the repository root, not to directories.app.
+  - from: apps/studio/dist
     to: studio
 asarUnpack:
   - server-dist/**
