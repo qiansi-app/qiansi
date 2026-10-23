@@ -20,7 +20,7 @@ extraResources:
 asarUnpack:
   - server-dist/**
 win:
-  icon: apps/desktop/icon.png
+  icon: apps/desktop/icon.ico
   executableName: Qiansi
   target:
     - nsis

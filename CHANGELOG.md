@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 — 2026-10-23
+
+- New application icon: 1024 px master with smooth rounded corners, dedicated 16/20/24/32 px variants, and a multi-size `.ico` used by both NSIS and portable builds.
+- README now carries the build badge, a direct download link and the clone command.
+- Packaging fixes: disable electron-builder's workspace npm rebuild, resolve the Studio resources path from the repository root, and stop automatic publishing during builds.
+
 ## 0.1.0 — 2026-10-21
 
 > 2026-10-22 fixes: stable memoized canvas nodes (the previous build could hit React maximum-update-depth and render a black window), renderer error boundary, Ctrl/⌘ or Shift multi-select, brush exits after one region, AI layout returns levels while local layout applies instantly, duplicate/self-loop wire guards, and file modules delete their file on disk.

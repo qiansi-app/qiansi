@@ -1,7 +1,7 @@
 {
   "name": "qiansi",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Qiansi: a local-first canvas where every AI model is a teammate.",
   "workspaces": [
     "apps/*",
@@ -26,6 +26,7 @@
     "electron-builder": "^25.1.8",
     "esbuild": "^0.25.0",
     "resedit": "^2.0.3",
+    "sharp": "^0.35.5",
     "typescript": "^5.7.2",
     "wait-on": "^8.0.1"
   },

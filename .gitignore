@@ -17,3 +17,6 @@ runs/
 release/
 server-dist/
 *.local
+
+# local release verification downloads
+release-check/
