@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration: inner application binary.
+
+  Used in the first signing pass, after `electron-builder --win --dir`.
+  Upload a zip whose root contains win-unpacked/Qiansi.exe, then replace the
+  file in win-unpacked with the signed copy before building the installer.
+
+  Only the project's own executable is signed. Electron DLLs and node binaries
+  ship as upstream artifacts and must not be re-signed with this certificate.
+
+  Docs: https://docs.signpath.io/artifact-configuration/syntax
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="Qiansi.exe" min-matches="1" max-matches="1">
+      <authenticode-sign/>
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

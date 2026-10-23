@@ -1,0 +1,7 @@
+{
+  "label": "Claude (local relay)",
+  "protocol": "anthropic-messages",
+  "baseUrl": "http://127.0.0.1:15721",
+  "model": "claude-opus-4-8[1M]",
+  "apiKeyEnv": "ANTHROPIC_AUTH_TOKEN"
+}

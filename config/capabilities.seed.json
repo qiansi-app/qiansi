@@ -1,0 +1,172 @@
+{
+  "version": "2026-10-21",
+  "note": "Seed capability profiles. Prices and limits are starting values; verify against provider docs. Unknown effort values must be downgraded to the model default, never sent raw.",
+  "profiles": [
+    {
+      "id": "deepseek-reasoner",
+      "label": "DeepSeek Reasoner",
+      "provider": "DeepSeek",
+      "protocol": "openai-chat",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-reasoner",
+      "contextWindow": 128000,
+      "maxOutput": 65536,
+      "modalities": { "tools": true, "json": true, "vision": false },
+      "effort": {
+        "dialect": "deepseek-model-switch",
+        "canDisable": false,
+        "notes": "reasoner vs chat is a model switch; reasoning arrives as reasoning_content"
+      },
+      "strengths": { "reasoning": 0.9, "code": 0.85, "writing": 0.7, "extraction": 0.8 },
+      "domesticReachable": true
+    },
+    {
+      "id": "deepseek-chat",
+      "label": "DeepSeek Chat",
+      "provider": "DeepSeek",
+      "protocol": "openai-chat",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "contextWindow": 128000,
+      "maxOutput": 8192,
+      "modalities": { "tools": true, "json": true, "vision": false },
+      "effort": { "dialect": "none", "canDisable": true, "notes": "fast chat model" },
+      "strengths": { "writing": 0.8, "extraction": 0.8, "code": 0.7 },
+      "domesticReachable": true
+    },
+    {
+      "id": "minimax-m3",
+      "label": "MiniMax M3.1 Flash",
+      "provider": "MiniMax",
+      "protocol": "anthropic-messages",
+      "baseUrl": "https://api.minimaxi.com",
+      "model": "MiniMax-M3.1-Flash-Preview",
+      "contextWindow": 200000,
+      "maxOutput": 32768,
+      "modalities": { "tools": true, "json": true, "vision": true, "imageGen": true, "videoGen": true, "tts": true },
+      "effort": {
+        "dialect": "minimax-output-effort",
+        "values": ["low", "medium", "high", "xhigh", "max"],
+        "canDisable": true,
+        "notes": "Anthropic-format /anthropic/v1/messages; output_config.effort"
+      },
+      "endpoints": {
+        "image": "/v1/image_generation",
+        "videoCreate": "/v2/video_generation",
+        "videoQuery": "/v2/query/video_generation/{task_id}",
+        "tts": "/v1/t2a_v2"
+      },
+      "strengths": { "writing": 0.8, "multimodal": 0.95, "reasoning": 0.75 },
+      "domesticReachable": true
+    },
+    {
+      "id": "kimi-k2-thinking",
+      "label": "Kimi K2 Thinking",
+      "provider": "Moonshot",
+      "protocol": "openai-chat",
+      "baseUrl": "https://api.moonshot.cn/v1",
+      "model": "kimi-k2-thinking",
+      "contextWindow": 256000,
+      "maxOutput": 32768,
+      "modalities": { "tools": true, "json": true, "vision": false },
+      "effort": {
+        "dialect": "kimi-thinking",
+        "canDisable": true,
+        "notes": "thinks by default; disable with chat_template_kwargs.thinking=false"
+      },
+      "strengths": { "reasoning": 0.85, "writing": 0.8, "code": 0.8 },
+      "domesticReachable": true
+    },
+    {
+      "id": "qwen3-max",
+      "label": "Qwen3 Max",
+      "provider": "Alibaba",
+      "protocol": "openai-chat",
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model": "qwen3-max",
+      "contextWindow": 262144,
+      "maxOutput": 32768,
+      "modalities": { "tools": true, "json": true, "vision": false },
+      "effort": {
+        "dialect": "qwen-enable-thinking",
+        "budgetRange": [128, 32768],
+        "canDisable": true,
+        "notes": "enable_thinking + thinking_budget; some thinking variants force it on"
+      },
+      "strengths": { "reasoning": 0.85, "code": 0.85, "writing": 0.75 },
+      "domesticReachable": true
+    },
+    {
+      "id": "glm-4-6",
+      "label": "GLM-4.6",
+      "provider": "Zhipu",
+      "protocol": "openai-chat",
+      "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+      "model": "glm-4.6",
+      "contextWindow": 200000,
+      "maxOutput": 32768,
+      "modalities": { "tools": true, "json": true, "vision": false },
+      "effort": {
+        "dialect": "glm-thinking",
+        "canDisable": true,
+        "notes": "thinking.type enabled/disabled; confirm against docs.bigmodel.cn"
+      },
+      "strengths": { "reasoning": 0.8, "code": 0.8, "writing": 0.75 },
+      "domesticReachable": true
+    },
+    {
+      "id": "claude-opus-relay",
+      "label": "Claude Opus (local relay)",
+      "provider": "Anthropic via relay",
+      "protocol": "anthropic-messages",
+      "baseUrl": "http://127.0.0.1:15721",
+      "model": "claude-opus-4-8[1M]",
+      "contextWindow": 1000000,
+      "maxOutput": 128000,
+      "modalities": { "tools": true, "json": true, "vision": true },
+      "effort": {
+        "dialect": "anthropic-thinking-budget",
+        "budgetRange": [1025, 64000],
+        "canDisable": true,
+        "notes": "thinking.budget_tokens must be < max_tokens; signatures must be round-tripped"
+      },
+      "strengths": { "reasoning": 0.95, "writing": 0.9, "code": 0.9 },
+      "domesticReachable": true
+    },
+    {
+      "id": "claude-sonnet",
+      "label": "Claude Sonnet",
+      "provider": "Anthropic",
+      "protocol": "anthropic-messages",
+      "baseUrl": "https://api.anthropic.com",
+      "model": "claude-sonnet-4-6[1M]",
+      "contextWindow": 1000000,
+      "maxOutput": 128000,
+      "modalities": { "tools": true, "json": true, "vision": true },
+      "effort": {
+        "dialect": "anthropic-thinking-budget",
+        "budgetRange": [1025, 64000],
+        "canDisable": true
+      },
+      "strengths": { "reasoning": 0.9, "writing": 0.9, "code": 0.9 }
+    },
+    {
+      "id": "openai-compatible",
+      "label": "OpenAI-compatible endpoint",
+      "provider": "Custom",
+      "protocol": "openai-chat",
+      "baseUrl": "https://api.openai.com/v1",
+      "model": "gpt-4.1",
+      "contextWindow": 128000,
+      "maxOutput": 32768,
+      "modalities": { "tools": true, "json": true, "vision": true },
+      "effort": {
+        "dialect": "openai-reasoning-effort",
+        "values": ["minimal", "low", "medium", "high"],
+        "canDisable": true,
+        "notes": "some models reject reasoning_effort; probe or leave unset"
+      },
+      "strengths": { "reasoning": 0.85, "writing": 0.85, "code": 0.85 }
+    }
+  ]
+}

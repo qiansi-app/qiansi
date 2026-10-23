@@ -1,0 +1,34 @@
+appId: dev.qiansi.desktop
+productName: Qiansi
+copyright: Copyright © 2026 Qiansi contributors
+directories:
+  app: apps/desktop
+  output: release
+files:
+  - main.cjs
+  - preload.cjs
+  - server-dist/**
+  - icon.png
+extraResources:
+  - from: ../studio/dist
+    to: studio
+asarUnpack:
+  - server-dist/**
+win:
+  icon: apps/desktop/icon.png
+  executableName: Qiansi
+  target:
+    - nsis
+    - portable
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  signtoolOptions:
+    rfc3161TimeStampServer: http://timestamp.digicert.com
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 牵丝 Qiansi
+  artifactName: ${productName}-Setup-${version}.${ext}
+portable:
+  artifactName: ${productName}-${version}-portable.${ext}

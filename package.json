@@ -1,0 +1,35 @@
+{
+  "name": "qiansi",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Qiansi: a local-first canvas where every AI model is a teammate.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n server,studio -c yellow,cyan \"npm run dev -w @qiansi/server\" \"npm run dev -w @qiansi/studio\"",
+    "dev:server": "npm run dev -w @qiansi/server",
+    "dev:studio": "npm run dev -w @qiansi/studio",
+    "build": "npm run build -w @qiansi/studio",
+    "typecheck": "npm run typecheck -w @qiansi/engine && npm run typecheck -w @qiansi/server && npm run typecheck -w @qiansi/cli && npm run typecheck -w @qiansi/studio",
+    "version:check": "node scripts/check-version.mjs",
+    "probe": "npm run probe -w @qiansi/cli --",
+    "desktop:dev": "concurrently -k -n server,studio,desktop -c yellow,cyan,magenta \"npm run dev -w @qiansi/server\" \"npm run dev -w @qiansi/studio\" \"wait-on http://localhost:5173 && node scripts/desktop-dev.mjs\"",
+    "desktop:bundle": "esbuild apps/server/src/index.ts --bundle --platform=node --format=cjs --outfile=apps/desktop/server-dist/index.cjs --external:electron",
+    "desktop:portable": "npm run build && npm run desktop:bundle && node scripts/desktop-portable.mjs",
+    "desktop:build": "npm run build && npm run desktop:bundle && electron-builder --config apps/desktop/electron-builder.yml"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "electron": "^38.0.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.25.0",
+    "resedit": "^2.0.3",
+    "typescript": "^5.7.2",
+    "wait-on": "^8.0.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@qiansi/desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Qiansi desktop shell",
+  "author": "Qiansi contributors",
+  "main": "main.cjs",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^25.1.8"
+  }
+}

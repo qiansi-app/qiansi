@@ -1,0 +1,89 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Version consistency
+        run: npm run version:check
+
+      - name: Build installers
+        run: npm run desktop:build
+        env:
+          # Signing is opt-in: only tag builds receive the certificate secrets.
+          CSC_LINK: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.CSC_KEY_PASSWORD || '' }}
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem release -Filter *.exe -File
+          if ($files) {
+            $lines = foreach ($file in $files) {
+              $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLower()
+              "$hash  $($file.Name)"
+            }
+            $lines | Set-Content release/SHA256SUMS.txt -Encoding ascii
+            Get-Content release/SHA256SUMS.txt
+          }
+
+      - name: Portable fallback
+        if: failure()
+        run: npm run desktop:portable
+
+      - name: Zip portable fallback
+        if: failure()
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if (Test-Path release/Qiansi-portable) {
+            Compress-Archive -Path release/Qiansi-portable -DestinationPath "release/Qiansi-portable-$version-win-x64.zip" -Force
+          }
+
+      - name: Upload installers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qiansi-windows
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/SHA256SUMS.txt
+            release/*.zip
+          if-no-files-found: ignore
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            release/*.exe
+            release/SHA256SUMS.txt
+            release/*.zip
