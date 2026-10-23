@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5 — 2026-10-23
+
+- One-click workflow: describe a goal, pick the orchestrator and worker models, optionally attach files or a folder, and the orchestrator designs a 3–5 node workflow that is placed on the canvas with assign/handoff/review wires and a public file library.
+- Added `POST /api/workflow`; the plan is validated against the available connections before anything touches the canvas.
+- Fixed the layered layout hanging on review/retry cycles by assigning levels only on first visit.
+
 ## 0.1.4 — 2026-10-23
 
 - Added “清空画板” under More → System: removes every node, wire, message and run state after a confirmation. Model connections, settings and uploaded files are kept.

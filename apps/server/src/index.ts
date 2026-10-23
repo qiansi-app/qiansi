@@ -563,6 +563,128 @@ app.post('/api/layout', async (context) => {
   }
 });
 
+app.post('/api/workflow', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const goal = String(body?.goal ?? '').trim().slice(0, 4000);
+  if (!goal) return context.json({ error: 'goal_required' }, 400);
+
+  const orchestrator = body?.orchestrator ?? {};
+  if (!orchestrator?.model) return context.json({ error: 'orchestrator_required' }, 400);
+
+  const models = (Array.isArray(body?.models) ? body.models : [])
+    .slice(0, 12)
+    .map((item: any) => ({
+      connectionId: String(item?.connectionId ?? item?.id ?? ''),
+      name: String(item?.name ?? item?.label ?? '模型'),
+      provider: String(item?.provider ?? ''),
+      model: String(item?.model ?? ''),
+      effort: String(item?.effort ?? 'medium'),
+    }))
+    .filter((item: any) => item.connectionId);
+  if (models.length === 0) return context.json({ error: 'models_required' }, 400);
+
+  const files = (Array.isArray(body?.files) ? body.files : [])
+    .slice(0, 40)
+    .map((item: any) => ({
+      name: String(item?.name ?? 'file'),
+      preview: String(item?.preview ?? '').slice(0, 900),
+    }));
+  const fileContext = files
+    .map((file: any) => `- ${file.name}${file.preview ? `\n${file.preview}` : ''}`)
+    .join('\n')
+    .slice(0, 5000);
+
+  try {
+    const result = await completeChat(
+      vault,
+      {
+        connectionId: orchestrator.connectionId ? String(orchestrator.connectionId) : undefined,
+        protocol: orchestrator.protocol ? String(orchestrator.protocol) : undefined,
+        baseUrl: orchestrator.baseUrl ? String(orchestrator.baseUrl) : undefined,
+        model: String(orchestrator.model),
+      },
+      [
+        {
+          role: 'system',
+          content:
+            '你是多 AI 工作流的编排器。只输出一个 JSON 对象，不要解释，不要 Markdown 代码块。',
+        },
+        {
+          role: 'user',
+          content: `用户目标：${goal}
+
+可用模型：${JSON.stringify(models)}
+${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileContext}\n` : ''}
+请设计一个 3–5 个节点的工作流，并只输出：
+{"summary":"一句中文概述","nodes":[{"id":"n1","name":"研究员","role":"要做什么","connectionId":"从上面选择","effort":"low|medium|high"}],"edges":[{"source":"orchestrator","target":"n1","kind":"assign","label":"任务 · 调研"}]}
+
+规则：
+1. 主控节点 id 固定为 "orchestrator"，不需要出现在 nodes 里；
+2. connectionId 必须是上面列表中的值；
+3. 每个工作节点至少有一条来自 orchestrator 的 assign 边；
+4. 有依赖的节点之间加 handoff 边，需要验收的加 review 边；
+5. effort 按任务复杂度选择；
+6. 节点名称、角色用中文，简洁具体。`,
+        },
+      ],
+      { maxTokens: 1400, timeoutMs: 60000 }
+    );
+
+    const match = result.text.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('workflow_output_unparseable');
+    const parsed = JSON.parse(match[0]) as {
+      summary?: string;
+      nodes?: Array<Record<string, any>>;
+      edges?: Array<Record<string, any>>;
+    };
+
+    const allowedConnections = new Set(models.map((item: any) => item.connectionId));
+    const effortValues = new Set(['off', 'low', 'medium', 'high', 'max']);
+    const nodes = (Array.isArray(parsed.nodes) ? parsed.nodes : [])
+      .slice(0, 6)
+      .map((item: any, index: number) => {
+        const connectionId = String(item?.connectionId ?? '');
+        return {
+          id: String(item?.id ?? `n${index + 1}`).replace(/[^\w-]/g, '').slice(0, 24) || `n${index + 1}`,
+          name: String(item?.name ?? `节点 ${index + 1}`).slice(0, 40),
+          role: String(item?.role ?? '执行子任务').slice(0, 160),
+          connectionId: allowedConnections.has(connectionId)
+            ? connectionId
+            : models[index % models.length].connectionId,
+          effort: effortValues.has(String(item?.effort)) ? String(item?.effort) : 'medium',
+        };
+      });
+    if (nodes.length === 0) throw new Error('workflow_nodes_missing');
+
+    const ids = new Set(['orchestrator', ...nodes.map((node: any) => node.id)]);
+    const kinds = new Set(['assign', 'handoff', 'review', 'context']);
+    const edges = (Array.isArray(parsed.edges) ? parsed.edges : [])
+      .slice(0, 14)
+      .filter((item: any) => ids.has(String(item?.source)) && ids.has(String(item?.target)))
+      .map((item: any, index: number) => ({
+        id: `wf-e${index + 1}`,
+        source: String(item.source),
+        target: String(item.target),
+        kind: kinds.has(String(item?.kind)) ? String(item.kind) : 'assign',
+        label: String(item?.label ?? '任务').slice(0, 40),
+      }));
+
+    return context.json({
+      ok: true,
+      workflow: {
+        summary: String(parsed.summary ?? goal).slice(0, 200),
+        nodes,
+        edges,
+      },
+    });
+  } catch (error) {
+    return context.json(
+      { ok: false, error: redactSecrets(error instanceof Error ? error.message : String(error), []) },
+      502
+    );
+  }
+});
+
 app.post('/api/files', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
   const raw = String(body?.data ?? '');

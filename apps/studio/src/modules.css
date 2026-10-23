@@ -749,3 +749,56 @@
   border-color: color-mix(in srgb, var(--cyan) 60%, transparent);
   border-width: 1.5px;
 }
+
+.workflow-tool { color: var(--amber); }
+.workflow-tool:hover:not(:disabled) { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent); border-color: color-mix(in srgb, var(--amber) 35%, var(--border)); }
+.workflow-modal {
+  width: min(760px, 94vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  background: #10151b;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+.workflow-title { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 15px; }
+.workflow-sub { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+.workflow-body { padding: 16px 18px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+.workflow-field label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 11px; }
+.workflow-field textarea,
+.workflow-field select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+  resize: vertical;
+}
+.workflow-grid { display: grid; grid-template-columns: 1fr 1.2fr; gap: 14px; }
+.workflow-models {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 170px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.workflow-model { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px; font-size: 11.5px; cursor: pointer; }
+.workflow-model:hover { background: var(--panel-3); }
+.workflow-model small { margin-left: auto; color: var(--muted-2); font-size: 10px; }
+.workflow-files { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.workflow-file-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.workflow-file { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border: 1px solid var(--border-soft); border-radius: 999px; background: var(--panel-2); font-size: 10.5px; }
+.workflow-file button { border: 0; background: transparent; color: var(--muted-2); cursor: pointer; padding: 0; display: grid; place-items: center; }
+.workflow-hint { color: var(--muted-2); font-size: 10.5px; }
+.workflow-error { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--red) 35%, transparent); border-radius: 8px; color: var(--red); font-size: 11.5px; }
+.workflow-foot { display: flex; align-items: center; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border-soft); }
+.workflow-foot .workflow-hint { margin-right: auto; }
+:root[data-theme="light"] .workflow-modal { background: #ffffff; }

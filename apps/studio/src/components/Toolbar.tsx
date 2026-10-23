@@ -16,6 +16,7 @@ import {
   RotateCcw,
   Settings,
   ShieldAlert,
+  Sparkles,
   Square,
   Wand2,
 } from 'lucide-react';
@@ -35,6 +36,7 @@ interface ToolbarProps {
   onOpenReport: () => void;
   onReset: () => void;
   onClearCanvas: () => void;
+  onOpenWorkflow: () => void;
   approvalCount: number;
   onOpenApprovals: () => void;
   externalCount: number;
@@ -90,6 +92,7 @@ export function Toolbar({
   onOpenReport,
   onReset,
   onClearCanvas,
+  onOpenWorkflow,
   approvalCount,
   onOpenApprovals,
   externalCount,
@@ -147,6 +150,15 @@ export function Toolbar({
       <div className="toolbar-spacer" />
 
       <div className="toolbar-actions">
+        <button
+          className="icon-tool workflow-tool"
+          onClick={onOpenWorkflow}
+          title="一键生成工作流：主控自动拆解并连线"
+          aria-label="一键生成工作流"
+        >
+          <Sparkles size={16} />
+        </button>
+
         <button className="icon-tool" onClick={onAddNode} title="添加模型节点" aria-label="添加模型节点">
           <Plus size={16} />
         </button>

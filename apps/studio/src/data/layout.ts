@@ -45,7 +45,9 @@ export function layeredLayout(
     const current = queue.shift()!;
     const next = (level.get(current) ?? 0) + 1;
     for (const target of outgoing.get(current) ?? []) {
-      if (!level.has(target) || level.get(target)! < next) {
+      // Workflows can contain review/retry edges that point backwards; only
+      // assign a level on first visit so cycles cannot escalate forever.
+      if (!level.has(target)) {
         level.set(target, next);
         queue.push(target);
       }

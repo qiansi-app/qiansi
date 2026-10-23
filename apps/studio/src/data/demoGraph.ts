@@ -32,6 +32,13 @@ export interface LibraryFile {
 /** Direction a drawn project region exchanges work with the main workflow. */
 export type RegionMode = 'open' | 'inbound' | 'outbound' | 'closed';
 
+export interface LibraryFile {
+  id: string;
+  name: string;
+  size: number;
+  preview?: string;
+}
+
 export interface AgentNodeData extends Record<string, unknown> {
   name: string;
   role: string;

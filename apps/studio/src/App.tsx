@@ -20,6 +20,7 @@ import { ExternalModal } from './components/ExternalModal';
 import { RunReport } from './components/RunReport';
 import { SettingsModal } from './components/SettingsModal';
 import { Toolbar } from './components/Toolbar';
+import { WorkflowModal, type WorkflowPlan } from './components/WorkflowModal';
 import { initialModels, type ModelDraft } from './data/models';
 import { loadSettings, saveSettings, type AppSettings } from './data/settings';
 import { layeredLayout } from './data/layout';
@@ -148,6 +149,7 @@ export function App() {
     null
   );
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [workflowOpen, setWorkflowOpen] = useState(false);
   const rfRef = useRef<ReactFlowInstance<StudioNode, any> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const libraryFilesInput = useRef<HTMLInputElement | null>(null);
@@ -623,6 +625,150 @@ export function App() {
     setClearConfirmOpen(false);
     setOrchestratorId('');
     setToast('画板已清空，可以从「添加模型」开始');
+  };
+
+  const uploadFilesForWorkflow = async (files: File[]) => {
+    const result: LibraryFile[] = [];
+    for (const file of files.slice(0, 40)) {
+      if (file.size > 8 * 1024 * 1024) continue;
+      try {
+        const uploaded = await uploadOneFile(file);
+        const relative = (file as File & { webkitRelativePath?: string }).webkitRelativePath;
+        result.push({
+          id: uploaded.id,
+          name: relative || uploaded.name,
+          size: uploaded.size,
+          preview: uploaded.preview,
+        });
+      } catch {
+        // skip files that fail to upload; the rest of the workflow can continue
+      }
+    }
+    return result;
+  };
+
+  const applyWorkflow = (
+    plan: WorkflowPlan,
+    files: LibraryFile[],
+    orchestratorConnectionId: string
+  ) => {
+    const orchestratorModel = models.find((model) => model.id === orchestratorConnectionId);
+    const baseLibrary = publicLibraryNode();
+    const library: StudioNode = {
+      ...baseLibrary,
+      data: { ...baseLibrary.data, libraryFiles: files },
+    };
+    const palette = ['#4d6bfe', '#ff7a45', '#a78bfa', '#34d399', '#60a5fa', '#f472b6'];
+    const used = new Set(['orchestrator']);
+    const nodes: StudioNode[] = [library, {
+      id: 'orchestrator',
+      type: 'agent',
+      position: { x: 0, y: 0 },
+      data: {
+        kind: 'orchestrator',
+        name: orchestratorModel?.label ?? '主控',
+        role: '拆解 · 分派 · 验收',
+        provider: orchestratorModel?.provider ?? 'Custom',
+        model: orchestratorModel?.model ?? 'orchestrator',
+        effort: 'high',
+        status: 'idle',
+        accent: '#e0a458',
+        metric: '待命',
+        connectionId: orchestratorModel?.id,
+        protocol: orchestratorModel?.protocol,
+        baseUrl: orchestratorModel?.baseUrl,
+      },
+    }];
+    const idMap = new Map<string, string>();
+    plan.nodes.forEach((planned, index) => {
+      let id = `wf-${planned.id || index + 1}`;
+      while (used.has(id)) id = `${id}-${index}`;
+      used.add(id);
+      idMap.set(planned.id, id);
+      const model = models.find((item) => item.id === planned.connectionId) ?? models[0];
+      nodes.push({
+        id,
+        type: 'agent',
+        position: { x: 0, y: 0 },
+        data: {
+          kind: 'agent',
+          name: planned.name,
+          role: planned.role,
+          provider: model?.provider ?? '',
+          model: model?.model ?? planned.connectionId,
+          effort: (planned.effort as EffortLevel) ?? 'medium',
+          status: 'idle',
+          accent: palette[index % palette.length],
+          metric: 'ready',
+          connectionId: model?.id,
+          protocol: model?.protocol,
+          baseUrl: model?.baseUrl,
+        },
+      });
+    });
+
+    const colors: Record<string, string> = {
+      assign: '#6366f1',
+      handoff: '#10b981',
+      review: '#f59e0b',
+      context: '#38d9c2',
+    };
+    const resolve = (id: string) =>
+      id === 'orchestrator' ? 'orchestrator' : idMap.get(id);
+    const edges: Edge[] = [];
+    plan.edges.forEach((planned, index) => {
+      const source = resolve(planned.source);
+      const target = resolve(planned.target);
+      if (!source || !target || source === target) return;
+      edges.push({
+        id: `wf-e-${index + 1}`,
+        source,
+        target,
+        type: 'smoothstep',
+        animated: true,
+        label: planned.label ?? planned.kind,
+        data: { kind: planned.kind },
+        style: { stroke: colors[planned.kind] ?? '#6366f1', strokeWidth: 1.5 },
+        markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
+        labelStyle: { fill: '#8b98a8', fontSize: 9.5 },
+        labelBgStyle: { fill: '#0e1318', fillOpacity: 0.92 },
+      });
+    });
+    const assigned = new Set(
+      edges.filter((edge) => edge.source === 'orchestrator').map((edge) => edge.target)
+    );
+    for (const node of nodes) {
+      if (node.id === 'orchestrator' || node.id === library.id) continue;
+      if (assigned.has(node.id)) continue;
+      edges.push({
+        id: `wf-auto-${node.id}`,
+        source: 'orchestrator',
+        target: node.id,
+        type: 'smoothstep',
+        animated: true,
+        label: '任务',
+        data: { kind: 'assign' },
+        style: { stroke: colors.assign, strokeWidth: 1.5 },
+        markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
+        labelStyle: { fill: '#8b98a8', fontSize: 9.5 },
+        labelBgStyle: { fill: '#0e1318', fillOpacity: 0.92 },
+      });
+    }
+
+    runToken.current += 1;
+    setRunning(false);
+    resetRunState();
+    streamBuffers.current = {};
+    taskNodes.current = {};
+    setMessages({});
+    setSelection(null);
+    setSelectedIds([]);
+    const positions = layeredLayout(nodes, edges, 'orchestrator');
+    setNodes(nodes.map((node) => ({ ...node, position: positions[node.id] ?? node.position })));
+    setEdges(edges);
+    setOrchestratorId('orchestrator');
+    setWorkflowOpen(false);
+    setToast(`工作流已生成：${plan.summary}`);
   };
 
   const autoLayout = async () => {
@@ -2209,6 +2355,7 @@ export function App() {
         onOpenReport={() => setReportOpen(true)}
         onReset={resetAll}
         onClearCanvas={() => setClearConfirmOpen(true)}
+        onOpenWorkflow={() => setWorkflowOpen(true)}
         hasReport={Boolean(runSummary)}
         approvalCount={pendingApprovals}
         onOpenApprovals={() => setApprovalsOpen(true)}
@@ -2492,6 +2639,14 @@ export function App() {
         confirmLabel="清空"
         onConfirm={clearCanvas}
         onCancel={() => setClearConfirmOpen(false)}
+      />
+
+      <WorkflowModal
+        open={workflowOpen}
+        models={models}
+        onClose={() => setWorkflowOpen(false)}
+        onUploadFiles={uploadFilesForWorkflow}
+        onApply={applyWorkflow}
       />
 
       <input

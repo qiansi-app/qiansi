@@ -159,6 +159,22 @@ Key 解析顺序：请求体（本次不落盘）→ 保险库 `connectionId` �
 
 让主控模型给节点排坐标。请求 `{ orchestratorId, nodes: [{ id, name, kind }], edges: [{ source, target }] }`。使用 Claude 中转；返回 `{ positions: { id: { x, y } }, source: "ai" }`。模型不可用或输出不合法时返回 502，Studio 会回退到本地分层排版。
 
+### `POST /api/workflow`
+
+主控模型生成工作流。请求 `{ goal, orchestrator: { connectionId, protocol, baseUrl, model }, models: [{ connectionId, name, provider, model, effort }], files: [{ name, preview }] }`。
+
+主控返回并经过服务端校验的结构：
+
+```json
+{
+  "summary": "三节点流水线：调研 → 写作 → 核对",
+  "nodes": [{ "id": "n1", "name": "调研员", "role": "…", "connectionId": "conn-deepseek", "effort": "high" }],
+  "edges": [{ "source": "orchestrator", "target": "n1", "kind": "assign", "label": "任务 · 调研" }]
+}
+```
+
+`connectionId` 必须来自请求中的模型列表；连线只能是 `assign` / `handoff` / `review` / `context`。解析或校验失败返回 502，Studio 会提示错误，不会改动画布。
+
 ### `POST /api/files`
 
 上传文件作为画布上下文。请求 `{ name, type, data }`，`data` 为 base64，单文件上限 8 MB。文件写入 `~/.qiansi/files/`，返回 `{ file: { id, name, size, preview, path } }`；文本类文件返回前 1200 字预览。
