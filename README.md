@@ -1,10 +1,14 @@
 # 牵丝（Qiansi）
 
+[![build](https://github.com/qiansi-app/qiansi/actions/workflows/build.yml/badge.svg)](https://github.com/qiansi-app/qiansi/actions/workflows/build.yml)
+
+[Download the latest Windows build](https://github.com/qiansi-app/qiansi/releases/latest) · [Quick start](#quick-start) · [中文](README.zh-CN.md)
+
 **A local-first canvas where every AI model is a teammate.**
 
 Qiansi puts your API models on a canvas as first-class nodes. You designate one model as the orchestrator; it decomposes the goal, assigns subtasks to the other nodes according to their capability profiles, calibrates the reasoning effort per subtask, checks acceptance, and sends work back for bounded revision. You can click any node or wire to chat with that exact model and manually reassign its work.
 
-> Status: early prototype (v0.1.0). The canvas and the engine contracts are in place; the studio currently runs a mock orchestration. The architecture is decided: browser studio + headless CLI + local Hono/SSE server (see [ADR 0001](docs/decisions/0001-architecture.md)). The release name is 牵丝 / Qiansi; the earlier codename collision research is kept in [naming decision 0002](docs/decisions/0002-naming.md).
+> Status: v0.1.0 public preview. Live runs, multi-model discussion, task/artifact modules, file libraries and project regions are implemented. Packaging and the release flow are documented under [docs/](docs/).
 
 ## Why
 
@@ -39,6 +43,8 @@ The engine never imports React. The canvas never owns business truth: node posit
 ## Quick start
 
 ```bash
+git clone https://github.com/qiansi-app/qiansi.git
+cd qiansi
 npm install
 npm run dev        # server :8787 + studio http://localhost:5173
 ```

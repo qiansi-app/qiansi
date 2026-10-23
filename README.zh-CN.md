@@ -1,10 +1,14 @@
 # 牵丝（Qiansi）
 
+[![build](https://github.com/qiansi-app/qiansi/actions/workflows/build.yml/badge.svg)](https://github.com/qiansi-app/qiansi/actions/workflows/build.yml)
+
+[下载最新 Windows 版本](https://github.com/qiansi-app/qiansi/releases/latest) · [快速开始](#快速开始) · [English](README.md)
+
 **一个本地优先的画布，让你接入的每个 AI 模型都成为队友。**
 
 Qiansi 把 API 模型作为一等节点放上画布。你指定一个模型当主模型（orchestrator），它负责拆解目标、按各模型的能力档案分派子任务、为每个子任务校准思考程度、验收，并把不合格的活有界地打回修改。你可以点击任意节点或连线，与那个具体的模型持续对话，并手动改派它的任务。
 
-> 状态：早期原型（v0.1.0）。画布与引擎契约已就位，Studio 目前跑的是模拟编排。架构已定：浏览器 Studio + 无头 CLI + 本地 Hono/SSE 服务（见 [架构决策 0001](docs/decisions/0001-architecture.md)）。发布名为「牵丝 / Qiansi」，早期的代号撞名调查保留在 [命名决策 0002](docs/decisions/0002-naming.md)。
+> 状态：v0.1.0 公开预览版。真实编排、AI 讨论、任务/产物模块、文件库与分项目区域均已可用；打包与发布流程见 [docs/](docs/)。
 
 ## 为什么做
 
@@ -39,6 +43,8 @@ provider 适配器     openai-chat | anthropic-messages | MiniMax 多模态子�
 ## 快速开始
 
 ```bash
+git clone https://github.com/qiansi-app/qiansi.git
+cd qiansi
 npm install
 npm run dev        # server :8787 + studio http://localhost:5173
 ```
