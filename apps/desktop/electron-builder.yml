@@ -4,6 +4,10 @@ copyright: Copyright © 2026 Qiansi contributors
 directories:
   app: apps/desktop
   output: release
+# No native production dependencies: skip the automatic `npm install
+# --production`, which prunes devDependencies in a workspace and deletes
+# app-builder-bin while electron-builder is still using it.
+npmRebuild: false
 files:
   - main.cjs
   - preload.cjs
