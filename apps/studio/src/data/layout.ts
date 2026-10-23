@@ -7,8 +7,12 @@ export interface LayoutPosition {
 }
 
 /**
- * Deterministic layered layout used when the orchestrator model is unavailable
- * or returns unusable coordinates. Pure geometry: no provider calls.
+ * Horizontal-first layered layout.
+ *
+ * The main chain is spread left-to-right by dependency depth (longest path,
+ * with cycles ignored so review/retry wires cannot loop). Nodes that have no
+ * wires at all are collected into a bottom row instead of being stacked in
+ * column zero, which keeps the graph wide rather than tall.
  */
 export function layeredLayout(
   nodes: StudioNode[],
@@ -28,55 +32,61 @@ export function layeredLayout(
   }
 
   const level = new Map<string, number>();
-  const queue: string[] = [];
+  const stack = new Set<string>();
+  const visit = (id: string, depth: number) => {
+    if (depth > 24 || stack.has(id)) return;
+    const current = level.get(id);
+    if (current !== undefined && current >= depth) return;
+    level.set(id, depth);
+    stack.add(id);
+    for (const target of outgoing.get(id) ?? []) visit(target, depth + 1);
+    stack.delete(id);
+  };
+
   const roots = candidates.filter((node) => (incoming.get(node.id) ?? []).length === 0);
-  const start = orchestratorId && ids.has(orchestratorId) ? orchestratorId : roots[0]?.id;
-  if (start) {
-    level.set(start, 0);
-    queue.push(start);
-  }
-  for (const root of roots) {
-    if (!level.has(root.id)) {
-      level.set(root.id, 0);
-      queue.push(root.id);
-    }
-  }
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    const next = (level.get(current) ?? 0) + 1;
-    for (const target of outgoing.get(current) ?? []) {
-      // Workflows can contain review/retry edges that point backwards; only
-      // assign a level on first visit so cycles cannot escalate forever.
-      if (!level.has(target)) {
-        level.set(target, next);
-        queue.push(target);
-      }
-    }
-  }
+  const start =
+    orchestratorId && ids.has(orchestratorId) ? orchestratorId : roots[0]?.id;
+  if (start) visit(start, 0);
+  for (const root of roots) visit(root.id, 0);
   for (const node of candidates) {
-    if (!level.has(node.id)) level.set(node.id, 0);
+    if (!level.has(node.id)) visit(node.id, 0);
   }
+
+  const isolated = candidates.filter(
+    (node) =>
+      (incoming.get(node.id) ?? []).length === 0 &&
+      (outgoing.get(node.id) ?? []).length === 0
+  );
+  const isolatedIds = new Set(isolated.map((node) => node.id));
 
   const columns = new Map<number, StudioNode[]>();
   for (const node of candidates) {
+    if (isolatedIds.has(node.id)) continue;
     const column = level.get(node.id) ?? 0;
     columns.set(column, [...(columns.get(column) ?? []), node]);
   }
 
   const positions: Record<string, LayoutPosition> = {};
-  const columnHeight = [...columns.values()].reduce(
-    (max, list) => Math.max(max, list.length),
-    1
-  );
+  let tallest = 1;
   for (const [column, list] of columns) {
     list.sort((a, b) => (a.data.name ?? a.id).localeCompare(b.data.name ?? b.id));
+    tallest = Math.max(tallest, list.length);
     list.forEach((node, index) => {
-      const offset = (list.length - columnHeight) / 2;
       positions[node.id] = {
-        x: 80 + column * 360,
-        y: 80 + (index + offset) * 200,
+        x: 100 + column * 400,
+        y: 100 + index * 170,
       };
     });
   }
+
+  isolated
+    .sort((a, b) => (a.data.name ?? a.id).localeCompare(b.data.name ?? b.id))
+    .forEach((node, index) => {
+      positions[node.id] = {
+        x: 100 + index * 320,
+        y: 100 + tallest * 170 + 140,
+      };
+    });
+
   return positions;
 }

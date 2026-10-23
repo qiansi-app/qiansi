@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.6 — 2026-10-23
+
+- Auto layout, AI refinement and one-click workflow generation now re-fit the viewport, so the whole graph is visible instead of leaving the user zoomed into one corner.
+
 ## 0.1.5 — 2026-10-23
 
 - One-click workflow: describe a goal, pick the orchestrator and worker models, optionally attach files or a folder, and the orchestrator designs a 3–5 node workflow that is placed on the canvas with assign/handoff/review wires and a public file library.

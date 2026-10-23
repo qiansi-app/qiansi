@@ -4,6 +4,7 @@ import {
   addEdge,
   useEdgesState,
   useNodesState,
+  useReactFlow,
   type Connection,
   type Edge,
   type ReactFlowInstance,
@@ -111,6 +112,7 @@ function publicLibraryNode(): StudioNode {
 }
 
 export function App() {
+  const { fitView } = useReactFlow();
   const [nodes, setNodes, onNodesChange] = useNodesState<StudioNode>(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const [selection, setSelection] = useState<Selection>(null);
@@ -647,6 +649,16 @@ export function App() {
     return result;
   };
 
+  const fitCanvas = () => {
+    const run = () => {
+      void fitView({ padding: 0.16, duration: 450, maxZoom: 1.2 });
+    };
+    // Fit once after the first paint, then again after React Flow has measured
+    // nodes that were just repositioned or created.
+    window.setTimeout(run, 150);
+    window.setTimeout(run, 700);
+  };
+
   const applyWorkflow = (
     plan: WorkflowPlan,
     files: LibraryFile[],
@@ -767,6 +779,7 @@ export function App() {
     setNodes(nodes.map((node) => ({ ...node, position: positions[node.id] ?? node.position })));
     setEdges(edges);
     setOrchestratorId('orchestrator');
+    fitCanvas();
     setWorkflowOpen(false);
     setToast(`工作流已生成：${plan.summary}`);
   };
@@ -797,6 +810,7 @@ export function App() {
         )
       );
       setToast('已先按本地分层排版，主控正在优化…');
+      fitCanvas();
 
       let aiPositions: Record<string, { x: number; y: number }> | null = null;
       try {
@@ -828,6 +842,7 @@ export function App() {
         );
       }
       setToast(aiPositions ? '主控已完成自动排版' : '主控不可用，已保留本地分层排版');
+      if (aiPositions) fitCanvas();
     } finally {
       setLayouting(false);
     }
