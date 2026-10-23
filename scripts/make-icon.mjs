@@ -14,65 +14,42 @@ const shared = `
 const large = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#12202a"/>
-      <stop offset="1" stop-color="#0a0d11"/>
+      <stop offset="0" stop-color="#10202b"/>
+      <stop offset="0.55" stop-color="#0b1118"/>
+      <stop offset="1" stop-color="#080a0f"/>
     </linearGradient>
-    <linearGradient id="teal" x1="0" y1="0" x2="1" y2="1">
+    <radialGradient id="glow" cx="0.25" cy="0.2" r="0.8">
+      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="white" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#dbeafe"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#5eead4"/>
-      <stop offset="1" stop-color="#2dd4bf"/>
-    </linearGradient>
-    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#7dd3fc"/>
-      <stop offset="1" stop-color="#38bdf8"/>
-    </linearGradient>
-    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#c4b5fd"/>
-      <stop offset="1" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#a78bfa"/>
     </linearGradient>
   </defs>
-  ${shared}
-  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M512 292 L262 730" stroke="url(#teal)" stroke-width="74"/>
-    <path d="M512 292 L762 730" stroke="url(#sky)" stroke-width="74"/>
-    <path d="M262 730 L762 730" stroke="url(#violet)" stroke-width="74"/>
-  </g>
-  <g fill="#0b0e12" stroke="#f1f5f9" stroke-width="42">
-    <circle cx="512" cy="292" r="102"/>
-    <circle cx="262" cy="730" r="102"/>
-    <circle cx="762" cy="730" r="102"/>
-  </g>
-  <g fill="#f1f5f9">
-    <circle cx="512" cy="292" r="34"/>
-    <circle cx="262" cy="730" r="34"/>
-    <circle cx="762" cy="730" r="34"/>
-  </g>
+  <rect x="20" y="20" width="984" height="984" rx="232" fill="url(#bg)"/>
+  <rect x="20" y="20" width="984" height="984" rx="232" fill="url(#glow)"/>
+  <rect x="34" y="34" width="956" height="956" rx="220" fill="none" stroke="#ffffff" stroke-opacity="0.06" stroke-width="5"/>
+  <path d="M 512 512 C 430 368 238 368 238 512 C 238 656 430 656 512 512 C 594 368 786 368 786 512 C 786 656 594 656 512 512"
+    fill="none" stroke="url(#white)" stroke-width="112" stroke-linecap="round"/>
+  <circle cx="512" cy="512" r="58" fill="url(#accent)"/>
 </svg>`;
 
-// Small sizes drop the outer border and inner dots so the triangle survives
-// the downscale instead of turning into a grey blob.
+// Small sizes drop the centre node, background glow and border so the white
+// infinity survives the downscale instead of collapsing into a grey blob.
 const small = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#12202a"/>
-      <stop offset="1" stop-color="#0a0d11"/>
-    </linearGradient>
-  </defs>
-  <rect x="36" y="36" width="952" height="952" rx="214" fill="url(#bg)"/>
-  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M512 300 L270 722" stroke="#2dd4bf" stroke-width="92"/>
-    <path d="M512 300 L754 722" stroke="#38bdf8" stroke-width="92"/>
-    <path d="M270 722 L754 722" stroke="#8b5cf6" stroke-width="92"/>
-  </g>
-  <g fill="#0b0e12" stroke="#f1f5f9" stroke-width="46">
-    <circle cx="512" cy="300" r="108"/>
-    <circle cx="270" cy="722" r="108"/>
-    <circle cx="754" cy="722" r="108"/>
-  </g>
+  <rect x="16" y="16" width="992" height="992" rx="238" fill="#0b1118"/>
+  <path d="M 512 512 C 430 368 238 368 238 512 C 238 656 430 656 512 512 C 594 368 786 368 786 512 C 786 656 594 656 512 512"
+    fill="none" stroke="#ffffff" stroke-width="150" stroke-linecap="round"/>
 </svg>`;
 
 const pngs = [];
 for (const size of sizes) {
-  const svg = size <= 32 ? small : large;
+  const svg = size <= 24 ? small : large;
   const data = await sharp(Buffer.from(svg)).resize(size, size, { fit: 'contain' }).png().toBuffer();
   writeFileSync(join(outDir, `icon-${size}.png`), data);
   pngs.push({ size, data });

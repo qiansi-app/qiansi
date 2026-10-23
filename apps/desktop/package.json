@@ -1,7 +1,7 @@
 {
   "name": "@qiansi/desktop",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Qiansi desktop shell",
   "author": "Qiansi contributors",
   "main": "main.cjs",

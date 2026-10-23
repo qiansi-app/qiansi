@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 — 2026-10-23
+
+- New brand icon: a white silk loop with a teal-to-violet centre node, smooth rounded corners, and size-specific 16/20/24 px variants inside a multi-size `.ico`.
+- Decluttered the top bar: add, auto-layout, brush, file and discussion stay as icon tools; file library, model connections, run report, approvals, external agents, reset and settings move into a grouped “more” menu.
+- Counters for discussions, approvals and external sessions now appear as compact badges.
+
 ## 0.1.1 — 2026-10-23
 
 - New application icon: 1024 px master with smooth rounded corners, dedicated 16/20/24/32 px variants, and a multi-size `.ico` used by both NSIS and portable builds.
