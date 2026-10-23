@@ -14,37 +14,45 @@ const shared = `
 const large = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#10202b"/>
-      <stop offset="0.55" stop-color="#0b1118"/>
-      <stop offset="1" stop-color="#080a0f"/>
-    </linearGradient>
-    <radialGradient id="glow" cx="0.25" cy="0.2" r="0.8">
-      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0.18"/>
-      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="white" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#dbeafe"/>
-    </linearGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#5eead4"/>
-      <stop offset="1" stop-color="#a78bfa"/>
+      <stop offset="0" stop-color="#8db8f5"/>
+      <stop offset="0.55" stop-color="#b7a6f2"/>
+      <stop offset="1" stop-color="#f3b78e"/>
     </linearGradient>
   </defs>
-  <rect x="20" y="20" width="984" height="984" rx="232" fill="url(#bg)"/>
-  <rect x="20" y="20" width="984" height="984" rx="232" fill="url(#glow)"/>
-  <rect x="34" y="34" width="956" height="956" rx="220" fill="none" stroke="#ffffff" stroke-opacity="0.06" stroke-width="5"/>
-  <path d="M 512 512 C 430 368 238 368 238 512 C 238 656 430 656 512 512 C 594 368 786 368 786 512 C 786 656 594 656 512 512"
-    fill="none" stroke="url(#white)" stroke-width="112" stroke-linecap="round"/>
-  <circle cx="512" cy="512" r="58" fill="url(#accent)"/>
+  <rect x="16" y="16" width="992" height="992" rx="232" fill="url(#bg)"/>
+  <g fill="#101116">
+    <rect x="446" y="230" width="132" height="132" rx="34"/>
+    <rect x="264" y="628" width="132" height="132" rx="34"/>
+    <rect x="628" y="628" width="132" height="132" rx="34"/>
+  </g>
+  <g fill="none" stroke="#101116" stroke-width="42" stroke-linecap="round">
+    <path d="M512 362 L512 528"/>
+    <path d="M330 528 L694 528"/>
+    <path d="M330 528 L330 628"/>
+    <path d="M694 528 L694 628"/>
+  </g>
 </svg>`;
 
-// Small sizes drop the centre node, background glow and border so the white
-// infinity survives the downscale instead of collapsing into a grey blob.
 const small = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <rect x="16" y="16" width="992" height="992" rx="238" fill="#0b1118"/>
-  <path d="M 512 512 C 430 368 238 368 238 512 C 238 656 430 656 512 512 C 594 368 786 368 786 512 C 786 656 594 656 512 512"
-    fill="none" stroke="#ffffff" stroke-width="150" stroke-linecap="round"/>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8db8f5"/>
+      <stop offset="0.55" stop-color="#b7a6f2"/>
+      <stop offset="1" stop-color="#f3b78e"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="1000" height="1000" rx="238" fill="url(#bg)"/>
+  <g fill="#101116">
+    <rect x="432" y="208" width="160" height="160" rx="40"/>
+    <rect x="232" y="616" width="160" height="160" rx="40"/>
+    <rect x="632" y="616" width="160" height="160" rx="40"/>
+  </g>
+  <g fill="none" stroke="#101116" stroke-width="56" stroke-linecap="round">
+    <path d="M512 368 L512 520"/>
+    <path d="M312 520 L712 520"/>
+    <path d="M312 520 L312 616"/>
+    <path d="M712 520 L712 616"/>
+  </g>
 </svg>`;
 
 const pngs = [];

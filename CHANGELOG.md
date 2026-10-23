@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 — 2026-10-23
+
+- Final brand icon: blue-to-peach gradient squircle with a black orchestration tree (one orchestrator, two workers), rendered at 16–256 px plus a multi-size `.ico`.
+- Performance regions can now be resized by dragging any corner or edge handle; the new size is persisted with the canvas.
+- Region geometry moved from inline styles to React Flow node width/height, with a migration for canvases saved by older builds.
+
 ## 0.1.2 — 2026-10-23
 
 - New brand icon: a white silk loop with a teal-to-violet centre node, smooth rounded corners, and size-specific 16/20/24 px variants inside a multi-size `.ico`.

@@ -1,4 +1,4 @@
-import type { NodeProps } from '@xyflow/react';
+import { NodeResizer, type NodeProps } from '@xyflow/react';
 import { ArrowLeft, ArrowRight, ArrowRightLeft, Lock, Trash2 } from 'lucide-react';
 import type { AgentNodeData, RegionMode } from '../data/demoGraph';
 
@@ -39,27 +39,37 @@ export function RegionNode({ data, selected }: NodeProps) {
   const Icon = meta.icon;
 
   return (
-    <div className={`region-node ${meta.tone} ${selected ? 'selected' : ''}`}>
-      <div className="region-head">
-        <span className="region-icon">
-          <Icon size={12} />
-        </span>
-        <span className="region-name">{node.name}</span>
-        <span className="region-mode">{meta.label}</span>
-        <span className="region-hint">{meta.hint}</span>
-        {node.onDelete && (
-          <button
-            className="node-delete nodrag"
-            title="删除区域（不会删除区域内的节点）"
-            onClick={(event) => {
-              event.stopPropagation();
-              node.onDelete?.();
-            }}
-          >
-            <Trash2 size={11} />
-          </button>
-        )}
+    <>
+      <NodeResizer
+        minWidth={240}
+        minHeight={180}
+        isVisible={selected}
+        handleClassName="region-resize-handle"
+        lineClassName="region-resize-line"
+        color="#38d9c9"
+      />
+      <div className={`region-node ${meta.tone} ${selected ? 'selected' : ''}`}>
+        <div className="region-head">
+          <span className="region-icon">
+            <Icon size={12} />
+          </span>
+          <span className="region-name">{node.name}</span>
+          <span className="region-mode">{meta.label}</span>
+          <span className="region-hint">{meta.hint}</span>
+          {node.onDelete && (
+            <button
+              className="node-delete nodrag"
+              title="删除区域（不会删除区域内的节点）"
+              onClick={(event) => {
+                event.stopPropagation();
+                node.onDelete?.();
+              }}
+            >
+              <Trash2 size={11} />
+            </button>
+          )}
+        </div>
       </div>
-    </div>
+    </>
   );
 }

@@ -736,3 +736,16 @@
   .brand-sub { display: none; }
   .toolbar-stat { display: none; }
 }
+
+.region-resize-handle {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  border: 1px solid #06231f;
+  background: var(--cyan);
+  box-shadow: 0 0 0 2px rgba(4, 8, 10, 0.55);
+}
+.region-resize-line {
+  border-color: color-mix(in srgb, var(--cyan) 60%, transparent);
+  border-width: 1.5px;
+}

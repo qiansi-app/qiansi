@@ -190,9 +190,19 @@ export function App() {
         const canvas = data.canvas;
         if (!alive || !canvas || !Array.isArray(canvas.nodes) || canvas.nodes.length === 0) return;
 
-        const saved = canvas.nodes.filter(
-          (node) => node && node.id && node.id !== '__final__'
-        );
+        const saved = canvas.nodes
+          .filter((node) => node && node.id && node.id !== '__final__')
+          .map((node) => {
+            if (node.type !== 'region' || node.width || !node.style) return node;
+            const width = Number(node.style.width);
+            const height = Number(node.style.height);
+            return {
+              ...node,
+              width: Number.isFinite(width) ? width : undefined,
+              height: Number.isFinite(height) ? height : undefined,
+              style: undefined,
+            };
+          });
         const withLibrary = saved.some((node) => node.data?.isPublic)
           ? saved
           : [publicLibraryNode(), ...saved];
@@ -831,7 +841,8 @@ export function App() {
       id,
       type: 'region',
       position: topLeft,
-      style: { width, height },
+      width,
+      height,
       zIndex: 0,
       selectable: true,
       data: {
@@ -906,8 +917,8 @@ export function App() {
     const candidates = nodes
       .filter((item) => item.type === 'region' && !item.data.hidden && item.id !== node.id)
       .filter((region) => {
-        const width = Number(region.style?.width ?? 0);
-        const height = Number(region.style?.height ?? 0);
+        const width = Number(region.width ?? region.style?.width ?? 0);
+        const height = Number(region.height ?? region.style?.height ?? 0);
         return (
           center.x >= region.position.x &&
           center.x <= region.position.x + width &&
@@ -917,7 +928,8 @@ export function App() {
       })
       .sort((a, b) => {
         const area = (item: StudioNode) =>
-          Number(item.style?.width ?? 0) * Number(item.style?.height ?? 0);
+          Number(item.width ?? item.style?.width ?? 0) *
+          Number(item.height ?? item.style?.height ?? 0);
         return area(a) - area(b);
       });
     const target = candidates[0];
