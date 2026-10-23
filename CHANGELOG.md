@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4 — 2026-10-23
+
+- Added “清空画板” under More → System: removes every node, wire, message and run state after a confirmation. Model connections, settings and uploaded files are kept.
+- An intentionally empty canvas is now persisted and restored as empty instead of falling back to the starter graph.
+
 ## 0.1.3 — 2026-10-23
 
 - Final brand icon: blue-to-peach gradient squircle with a black orchestration tree (one orchestrator, two workers), rendered at 16–256 px plus a multi-size `.ico`.

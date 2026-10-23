@@ -147,6 +147,7 @@ export function App() {
   const [pendingDelete, setPendingDelete] = useState<{ ids: string[]; label: string } | null>(
     null
   );
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const rfRef = useRef<ReactFlowInstance<StudioNode, any> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const libraryFilesInput = useRef<HTMLInputElement | null>(null);
@@ -188,7 +189,13 @@ export function App() {
         };
         loaded = true;
         const canvas = data.canvas;
-        if (!alive || !canvas || !Array.isArray(canvas.nodes) || canvas.nodes.length === 0) return;
+        if (!alive || !canvas || !Array.isArray(canvas.nodes)) return;
+        if (canvas.nodes.length === 0) {
+          setNodes([]);
+          setEdges([]);
+          setOrchestratorId('');
+          return;
+        }
 
         const saved = canvas.nodes
           .filter((node) => node && node.id && node.id !== '__final__')
@@ -590,6 +597,32 @@ export function App() {
     setSelection(null);
     setPendingDelete(null);
     setToast(`已删除「${pendingDelete.label}」`);
+  };
+
+  const clearCanvas = () => {
+    runToken.current += 1;
+    setRunning(false);
+    setChoice(null);
+    resetRunState();
+    streamBuffers.current = {};
+    taskNodes.current = {};
+    setNodes([]);
+    setEdges([]);
+    setMessages({});
+    setSelection(null);
+    setSelectedIds([]);
+    setExternalTasks({});
+    externalTasksRef.current = {};
+    setExternalCalls([]);
+    externalCallsRef.current = [];
+    setExternalModalOpen(false);
+    setExternalFocus(null);
+    setArtifactTaskId(null);
+    setArtifactOverride(null);
+    setPendingDelete(null);
+    setClearConfirmOpen(false);
+    setOrchestratorId('');
+    setToast('画板已清空，可以从「添加模型」开始');
   };
 
   const autoLayout = async () => {
@@ -2175,6 +2208,7 @@ export function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenReport={() => setReportOpen(true)}
         onReset={resetAll}
+        onClearCanvas={() => setClearConfirmOpen(true)}
         hasReport={Boolean(runSummary)}
         approvalCount={pendingApprovals}
         onOpenApprovals={() => setApprovalsOpen(true)}
@@ -2449,6 +2483,15 @@ export function App() {
         detail="删除后与该节点相连的连线也会移除；区域内的节点会保留并移出区域。"
         onConfirm={confirmDelete}
         onCancel={() => setPendingDelete(null)}
+      />
+
+      <ConfirmDialog
+        open={clearConfirmOpen}
+        title="清空画板？"
+        detail="所有节点、连线、运行状态和对话记录会被移除；模型连接、设置和已上传的文件保留。"
+        confirmLabel="清空"
+        onConfirm={clearCanvas}
+        onCancel={() => setClearConfirmOpen(false)}
       />
 
       <input

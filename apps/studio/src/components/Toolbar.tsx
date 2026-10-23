@@ -3,6 +3,7 @@ import {
   Bot,
   Boxes,
   Brush,
+  Eraser,
   FileText,
   FolderOpen,
   Loader2,
@@ -33,6 +34,7 @@ interface ToolbarProps {
   onOpenSettings: () => void;
   onOpenReport: () => void;
   onReset: () => void;
+  onClearCanvas: () => void;
   approvalCount: number;
   onOpenApprovals: () => void;
   externalCount: number;
@@ -87,6 +89,7 @@ export function Toolbar({
   onOpenSettings,
   onOpenReport,
   onReset,
+  onClearCanvas,
   approvalCount,
   onOpenApprovals,
   externalCount,
@@ -250,6 +253,12 @@ export function Toolbar({
 
               <div className="toolbar-menu-section">系统</div>
               <MenuItem icon={RotateCcw} label="重置画布" onClick={menuAction(onReset)} />
+              <MenuItem
+                icon={Eraser}
+                label="清空画板"
+                hint="移除所有节点与连线"
+                onClick={menuAction(onClearCanvas)}
+              />
               <MenuItem icon={Settings} label="设置" onClick={menuAction(onOpenSettings)} />
             </div>
           )}
