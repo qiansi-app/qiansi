@@ -3,6 +3,7 @@ import {
   Bot,
   Boxes,
   Brush,
+  Download,
   Eraser,
   FileText,
   FolderOpen,
@@ -18,6 +19,7 @@ import {
   ShieldAlert,
   Sparkles,
   Square,
+  Target,
   Wand2,
 } from 'lucide-react';
 import type { RegionMode } from '../data/demoGraph';
@@ -36,7 +38,9 @@ interface ToolbarProps {
   onOpenReport: () => void;
   onReset: () => void;
   onClearCanvas: () => void;
+  onExport: () => void;
   onOpenWorkflow: () => void;
+  onAdapt: () => void;
   approvalCount: number;
   onOpenApprovals: () => void;
   externalCount: number;
@@ -92,7 +96,9 @@ export function Toolbar({
   onOpenReport,
   onReset,
   onClearCanvas,
+  onExport,
   onOpenWorkflow,
+  onAdapt,
   approvalCount,
   onOpenApprovals,
   externalCount,
@@ -150,6 +156,15 @@ export function Toolbar({
       <div className="toolbar-spacer" />
 
       <div className="toolbar-actions">
+        <button
+          className="icon-tool workflow-tool"
+          onClick={onAdapt}
+          title="一键适配：以当前会话模型为主控，自动准备编排"
+          aria-label="一键适配"
+        >
+          <Target size={16} />
+        </button>
+
         <button
           className="icon-tool workflow-tool"
           onClick={onOpenWorkflow}
@@ -233,6 +248,12 @@ export function Toolbar({
                 label="文件库"
                 hint="批量文件与文件夹"
                 onClick={menuAction(onAddLibrary)}
+              />
+              <MenuItem
+                icon={Download}
+                label="导出画布"
+                hint="独立网页，可直接分享"
+                onClick={menuAction(onExport)}
               />
 
               <div className="toolbar-menu-section">面板</div>

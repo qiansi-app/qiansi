@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { FolderOpen, Loader2, Paperclip, Sparkles, X } from 'lucide-react';
 import type { LibraryFile } from '../data/demoGraph';
 import type { ModelDraft } from '../data/models';
+import { workflowTemplates } from '../data/templates';
 
 export interface WorkflowNodePlan {
   id: string;
@@ -145,6 +146,19 @@ export function WorkflowModal({
         <div className="workflow-body">
           <div className="workflow-field">
             <label>任务目标</label>
+            <div className="workflow-templates">
+              {workflowTemplates.map((template) => (
+                <button
+                  key={template.id}
+                  type="button"
+                  className="btn ghost workflow-template"
+                  title={template.hint}
+                  onClick={() => setGoal(template.goal)}
+                >
+                  {template.title}
+                </button>
+              ))}
+            </div>
             <textarea
               value={goal}
               onChange={(event) => setGoal(event.target.value)}

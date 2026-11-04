@@ -12,6 +12,8 @@ export interface AppSettings {
   maxTokensPerMinute: number;
   showArtifacts: boolean;
   showTasks: boolean;
+  /** Sending a message to the orchestrator starts a full orchestrated run. */
+  autoOrchestrate: boolean;
 }
 
 export const defaultSettings: AppSettings = {
@@ -24,6 +26,7 @@ export const defaultSettings: AppSettings = {
   maxTokensPerMinute: 20000,
   showArtifacts: true,
   showTasks: true,
+  autoOrchestrate: true,
 };
 
 const STORAGE_KEY = 'qiansi.settings';

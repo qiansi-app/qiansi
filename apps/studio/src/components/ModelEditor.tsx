@@ -1,13 +1,31 @@
 import { useEffect, useState } from 'react';
 import type { ToolCapability } from '@qiansi/engine';
-import { Check, FlaskConical, Plus, ShieldAlert, ShieldCheck, X } from 'lucide-react';
-import { initialModels, toolLabels, type ConnectionStatus, type ModelDraft } from '../data/models';
+import { Check, Download, FlaskConical, Plus, RefreshCw, ShieldAlert, ShieldCheck, X } from 'lucide-react';
+import {
+  PROVIDER_PRESETS,
+  catalogOf,
+  initialModels,
+  preferredModel,
+  toolLabels,
+  type ConnectionStatus,
+  type ModelDraft,
+} from '../data/models';
 
 interface ModelEditorProps {
   open: boolean;
   models: ModelDraft[];
   onChange: (models: ModelDraft[]) => void;
   onClose: () => void;
+  /** Applies each connection's cheapest capable model to every canvas node. */
+  onApplyPreferred?: (models: ModelDraft[]) => void | Promise<void>;
+}
+
+interface CcProvider {
+  id: string;
+  name: string;
+  baseUrl: string;
+  protocol: string;
+  isCurrent: boolean;
 }
 
 const statusText: Record<ConnectionStatus, string> = {
@@ -19,15 +37,43 @@ const statusText: Record<ConnectionStatus, string> = {
 
 const toolKeys = Object.keys(toolLabels) as ToolCapability[];
 
-export function ModelEditor({ open, models, onChange, onClose }: ModelEditorProps) {
+export function ModelEditor({ open, models, onChange, onClose, onApplyPreferred }: ModelEditorProps) {
   const [drafts, setDrafts] = useState<ModelDraft[]>(models);
   const [selectedId, setSelectedId] = useState(models[0]?.id ?? '');
   const [vaultRefs, setVaultRefs] = useState<string[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshNote, setRefreshNote] = useState('');
+
+  // cc-switch style onboarding: provider → key → official model catalog → pick.
+  const [creating, setCreating] = useState(false);
+  const [presetKey, setPresetKey] = useState(PROVIDER_PRESETS[0].key);
+  const [newLabel, setNewLabel] = useState(PROVIDER_PRESETS[0].label);
+  const [newProvider, setNewProvider] = useState(PROVIDER_PRESETS[0].provider);
+  const [newProtocol, setNewProtocol] = useState<'openai-chat' | 'anthropic-messages'>(
+    PROVIDER_PRESETS[0].protocol
+  );
+  const [newBaseUrl, setNewBaseUrl] = useState(PROVIDER_PRESETS[0].baseUrl);
+  const [newKey, setNewKey] = useState('');
+  const [fetchState, setFetchState] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
+  const [fetchError, setFetchError] = useState('');
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [chosen, setChosen] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState('');
+  const [createError, setCreateError] = useState('');
+
+  // CC Switch import.
+  const [importOpen, setImportOpen] = useState(false);
+  const [ccProviders, setCcProviders] = useState<CcProvider[]>([]);
+  const [ccSelected, setCcSelected] = useState<Set<string>>(new Set());
+  const [ccState, setCcState] = useState<'idle' | 'loading' | 'importing' | 'error'>('idle');
+  const [ccMessage, setCcMessage] = useState('');
 
   useEffect(() => {
     if (open) {
       setDrafts(models);
       setSelectedId(models[0]?.id ?? '');
+      setCreating(false);
+      setImportOpen(false);
       fetch('/api/vault/status')
         .then((response) => response.json())
         .then((data: { refs?: string[] }) => setVaultRefs(data.refs ?? []))
@@ -46,22 +92,240 @@ export function ModelEditor({ open, models, onChange, onClose }: ModelEditorProp
     );
   };
 
-  const addModel = () => {
-    const id = `conn-${crypto.randomUUID().slice(0, 6)}`;
-    const next: ModelDraft = {
-      ...initialModels[0]!,
+  const resetCreate = () => {
+    setFetchState('idle');
+    setFetchError('');
+    setFetchedModels([]);
+    setChosen(new Set());
+    setFilter('');
+    setNewKey('');
+    setCreateError('');
+  };
+
+  const pickPreset = (key: string) => {
+    const preset = PROVIDER_PRESETS.find((item) => item.key === key) ?? PROVIDER_PRESETS[0];
+    setPresetKey(preset.key);
+    setNewLabel(preset.label);
+    setNewProvider(preset.provider);
+    setNewProtocol(preset.protocol);
+    setNewBaseUrl(preset.baseUrl);
+    setFetchState('idle');
+    setFetchedModels([]);
+    setChosen(new Set());
+    setFetchError('');
+  };
+
+  /** Pull the official catalog straight from the provider with this key. */
+  const fetchCatalog = async () => {
+    if (!newKey.trim() && !newBaseUrl.trim()) {
+      setFetchError('先粘贴 API Key');
+      return;
+    }
+    setFetchState('loading');
+    setFetchError('');
+    try {
+      const response = await fetch('/api/connections/models', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          protocol: newProtocol,
+          baseUrl: newBaseUrl,
+          apiKey: newKey.trim(),
+        }),
+      });
+      const data = (await response.json()) as {
+        ok?: boolean;
+        models?: string[];
+        error?: string;
+      };
+      if (!response.ok || !data.ok || !data.models?.length) {
+        throw new Error(data.error ?? '没有拿到模型列表');
+      }
+      setFetchedModels(data.models);
+      setChosen(new Set(data.models.slice(0, Math.min(8, data.models.length))));
+      setFetchState('ok');
+    } catch (error) {
+      setFetchState('error');
+      setFetchError(error instanceof Error ? error.message : '拉取失败');
+    }
+  };
+
+  const createConnection = async () => {
+    const chosenList = [...chosen];
+    if (!chosenList.length) {
+      setCreateError('至少勾选一个模型');
+      return;
+    }
+    if (!newBaseUrl.trim()) {
+      setCreateError('先填 Base URL');
+      return;
+    }
+    // Known presets own a deterministic ref so live runs can route by model to
+    // this key slot; custom endpoints get a random ref. A second connection to
+    // the same provider gets a suffixed ref and keeps working through the
+    // gateway, just not as the slot default.
+    const slotId = presetKey === 'custom' ? '' : `conn-${presetKey}`;
+    const taken = slotId ? drafts.some((item) => item.id === slotId) : false;
+    const id = taken
+      ? `conn-${presetKey}-${crypto.randomUUID().slice(0, 4)}`
+      : slotId || `conn-custom-${crypto.randomUUID().slice(0, 6)}`;
+    const draft: ModelDraft = {
       id,
-      label: '新模型连接',
-      provider: 'Custom',
-      baseUrl: 'https://api.example.com/v1',
-      model: '',
+      label: newLabel.trim() || '新连接',
+      provider: newProvider.trim() || 'Custom',
+      protocol: newProtocol,
+      baseUrl: newBaseUrl.trim(),
+      model: chosenList[0]!,
+      models: chosenList,
       apiKey: '',
       status: 'untested',
       tools: ['fs.read'],
-      note: undefined,
+      approval: 'always',
+      note: '官方模型目录已拉取；key 已存入 Windows DPAPI 保险库。',
     };
-    setDrafts((current) => [...current, next]);
+    if (newKey.trim()) {
+      try {
+        const response = await fetch('/api/vault/set', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ref: id, value: newKey.trim() }),
+        });
+        if (!response.ok) throw new Error('vault save failed');
+        setVaultRefs((current) => [...current, id]);
+      } catch {
+        setCreateError('Key 存入保险库失败，请确认本地服务已启动');
+        return;
+      }
+    }
+    setDrafts((current) => [...current, draft]);
     setSelectedId(id);
+    setCreating(false);
+    resetCreate();
+  };
+
+  const openImport = async () => {
+    setImportOpen(true);
+    setCcState('loading');
+    setCcMessage('');
+    try {
+      const response = await fetch('/api/connections/ccswitch');
+      const data = (await response.json()) as { ok?: boolean; providers?: CcProvider[]; error?: string };
+      if (!response.ok || !data.ok) throw new Error(data.error ?? '读取失败');
+      const known = new Set(drafts.map((item) => item.baseUrl));
+      setCcProviders(data.providers ?? []);
+      setCcSelected(new Set((data.providers ?? []).filter((p) => !known.has(p.baseUrl)).map((p) => p.id)));
+      setCcState('idle');
+    } catch (error) {
+      setCcState('error');
+      setCcMessage(error instanceof Error ? error.message : '读取 CC Switch 失败');
+    }
+  };
+
+  const importFromCc = async () => {
+    setCcState('importing');
+    try {
+      const response = await fetch('/api/connections/ccswitch/import', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ids: [...ccSelected] }),
+      });
+      const data = (await response.json()) as {
+        ok?: boolean;
+        imported?: ModelDraft[];
+        failed?: string[];
+        error?: string;
+      };
+      if (!response.ok || !data.ok) throw new Error(data.error ?? '导入失败');
+      const imported = (data.imported ?? []).map((item) => ({ ...item, apiKey: '' }));
+      setDrafts((current) => [...current, ...imported]);
+      setVaultRefs((current) => [...current, ...imported.map((item) => item.id)]);
+      setImportOpen(false);
+      setCcState('idle');
+      if (imported[0]) setSelectedId(imported[0].id);
+    } catch (error) {
+      setCcState('error');
+      setCcMessage(error instanceof Error ? error.message : '导入失败');
+    }
+  };
+
+  /** Refresh the catalog of an existing connection from the provider itself. */
+  const refreshCatalog = async (draft: ModelDraft) => {
+    update({ status: 'testing' });
+    try {
+      const response = await fetch('/api/connections/models', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          protocol: draft.protocol,
+          baseUrl: draft.baseUrl,
+          connectionId: draft.id,
+        }),
+      });
+      const data = (await response.json()) as { ok?: boolean; models?: string[]; error?: string };
+      if (!response.ok || !data.ok || !data.models?.length) {
+        throw new Error(data.error ?? '没有拿到模型列表');
+      }
+      const merged = [...new Set([...data.models, ...catalogOf(draft)])];
+      update({
+        models: merged,
+        status: 'ok',
+        note: `官方模型目录已更新（${merged.length} 个）`,
+      });
+    } catch (error) {
+      update({
+        status: 'fail',
+        note: error instanceof Error ? error.message : '拉取模型失败',
+      });
+    }
+  };
+
+  /** Pull every configured key's real catalog in one go. */
+  const refreshAllCatalogs = async () => {
+    setRefreshing(true);
+    setRefreshNote('');
+    try {
+      const response = await fetch('/api/models/refresh', { method: 'POST' });
+      const data = (await response.json()) as {
+        ok?: boolean;
+        catalogs?: Record<string, { models?: string[]; baseUrl?: string }>;
+        error?: string;
+      };
+      if (!response.ok || !data.ok) throw new Error(data.error ?? '刷新失败');
+      const catalogs = data.catalogs ?? {};
+      const hostOf = (url: string) => {
+        try {
+          return new URL(url).host;
+        } catch {
+          return url;
+        }
+      };
+      // The cache is keyed by key-slot ref; a connection may use a different id
+      // for the same provider, so fall back to matching the host.
+      const cachedFor = (draft: ModelDraft) =>
+        catalogs[draft.id] ??
+        catalogs[draft.baseUrl] ??
+        Object.values(catalogs).find((entry) => hostOf(entry.baseUrl ?? '') === hostOf(draft.baseUrl));
+      let updated = 0;
+      setDrafts((current) =>
+        current.map((draft) => {
+          const cached = cachedFor(draft);
+          if (!cached?.models?.length) return draft;
+          updated += 1;
+          const models = [...new Set([...cached.models, ...catalogOf(draft)])];
+          return {
+            ...draft,
+            models,
+            model: models.includes(draft.model) ? draft.model : preferredModel(models),
+            note: `官方目录已更新（${cached.models.length} 个模型）`,
+          };
+        })
+      );
+      setRefreshNote(`已更新 ${updated} 个连接`);
+    } catch (error) {
+      setRefreshNote(error instanceof Error ? error.message : '刷新失败');
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   const testConnection = async () => {
@@ -130,6 +394,9 @@ export function ModelEditor({ open, models, onChange, onClose }: ModelEditorProp
   };
 
   const risky = selected?.tools.some((tool) => toolLabels[tool]?.risky) ?? false;
+  const visibleFetched = fetchedModels.filter((model) =>
+    filter.trim() ? model.toLowerCase().includes(filter.trim().toLowerCase()) : true
+  );
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -144,7 +411,7 @@ export function ModelEditor({ open, models, onChange, onClose }: ModelEditorProp
           <div>
             <div className="modal-title">模型连接</div>
             <div className="modal-sub">
-              身份可编辑 · Key 只进保险库 · 连接前先做首连探测
+              先给 Key，再自动拉取它能调用的官方模型 · Key 只进保险库
             </div>
           </div>
           <button className="btn ghost" onClick={onClose}>
@@ -153,12 +420,36 @@ export function ModelEditor({ open, models, onChange, onClose }: ModelEditorProp
         </div>
 
         <div className="modal-body">
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+            <button
+              className="mini-btn"
+              onClick={() => void refreshAllCatalogs()}
+              disabled={refreshing}
+              title="从每个已配置的 Key 拉取官方模型目录"
+            >
+              {refreshing ? <RefreshCw size={12} className="spin" /> : <Download size={12} />}
+              {refreshing ? '刷新中…' : '刷新全部目录'}
+            </button>
+            {onApplyPreferred && (
+              <button
+                className="mini-btn"
+                onClick={() => onApplyPreferred(drafts)}
+                title="每个节点换成它那把 Key 里最便宜/最快的一档"
+              >
+                把画布节点换成推荐模型
+              </button>
+            )}
+            {refreshNote && <span className="field-hint">{refreshNote}</span>}
+          </div>
           <div className="model-list">
             {drafts.map((model) => (
               <button
                 key={model.id}
-                className={`model-item ${model.id === selectedId ? 'active' : ''}`}
-                onClick={() => setSelectedId(model.id)}
+                className={`model-item ${model.id === selectedId && !creating ? 'active' : ''}`}
+                onClick={() => {
+                  setCreating(false);
+                  setSelectedId(model.id);
+                }}
               >
                 <span className="model-item-name">{model.label}</span>
                 <span className={`model-item-status ${model.status}`}>
@@ -166,12 +457,156 @@ export function ModelEditor({ open, models, onChange, onClose }: ModelEditorProp
                 </span>
               </button>
             ))}
-            <button className="model-add" onClick={addModel}>
+            <button
+              className="model-add"
+              onClick={() => {
+                setCreating(true);
+                setSelectedId('');
+                resetCreate();
+                pickPreset(PROVIDER_PRESETS[0].key);
+              }}
+            >
               <Plus size={12} /> 新连接
+            </button>
+            <button className="model-add" onClick={openImport}>
+              <Download size={12} /> 从 CC Switch 导入
             </button>
           </div>
 
-          {selected && (
+          {creating && (
+            <div className="model-form">
+              <div className="section-label">1 · 选择供应商</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+                {PROVIDER_PRESETS.map((preset) => (
+                  <button
+                    key={preset.key}
+                    className={`btn ${presetKey === preset.key ? 'primary' : 'ghost'}`}
+                    onClick={() => pickPreset(preset.key)}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="field">
+                <label>Base URL</label>
+                <input
+                  value={newBaseUrl}
+                  onChange={(event) => setNewBaseUrl(event.target.value)}
+                  placeholder="https://api.deepseek.com/v1"
+                />
+              </div>
+
+              <div className="field">
+                <label>2 · 粘贴 API Key</label>
+                <input
+                  type="password"
+                  value={newKey}
+                  onChange={(event) => setNewKey(event.target.value)}
+                  placeholder="粘贴后点「拉取官方模型」"
+                  autoComplete="off"
+                />
+                <div className="field-hint">
+                  先给 Key，再自动列出它能调用的官方模型；Key 只写入 Windows DPAPI 保险库。
+                </div>
+              </div>
+
+              <div className="probe-row">
+                <button
+                  className="btn"
+                  onClick={fetchCatalog}
+                  disabled={fetchState === 'loading' || !newKey.trim()}
+                >
+                  {fetchState === 'loading' ? (
+                    <RefreshCw size={13} className="spin" />
+                  ) : (
+                    <Download size={13} />
+                  )}
+                  {fetchState === 'loading' ? '拉取中…' : '拉取官方模型'}
+                </button>
+                {fetchState === 'ok' && (
+                  <span className="probe-result ok">
+                    <Check size={12} /> 拿到 {fetchedModels.length} 个模型
+                  </span>
+                )}
+                {fetchState === 'error' && (
+                  <span className="probe-result fail">{fetchError}</span>
+                )}
+              </div>
+
+              {fetchState === 'ok' && (
+                <>
+                  <div className="section-label">3 · 选择要纳入目录的模型</div>
+                  <input
+                    value={filter}
+                    onChange={(event) => setFilter(event.target.value)}
+                    placeholder="筛选模型…"
+                    style={{ width: '100%', marginBottom: 6 }}
+                  />
+                  <div
+                    style={{
+                      maxHeight: 180,
+                      overflow: 'auto',
+                      border: '1px solid var(--border)',
+                      borderRadius: 8,
+                      padding: 6,
+                    }}
+                  >
+                    {visibleFetched.map((model) => (
+                      <label key={model} className="tool-item" style={{ display: 'flex', gap: 6 }}>
+                        <input
+                          type="checkbox"
+                          checked={chosen.has(model)}
+                          onChange={() =>
+                            setChosen((current) => {
+                              const next = new Set(current);
+                              if (next.has(model)) next.delete(model);
+                              else next.add(model);
+                              return next;
+                            })
+                          }
+                        />
+                        <span>{model}</span>
+                      </label>
+                    ))}
+                    {!visibleFetched.length && (
+                      <div className="field-hint">没有匹配的模型</div>
+                    )}
+                  </div>
+                  <div className="probe-row">
+                    <button
+                      className="mini-btn"
+                      onClick={() => setChosen(new Set(visibleFetched))}
+                    >
+                      全选当前
+                    </button>
+                    <button className="mini-btn" onClick={() => setChosen(new Set())}>
+                      清空
+                    </button>
+                    <span className="field-hint">已选 {chosen.size} 个</span>
+                  </div>
+                </>
+              )}
+
+              <div className="field" style={{ marginTop: 10 }}>
+                <label>连接名称</label>
+                <input value={newLabel} onChange={(event) => setNewLabel(event.target.value)} />
+              </div>
+
+              {createError && <div className="field-hint" style={{ color: '#f87171' }}>{createError}</div>}
+
+              <div className="probe-row">
+                <button className="btn primary" onClick={createConnection} disabled={!chosen.size}>
+                  <Plus size={13} /> 添加连接
+                </button>
+                <button className="btn ghost" onClick={() => setCreating(false)}>
+                  取消
+                </button>
+              </div>
+            </div>
+          )}
+
+          {!creating && selected && (
             <div className="model-form">
               <div className="field">
                 <label>显示名</label>
@@ -214,12 +649,46 @@ export function ModelEditor({ open, models, onChange, onClose }: ModelEditorProp
               </div>
 
               <div className="field">
-                <label>Model ID</label>
-                <input
+                <label>主模型（节点默认用它）</label>
+                <select
                   value={selected.model}
                   onChange={(event) => update({ model: event.target.value })}
-                  placeholder="deepseek-reasoner"
+                >
+                  {catalogOf(selected).map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                  {selected.model && !catalogOf(selected).includes(selected.model) && (
+                    <option value={selected.model}>{selected.model}（不在目录里）</option>
+                  )}
+                </select>
+              </div>
+
+              <div className="field">
+                <label>该 Key 可调用的模型目录（每行一个）</label>
+                <textarea
+                  value={(selected.models ?? catalogOf(selected)).join('\n')}
+                  onChange={(event) => {
+                    const models = event.target.value
+                      .split(/\r?\n|,/)
+                      .map((item) => item.trim())
+                      .filter(Boolean);
+                    update({
+                      models,
+                      model: models.includes(selected.model) ? selected.model : (models[0] ?? ''),
+                    });
+                  }}
+                  placeholder={'deepseek-reasoner\ndeepseek-chat'}
+                  rows={4}
                 />
+                <button
+                  className="mini-btn"
+                  style={{ marginTop: 6 }}
+                  onClick={() => void refreshCatalog(selected)}
+                >
+                  <Download size={12} /> 从供应商拉取官方模型
+                </button>
               </div>
 
               <div className="field">
@@ -305,10 +774,59 @@ export function ModelEditor({ open, models, onChange, onClose }: ModelEditorProp
               {selected.note && <div className="field-hint">{selected.note}</div>}
             </div>
           )}
+
+          {importOpen && (
+            <div className="model-form">
+              <div className="section-label">从 CC Switch 导入供应商</div>
+              {ccState === 'loading' && <div className="field-hint">读取中…</div>}
+              {ccState === 'error' && <div className="probe-result fail">{ccMessage}</div>}
+              {ccState !== 'loading' && (
+                <>
+                  {ccProviders.map((provider) => (
+                    <label key={provider.id} className="tool-item" style={{ display: 'flex', gap: 6 }}>
+                      <input
+                        type="checkbox"
+                        checked={ccSelected.has(provider.id)}
+                        onChange={() =>
+                          setCcSelected((current) => {
+                            const next = new Set(current);
+                            if (next.has(provider.id)) next.delete(provider.id);
+                            else next.add(provider.id);
+                            return next;
+                          })
+                        }
+                      />
+                      <span>
+                        {provider.name}
+                        <small>{provider.baseUrl}</small>
+                      </span>
+                    </label>
+                  ))}
+                  {!ccProviders.length && (
+                    <div className="field-hint">没有读到可导入的供应商（需要 CC Switch 里已保存 Key）。</div>
+                  )}
+                  <div className="probe-row">
+                    <button
+                      className="btn primary"
+                      onClick={() => void importFromCc()}
+                      disabled={!ccSelected.size || ccState === 'importing'}
+                    >
+                      <Download size={13} /> {ccState === 'importing' ? '导入中…' : '导入所选'}
+                    </button>
+                    <button className="btn ghost" onClick={() => setImportOpen(false)}>
+                      取消
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="modal-foot">
-          <span className="modal-foot-hint">身份与能力分离：改连接会影响引用它的节点。</span>
+          <span className="modal-foot-hint">
+            身份与能力分离：改连接会影响引用它的节点；节点可单独选该 Key 下的任意模型。
+          </span>
           <button className="btn ghost" onClick={onClose}>
             取消
           </button>

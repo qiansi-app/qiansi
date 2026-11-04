@@ -8,6 +8,7 @@ import {
   Power,
   Send,
   Settings2,
+  Sparkles,
   X,
 } from 'lucide-react';
 import type { AppSettings } from '../data/settings';
@@ -134,6 +135,24 @@ export function SettingsModal({ open, settings, onChange, onClose }: SettingsMod
                       const bridge = api.qiansi ?? api.agentweave;
                       void bridge?.setAutostart?.(enabled);
                     }}
+                  />
+                </div>
+
+                <div className="setting-row">
+                  <div>
+                    <div className="setting-title">
+                      <Sparkles size={13} /> 自动编排
+                    </div>
+                    <div className="setting-desc">
+                      向主控发消息时直接开始一次完整编排：主控拆解 → 分派 → 各节点执行 → 验收。
+                      关闭后主控只做单节点对话。
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    className="switch"
+                    checked={settings.autoOrchestrate}
+                    onChange={(event) => set({ autoOrchestrate: event.target.checked })}
                   />
                 </div>
 

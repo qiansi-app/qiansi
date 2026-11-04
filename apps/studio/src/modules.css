@@ -767,6 +767,8 @@
 .workflow-sub { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
 .workflow-body { padding: 16px 18px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
 .workflow-field label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 11px; }
+.workflow-templates { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.workflow-template { font-size: 11px; padding: 4px 10px; height: auto; }
 .workflow-field textarea,
 .workflow-field select {
   width: 100%;

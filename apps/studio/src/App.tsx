@@ -18,11 +18,12 @@ import { NodeInspector } from './components/NodeInspector';
 import { ApprovalsModal } from './components/ApprovalsModal';
 import { ArtifactModal } from './components/ArtifactModal';
 import { ExternalModal } from './components/ExternalModal';
+import { RunProgress } from './components/RunProgress';
 import { RunReport } from './components/RunReport';
 import { SettingsModal } from './components/SettingsModal';
 import { Toolbar } from './components/Toolbar';
 import { WorkflowModal, type WorkflowPlan } from './components/WorkflowModal';
-import { initialModels, type ModelDraft } from './data/models';
+import { catalogOf, initialModels, preferredModel, type ModelDraft } from './data/models';
 import { loadSettings, saveSettings, type AppSettings } from './data/settings';
 import { layeredLayout } from './data/layout';
 import {
@@ -118,6 +119,10 @@ export function App() {
   const [selection, setSelection] = useState<Selection>(null);
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>(seedMessages);
   const [running, setRunning] = useState(false);
+  const runningRef = useRef(false);
+  /** True while a run started elsewhere (an agent over MCP) is in flight. */
+  const [externalRun, setExternalRun] = useState(false);
+  const externalRunRef = useRef(false);
   const [choice, setChoice] = useState<Choice | null>(null);
   const [models, setModels] = useState<ModelDraft[]>(initialModels);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -159,6 +164,11 @@ export function App() {
   const libraryTarget = useRef<string | null>(null);
   const brushStart = useRef<{ x: number; y: number } | null>(null);
   const canvasReady = useRef(false);
+  const [canvasLoaded, setCanvasLoaded] = useState(false);
+  const canvasRevision = useRef(0);
+  const remoteApplying = useRef(false);
+  /** True while local edits have not reached the server yet. */
+  const dirty = useRef(false);
   const runToken = useRef(0);
   const streamBuffers = useRef<Record<string, string>>({});
   const taskNodes = useRef<Record<string, string>>({});
@@ -172,35 +182,21 @@ export function App() {
   const edgesRef = useRef<Edge[]>(edges);
   const settingsRef = useRef<AppSettings>(settings);
 
-  useEffect(() => {
-    void fetch('/api/bootstrap').catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
-    let alive = true;
-    void (async () => {
-      let loaded = false;
-      try {
-        await fetch('/api/bootstrap');
-        const response = await fetch('/api/canvas');
-        if (!response.ok) return;
-        const data = (await response.json()) as {
-          canvas?: {
-            nodes?: StudioNode[];
-            edges?: Edge[];
-            orchestratorId?: string;
-          } | null;
-        };
-        loaded = true;
-        const canvas = data.canvas;
-        if (!alive || !canvas || !Array.isArray(canvas.nodes)) return;
+  /**
+   * Replaces the whole board from a server snapshot. Used on first load, on a
+   * 409 conflict, and by the reverse-sync poller, so agent edits land in the
+   * canvas without a reload.
+   */
+  const applyRemoteCanvas = useMemo(
+    () =>
+      (canvas: { nodes?: StudioNode[]; edges?: Edge[]; orchestratorId?: string } | null) => {
+        if (!canvas || !Array.isArray(canvas.nodes)) return;
         if (canvas.nodes.length === 0) {
           setNodes([]);
           setEdges([]);
           setOrchestratorId('');
           return;
         }
-
         const saved = canvas.nodes
           .filter((node) => node && node.id && node.id !== '__final__')
           .map((node) => {
@@ -220,23 +216,84 @@ export function App() {
         const savedIds = new Set(withLibrary.map((node) => node.id));
         setNodes((current) => [
           ...withLibrary,
-          ...current.filter((node) => node.id.startsWith('ext-') && !savedIds.has(node.id)),
+          // keep the run-time placeholders: the final artifact card and any live
+          // external-agent nodes are ours, not the saved document's
+          ...current.filter(
+            (node) =>
+              node.id === '__final__' ||
+              (node.id.startsWith('ext-') && !savedIds.has(node.id))
+          ),
         ]);
-        setEdges((canvas.edges ?? []).filter((edge) => edge.id !== '__final-edge'));
+        setEdges((current) => [
+          ...(canvas.edges ?? []).filter((edge) => edge.id !== '__final-edge'),
+          ...current.filter((edge) => edge.id === '__final-edge'),
+        ]);
         if (canvas.orchestratorId) setOrchestratorId(canvas.orchestratorId);
+      },
+    [setNodes, setEdges]
+  );
+
+  useEffect(() => {
+    void fetch('/api/bootstrap').catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    runningRef.current = running;
+  }, [running]);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      let loaded = false;
+      try {
+        await fetch('/api/bootstrap');
+        const response = await fetch('/api/canvas');
+        if (!response.ok) return;
+        const data = (await response.json()) as {
+          canvas?: {
+            nodes?: StudioNode[];
+            edges?: Edge[];
+            orchestratorId?: string;
+          } | null;
+          revision?: number;
+        };
+        loaded = true;
+        canvasRevision.current = Number(data.revision) || 0;
+        if (!alive || !data.canvas || !Array.isArray(data.canvas.nodes)) return;
+        applyRemoteCanvas(data.canvas);
       } catch {
         // server unavailable: keep the starter graph and do not overwrite a saved canvas
       } finally {
-        if (loaded) canvasReady.current = true;
+        if (loaded) {
+          canvasReady.current = true;
+          setCanvasLoaded(true);
+        }
       }
     })();
     return () => {
       alive = false;
     };
-  }, []);
+  }, [applyRemoteCanvas]);
+
+  /**
+   * Opening the app should show the whole board, not wherever it happened to be
+   * panned last time. Only on the first load — never on the reverse-sync poll.
+   */
+  useEffect(() => {
+    if (!canvasLoaded) return;
+    const timer = window.setTimeout(() => {
+      void fitView({ padding: 0.2, duration: 300 });
+    }, 260);
+    return () => window.clearTimeout(timer);
+  }, [canvasLoaded, fitView]);
 
   useEffect(() => {
     if (!canvasReady.current) return;
+    if (remoteApplying.current) {
+      remoteApplying.current = false;
+      return;
+    }
+    dirty.current = true;
     const timer = window.setTimeout(() => {
       const nodesPayload = nodes
         .filter((node) => node.id !== '__final__')
@@ -258,14 +315,199 @@ export function App() {
           ...edge,
           data: edge.data ? { ...(edge.data as Record<string, unknown>), onOpen: undefined } : edge.data,
         }));
-      void fetch('/api/canvas', {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ orchestratorId, nodes: nodesPayload, edges: edgesPayload }),
-      }).catch(() => undefined);
+      void (async () => {
+        try {
+          const response = await fetch('/api/canvas', {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              orchestratorId,
+              nodes: nodesPayload,
+              edges: edgesPayload,
+              revision: canvasRevision.current,
+            }),
+          });
+          const data = (await response.json().catch(() => null)) as {
+            revision?: number;
+            canvas?: { nodes?: StudioNode[]; edges?: Edge[]; orchestratorId?: string } | null;
+          } | null;
+          if (response.status === 409) {
+            // Someone else wrote while we were editing. Merge instead of
+            // choosing a winner: keep our board, adopt nodes we never had, and
+            // retry against the server's revision.
+            const serverRevision = Number(data?.revision) || 0;
+            const serverCanvas = data?.canvas ?? null;
+            const serverNodes = Array.isArray(serverCanvas?.nodes) ? serverCanvas.nodes : [];
+            const serverEdges = Array.isArray(serverCanvas?.edges) ? serverCanvas.edges : [];
+            const localIds = new Set(nodesPayload.map((node) => node.id));
+            const localEdgeIds = new Set(edgesPayload.map((edge) => edge.id));
+            const mergedNodes = [
+              ...serverNodes.filter((node) => !localIds.has(node.id)),
+              ...nodesPayload,
+            ];
+            const mergedEdges = [
+              ...serverEdges.filter((edge) => !localEdgeIds.has(edge.id)),
+              ...edgesPayload,
+            ];
+            canvasRevision.current = serverRevision;
+            let merged = false;
+            try {
+              const retry = await fetch('/api/canvas', {
+                method: 'PUT',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                  orchestratorId,
+                  nodes: mergedNodes,
+                  edges: mergedEdges,
+                  revision: serverRevision,
+                }),
+              });
+              const retryData = (await retry.json().catch(() => null)) as {
+                revision?: number;
+              } | null;
+              merged = retry.ok && typeof retryData?.revision === 'number';
+              if (merged) canvasRevision.current = retryData!.revision!;
+            } catch {
+              merged = false;
+            }
+            if (merged) {
+              dirty.current = false;
+              setToast('已合并外部改动，保留了你当前的编辑');
+              // pull the merged document so nodes the agent added appear
+              const fresh = (await fetch('/api/canvas')
+                .then((response) => response.json())
+                .catch(() => null)) as {
+                canvas?: { nodes?: StudioNode[]; edges?: Edge[]; orchestratorId?: string } | null;
+                revision?: number;
+              } | null;
+              if (fresh?.canvas && typeof fresh.revision === 'number') {
+                canvasRevision.current = fresh.revision;
+                remoteApplying.current = true;
+                window.setTimeout(() => {
+                  remoteApplying.current = false;
+                }, 250);
+                applyRemoteCanvas(fresh.canvas);
+              }
+            } else {
+              canvasRevision.current = serverRevision;
+              remoteApplying.current = true;
+              window.setTimeout(() => {
+                remoteApplying.current = false;
+              }, 250);
+              applyRemoteCanvas(serverCanvas);
+              setToast('画布已被外部修改，已同步');
+            }
+            return;
+          }
+          if (response.ok && typeof data?.revision === 'number') {
+            canvasRevision.current = data.revision;
+            dirty.current = false;
+          }
+        } catch {
+          // offline: the next edit retries
+        }
+      })();
     }, 800);
     return () => window.clearTimeout(timer);
-  }, [nodes, edges, orchestratorId]);
+  }, [nodes, edges, orchestratorId, applyRemoteCanvas]);
+
+  /**
+   * Reverse sync: an agent (Claude Code, Codex) writes through the MCP server,
+   * the local server bumps `revision`, and this poller pulls the change in
+   * without a reload.
+   */
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (!canvasReady.current || document.hidden) return;
+      // Local edits not yet saved win the race: pulling the server snapshot now
+      // would silently undo what the user just did.
+      if (dirty.current) return;
+      void (async () => {
+        try {
+          const response = await fetch('/api/canvas');
+          if (!response.ok) return;
+          const data = (await response.json()) as {
+            canvas?: { nodes?: StudioNode[]; edges?: Edge[]; orchestratorId?: string } | null;
+            revision?: number;
+          };
+          const revision = Number(data.revision) || 0;
+          if (revision <= canvasRevision.current) return;
+          canvasRevision.current = revision;
+          remoteApplying.current = true;
+          window.setTimeout(() => {
+            remoteApplying.current = false;
+          }, 250);
+          applyRemoteCanvas(data.canvas ?? null);
+          // The server writes run artifacts back itself; while a run is live that
+          // echo is expected, so do not tell the user their board was edited.
+          if (!runningRef.current) setToast('画布已同步外部改动');
+        } catch {
+          // server restarting: try again next tick
+        }
+      })();
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [applyRemoteCanvas]);
+
+  /**
+   * A run started by an agent (through MCP) never reaches this window's own SSE
+   * subscription, so the progress strip would stay empty. Poll the server's
+   * active-run snapshot instead and mirror it into the same task map.
+   */
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (runningRef.current || document.hidden) return;
+      void (async () => {
+        try {
+          const response = await fetch('/api/runs/active');
+          if (!response.ok) return;
+          const data = (await response.json()) as {
+            run?: {
+              runId: string;
+              status: string;
+              startedAt: number;
+              tokens: number;
+              tasks: Array<{
+                taskId: string;
+                nodeId: string | null;
+                title: string;
+                effort?: string;
+                status: 'pending' | 'running' | 'done' | 'failed';
+              }>;
+            } | null;
+          };
+          const active = data.run && data.run.status === 'running';
+          if (active && data.run) {
+            const tasks: Record<string, RunTaskView> = {};
+            for (const task of data.run.tasks) {
+              tasks[task.taskId] = {
+                taskId: task.taskId,
+                nodeId: task.nodeId ?? '',
+                title: task.title,
+                effort: task.effort,
+                status: task.status,
+              };
+            }
+            runTasksRef.current = tasks;
+            setRunTasks(tasks);
+            setRunTokens(data.run.tokens);
+            runStartedAt.current = data.run.startedAt;
+            if (!externalRunRef.current) {
+              externalRunRef.current = true;
+              setExternalRun(true);
+              setToast('外部 Agent 正在画布上运行');
+            }
+          } else if (externalRunRef.current) {
+            externalRunRef.current = false;
+            setExternalRun(false);
+          }
+        } catch {
+          // server restarting: try again next tick
+        }
+      })();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const publicLibraries = nodes.filter(
@@ -1596,15 +1838,85 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleModelChange = (nodeId: string, connectionId: string) => {
-    const model = models.find((item) => item.id === connectionId);
-    if (!model) return;
-    patchNode(nodeId, { connectionId, provider: model.provider, model: model.model });
+  const handleModelChange = (nodeId: string, connectionId: string, modelId?: string) => {
+    const connection = models.find((item) => item.id === connectionId);
+    if (!connection) return;
+    // A key serves a family: keep whichever model the user picked as long as
+    // that key can actually call it.
+    const catalog = catalogOf(connection);
+    const model = modelId && catalog.includes(modelId) ? modelId : catalog[0] ?? connection.model;
+    patchNode(nodeId, {
+      connectionId,
+      provider: connection.provider,
+      model,
+      protocol: connection.protocol,
+      baseUrl: connection.baseUrl,
+    });
     push(
       nodeId,
       'assistant',
-      `模型已切换为 ${model.label}（${model.model}）。能力档案与 effort 方言随连接更新。`
+      `模型已切换为 ${connection.label} · ${model}。能力档案与 effort 方言随连接更新。`
     );
+  };
+
+  /**
+   * The catalog from the key is the truth, not the ids typed into the editor.
+   * One click moves every node onto its connection's cheapest capable model.
+   * Written through the ops API so it is durable even if the modal closes
+   * before the debounced save fires.
+   */
+  const applyPreferredModels = async (next: ModelDraft[]) => {
+    setModels(next);
+    const byConnection = new Map(next.map((item) => [item.id, item]));
+    const patches: Array<{ id: string; data: Record<string, unknown> }> = [];
+    let matched = 0;
+    for (const node of nodesRef.current) {
+      const connection = node.data.connectionId
+        ? byConnection.get(node.data.connectionId)
+        : undefined;
+      if (!connection) continue;
+      matched += 1;
+      const model = preferredModel(catalogOf(connection));
+      if (!model || model === node.data.model) continue;
+      patches.push({
+        id: node.id,
+        data: {
+          model,
+          provider: connection.provider,
+          protocol: connection.protocol,
+          baseUrl: connection.baseUrl,
+        },
+      });
+    }
+    if (!patches.length) {
+      setToast(
+        `没有可替换的节点（检查 ${nodesRef.current.length} 个节点，${matched} 个匹配到连接，` +
+          `目录：${next.map((item) => `${item.id}=${catalogOf(item).length}`).join(' ')}）`
+      );
+      return;
+    }
+    try {
+      const response = await fetch('/api/canvas/ops', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ops: patches.map((patch) => ({ op: 'update_node', id: patch.id, patch: patch.data })),
+        }),
+      });
+      if (!response.ok) throw new Error('canvas ops failed');
+      const data = (await response.json()) as { revision?: number };
+      if (typeof data.revision === 'number') canvasRevision.current = data.revision;
+      const byId = new Map(patches.map((patch) => [patch.id, patch.data]));
+      setNodes((current) =>
+        current.map((node) => {
+          const patch = byId.get(node.id);
+          return patch ? { ...node, data: { ...node.data, ...patch } } : node;
+        })
+      );
+      setToast(`已把 ${patches.length} 个节点换成各连接的最划算模型`);
+    } catch {
+      setToast('替换失败：确认本地服务在运行');
+    }
   };
 
   const handleModelsChange = (next: ModelDraft[]) => {
@@ -1612,10 +1924,22 @@ export function App() {
     setNodes((current) =>
       current.map((node) => {
         const connectionId = node.data.connectionId;
-        const model = next.find((item) => item.id === connectionId);
-        return model
-          ? { ...node, data: { ...node.data, provider: model.provider, model: model.model } }
-          : node;
+        const connection = next.find((item) => item.id === connectionId);
+        if (!connection) return node;
+        const catalog = catalogOf(connection);
+        const model = catalog.includes(node.data.model)
+          ? node.data.model
+          : catalog[0] ?? connection.model;
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            provider: connection.provider,
+            model,
+            protocol: connection.protocol,
+            baseUrl: connection.baseUrl,
+          },
+        };
       })
     );
   };
@@ -1688,7 +2012,9 @@ export function App() {
         name: '新节点',
         role: '待定义角色',
         provider: connection?.provider ?? preset?.provider ?? 'Custom',
-        model: connection?.model ?? preset?.model ?? 'openai-compatible',
+        model: connection
+          ? preferredModel(catalogOf(connection)) || connection.model
+          : preset?.model ?? 'openai-compatible',
         effort: 'medium',
         status: 'idle',
         kind: 'agent',
@@ -1703,6 +2029,128 @@ export function App() {
       ...current,
       [id]: [message('assistant', '我是新加入的节点。点击「能力」配置模型与思考程度，或直接告诉我你的角色。')],
     }));
+  };
+
+  /**
+   * One-click adaptation: promote the current session's model to orchestrator
+   * and wire the standard topology (orchestrator → workers, libraries →
+   * orchestrator) so the board is ready to run without manual dragging.
+   */
+  const adaptToSession = () => {
+    const primary = models.find((item) => item.status === 'ok') ?? models[0];
+    if (!primary) {
+      setToast('没有可用的模型连接：先在「模型连接」里配置一个');
+      return;
+    }
+
+    const current = nodesRef.current;
+    const existing =
+      current.find((node) => node.id === orchestratorId) ??
+      current.find((node) => node.data?.kind === 'orchestrator');
+    const targetId = existing?.id ?? 'session-orchestrator';
+    const palette = '#f59e0b';
+
+    if (existing) {
+      setNodes((all) =>
+        all.map((node) =>
+          node.id === targetId
+            ? {
+                ...node,
+                data: {
+                  ...node.data,
+                  name: node.data.name === '主控' ? `当前会话 · ${primary.label}` : node.data.name,
+                  provider: primary.provider,
+                  model: primary.model,
+                  connectionId: primary.id,
+                  protocol: primary.protocol,
+                  baseUrl: primary.baseUrl,
+                  status: 'idle',
+                  metric: '已适配当前会话',
+                },
+              }
+            : node
+        )
+      );
+    } else {
+      setNodes((all) => [
+        ...all,
+        {
+          id: targetId,
+          type: 'agent',
+          position: { x: 60, y: 460 },
+          data: {
+            name: `当前会话 · ${primary.label}`,
+            role: '当前会话的主控：拆解目标、分派与验收',
+            provider: primary.provider,
+            model: primary.model,
+            effort: 'medium',
+            status: 'idle',
+            kind: 'orchestrator',
+            accent: palette,
+            metric: 'ready',
+            connectionId: primary.id,
+            protocol: primary.protocol,
+            baseUrl: primary.baseUrl,
+          },
+        } as StudioNode,
+      ]);
+    }
+    setOrchestratorId(targetId);
+
+    const workers = current.filter(
+      (node) =>
+        node.id !== targetId &&
+        (node.data.kind === 'agent' || node.data.kind === 'orchestrator') &&
+        node.data.model &&
+        node.data.model !== 'library'
+    );
+    const libraries = current.filter((node) => node.data.kind === 'library');
+
+    const edgeStyle = { fill: '#8b98a8', fontSize: 9.5 } as const;
+    const edgeBg = { fill: '#0e1318', fillOpacity: 0.92 } as const;
+    setEdges((existingEdges) => {
+      const next = [...existingEdges];
+      const linked = (a: string, b: string) =>
+        next.some(
+          (edge) => (edge.source === a && edge.target === b) || (edge.source === b && edge.target === a)
+        );
+      for (const worker of workers) {
+        if (linked(targetId, worker.id)) continue;
+        next.push({
+          id: `adapt-${targetId}-${worker.id}`,
+          source: targetId,
+          target: worker.id,
+          type: 'smoothstep',
+          animated: true,
+          label: '任务',
+          data: { kind: 'assign' },
+          style: { stroke: '#6366f1', strokeWidth: 1.5 },
+          markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
+          labelStyle: edgeStyle,
+          labelBgStyle: edgeBg,
+        } as Edge);
+      }
+      for (const library of libraries) {
+        if (linked(library.id, targetId)) continue;
+        next.push({
+          id: `adapt-${library.id}-${targetId}`,
+          source: library.id,
+          target: targetId,
+          type: 'smoothstep',
+          animated: true,
+          label: '公共文件',
+          data: { kind: 'context' },
+          style: { stroke: '#38d9c2', strokeWidth: 1.5, dasharray: '6 4' },
+          markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
+          labelStyle: edgeStyle,
+          labelBgStyle: edgeBg,
+        } as Edge);
+      }
+      return next;
+    });
+
+    setToast(`已适配：主控 = ${primary.label}（${primary.model}）· 连接 ${workers.length} 个工作节点`);
+    push(targetId, 'assistant', `已一键适配：我（${primary.label} · ${primary.model}）是当前会话的主控。点「运行编排」即可开始；也可以先拖入更多节点。`);
   };
 
   const cleanupDeletedNodes = (ids: string[]) => {
@@ -2086,14 +2534,74 @@ export function App() {
     };
   };
 
-  const run = async () => {
+  /**
+   * Push the board exactly as it is on screen. Saving is debounced by 800ms, so
+   * without this a run started right after an edit would execute the previous
+   * revision — or be refused as unrunnable when the saved copy is stale.
+   */
+  const flushCanvas = async (): Promise<'ok' | 'conflict' | 'error'> => {
+    if (!canvasReady.current) return 'error';
+    const nodesPayload = nodesRef.current
+      .filter((node) => node.id !== '__final__')
+      .map((node) => {
+        const {
+          onDelete: _onDelete,
+          onMakeOrchestrator: _onMakeOrchestrator,
+          onOpen: _onOpen,
+          onOpenSession: _onOpenSession,
+          ...data
+        } = node.data as AgentNodeData & { onOpenSession?: unknown };
+        return { ...node, data };
+      });
+    const edgesPayload = edgesRef.current
+      .filter((edge) => edge.id !== '__final-edge')
+      .map((edge) => ({
+        ...edge,
+        data: edge.data ? { ...(edge.data as Record<string, unknown>), onOpen: undefined } : edge.data,
+      }));
+    try {
+      const response = await fetch('/api/canvas', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          orchestratorId,
+          nodes: nodesPayload,
+          edges: edgesPayload,
+          revision: canvasRevision.current,
+        }),
+      });
+      const data = (await response.json().catch(() => null)) as { revision?: number } | null;
+      if (response.status === 409) return 'conflict';
+      if (response.ok && typeof data?.revision === 'number') {
+        canvasRevision.current = data.revision;
+        dirty.current = false;
+        return 'ok';
+      }
+      return 'error';
+    } catch {
+      return 'error';
+    }
+  };
+
+  const run = async (goalOverride?: string) => {
     if (running) return;
     setRunning(true);
     setChoice(null);
     resetRunState();
     runStartedAt.current = Date.now();
     patchNode(orchestratorId, { status: 'running', metric: '规划中…' });
-    push(orchestratorId, 'assistant', '已向本地服务提交真实运行：调研 → 写作 → 审校。');
+    push(orchestratorId, 'assistant', '已按当前画布提交运行。');
+    const flushed = await flushCanvas();
+    if (flushed === 'conflict') {
+      setRunning(false);
+      patchNode(orchestratorId, { status: 'idle', metric: '未运行' });
+      push(
+        orchestratorId,
+        'assistant',
+        '画布刚被外部修改（可能来自 agent），已同步到最新版本。请确认画布后再点一次运行。'
+      );
+      return;
+    }
     try {
       const credentialFor = (needle: string) => {
         const model = models.find(
@@ -2112,12 +2620,17 @@ export function App() {
             credentials: {
               deepseek: credentialFor('deepseek'),
               minimax: credentialFor('minimaxi'),
+              moonshot: credentialFor('moonshot'),
+              zhipu: credentialFor('bigmodel'),
+              qwen: credentialFor('dashscope'),
+              openai: credentialFor('api.openai.com'),
               relay: credentialFor('127.0.0.1'),
             },
             budget: {
               maxTotalTokens: settings.maxTokensPerRun,
               maxTokensPerMinute: settings.maxTokensPerMinute,
             },
+            goal: goalOverride?.trim() || undefined,
             orchestratorId,
             team: nodes
               .filter((node) => node.data.kind === 'agent' || node.data.kind === 'orchestrator')
@@ -2132,6 +2645,25 @@ export function App() {
           },
         }),
       });
+      if (response.status === 422) {
+        // the canvas itself is not runnable — say why instead of silently
+        // falling back to a demo that looks like it worked
+        let reasons: string[] = [];
+        try {
+          const parsed = (await response.json()) as { reasons?: string[] };
+          reasons = Array.isArray(parsed.reasons) ? parsed.reasons : [];
+        } catch {
+          // keep the generic reason below
+        }
+        setRunning(false);
+        patchNode(orchestratorId, { status: 'idle', metric: '未运行' });
+        push(
+          orchestratorId,
+          'assistant',
+          `画布还不能运行：\n${reasons.map((reason) => `· ${reason}`).join('\n') || '· 缺少可执行的节点或主控'}`
+        );
+        return;
+      }
       if (!response.ok) throw new Error(await response.text());
       const data = (await response.json()) as { runId: string };
       subscribeToRun(data.runId);
@@ -2144,6 +2676,12 @@ export function App() {
 
   const send = async (nodeId: string, text: string) => {
     push(nodeId, 'user', text);
+    // Talking to the orchestrator is how a session starts: it plans, hands out
+    // work and accepts the result — the same order a conversation follows.
+    if (settings.autoOrchestrate && nodeId === orchestratorId && !running) {
+      await run(text);
+      return;
+    }
     const node = nodes.find((item) => item.id === nodeId)?.data;
     const model = models.find((item) => item.id === node?.connectionId);
     const context = libraryContextFor(nodeId);
@@ -2370,7 +2908,9 @@ export function App() {
         onOpenReport={() => setReportOpen(true)}
         onReset={resetAll}
         onClearCanvas={() => setClearConfirmOpen(true)}
+        onExport={() => window.open('/api/canvas/export', '_blank')}
         onOpenWorkflow={() => setWorkflowOpen(true)}
+        onAdapt={adaptToSession}
         hasReport={Boolean(runSummary)}
         approvalCount={pendingApprovals}
         onOpenApprovals={() => setApprovalsOpen(true)}
@@ -2417,6 +2957,13 @@ export function App() {
             onInit={(instance) => {
               rfRef.current = instance;
             }}
+          />
+          <RunProgress
+            tasks={Object.values(runTasks)}
+            running={running || externalRun}
+            startedAt={runStartedAt.current}
+            tokens={runTokens}
+            onOpenReport={running || externalRun ? undefined : () => setReportOpen(true)}
           />
           {brushMode && (
             <div
@@ -2512,8 +3059,8 @@ export function App() {
             onEffortChange={(effort) => {
               if (selectedNode) changeEffort(selectedNode.id, effort);
             }}
-            onModelChange={(connectionId) => {
-              if (selectedNode) handleModelChange(selectedNode.id, connectionId);
+            onModelChange={(connectionId, model) => {
+              if (selectedNode) handleModelChange(selectedNode.id, connectionId, model);
             }}
             onOpenModels={() => setEditorOpen(true)}
             onIdentityChange={(patch) => {
@@ -2533,6 +3080,7 @@ export function App() {
         {inspectNode && (
           <NodeInspector
             node={inspectNode}
+            models={models}
             onPatch={(patch) => patchNode(inspectNode.id, patch)}
             onDelete={() => deleteNode(inspectNode.id)}
             onDetach={() => detachFromRegion(inspectNode.id)}
@@ -2566,6 +3114,7 @@ export function App() {
         models={models}
         onChange={handleModelsChange}
         onClose={() => setEditorOpen(false)}
+        onApplyPreferred={applyPreferredModels}
       />
 
       <SettingsModal

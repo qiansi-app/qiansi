@@ -12,7 +12,7 @@ import {
   X,
 } from 'lucide-react';
 import type { AgentNodeData, EffortLevel } from '../data/demoGraph';
-import type { ModelDraft } from '../data/models';
+import { catalogOf, type ModelDraft } from '../data/models';
 import type { ChatMessage } from '../types';
 
 type Tab = 'chat' | 'tasks' | 'logs' | 'profile';
@@ -34,7 +34,7 @@ interface ChatDrawerProps {
   onClose: () => void;
   onSend: (text: string) => void;
   onEffortChange: (effort: EffortLevel) => void;
-  onModelChange: (connectionId: string) => void;
+  onModelChange: (connectionId: string, model: string) => void;
   onOpenModels: () => void;
   onIdentityChange?: (patch: { name?: string; role?: string }) => void;
   onMakeOrchestrator?: () => void;
@@ -75,6 +75,23 @@ export function ChatDrawer({
 }: ChatDrawerProps) {
   const [tab, setTab] = useState<Tab>(mode === 'edge' ? 'logs' : 'chat');
   const [draft, setDraft] = useState('');
+
+  /**
+   * The node's stored connection can drift from its model (nodes predate the
+   * catalog, or an agent wrote one). Match by model when the pair does not
+   * exist, so the picker never shows a different model than the node has.
+   */
+  const resolvedModelValue = (() => {
+    if (!node) return '';
+    const connectionId = node.connectionId ?? '';
+    const model = node.model ?? '';
+    const exact = models.some(
+      (connection) => connection.id === connectionId && catalogOf(connection).includes(model)
+    );
+    if (exact) return `${connectionId}::${model}`;
+    const owner = models.find((connection) => catalogOf(connection).includes(model));
+    return owner ? `${owner.id}::${model}` : '';
+  })();
 
   const send = () => {
     const text = draft.trim();
@@ -296,24 +313,36 @@ export function ChatDrawer({
             </button>
           )}
           <div className="log-row">
-            <time>连接</time>
+            <time>模型</time>
             <div>
               <select
                 className="select"
-                value={node.connectionId ?? ''}
-                onChange={(event) => onModelChange(event.target.value)}
+                value={resolvedModelValue}
+                onChange={(event) => {
+                  const [connectionId, model] = event.target.value.split('::');
+                  if (connectionId && model) onModelChange(connectionId, model);
+                }}
               >
-                <option value="" disabled>
-                  选择模型连接…
-                </option>
-                {models.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.label} · {model.model}
+                {!resolvedModelValue && (
+                  <option value="" disabled>
+                    {node.model ? `${node.model}（未匹配到连接）` : '选择模型…'}
                   </option>
+                )}
+                {models.map((connection) => (
+                  <optgroup key={connection.id} label={connection.label}>
+                    {catalogOf(connection).map((modelId) => (
+                      <option
+                        key={`${connection.id}::${modelId}`}
+                        value={`${connection.id}::${modelId}`}
+                      >
+                        {modelId}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
               <button className="mini-btn" style={{ marginTop: 6 }} onClick={onOpenModels}>
-                <Boxes size={12} /> 管理连接
+                <Boxes size={12} /> 管理连接与模型目录
               </button>
             </div>
           </div>
@@ -322,8 +351,8 @@ export function ChatDrawer({
             <div>{node.role}</div>
           </div>
           <div className="log-row">
-            <time>模型</time>
-            <div>{node.provider} · {node.model}</div>
+            <time>provider</time>
+            <div>{node.provider}</div>
           </div>
           <div className="log-row">
             <time>effort</time>
