@@ -4,49 +4,29 @@ import {
   type CapabilityProfile,
   type ChatAdapter,
   type NormalizedMessage,
-  type Protocol,
 } from '@qiansi/engine';
-import { liveProfiles } from './live.js';
+import { catalogEntries, modelFamilies, profileForModel, type KeySlot } from './model-catalog.js';
 import type { DpapiVault } from './vault.js';
 
 export interface GatewayModel {
   id: string;
   label: string;
-  profileId: string;
+  slot: KeySlot;
   keyRef: string;
-  protocol: Protocol;
+  protocol: CapabilityProfile['protocol'];
 }
 
-export const gatewayModels: GatewayModel[] = [
-  {
-    id: 'deepseek-chat',
-    label: 'DeepSeek Chat',
-    profileId: 'live-deepseek',
-    keyRef: 'conn-deepseek',
-    protocol: 'openai-chat',
-  },
-  {
-    id: 'minimax',
-    label: 'MiniMax M3.1',
-    profileId: 'live-minimax',
-    keyRef: 'conn-minimax',
-    protocol: 'anthropic-messages',
-  },
-  {
-    id: 'claude-sonnet',
-    label: 'Claude Sonnet (local relay)',
-    profileId: 'live-sonnet',
-    keyRef: 'conn-claude-relay',
-    protocol: 'anthropic-messages',
-  },
-  {
-    id: 'claude-opus',
-    label: 'Claude Opus (local relay)',
-    profileId: 'live-opus',
-    keyRef: 'conn-claude-relay',
-    protocol: 'anthropic-messages',
-  },
-];
+/**
+ * One key, many models: the gateway exposes every model in the catalog and
+ * resolves each to the key slot that serves it.
+ */
+export const gatewayModels: GatewayModel[] = catalogEntries().map((entry) => ({
+  id: entry.id,
+  label: entry.label,
+  slot: entry.slot,
+  keyRef: entry.keyRef,
+  protocol: entry.protocol,
+}));
 
 export interface GatewayModelResolution {
   model: GatewayModel;
@@ -55,27 +35,34 @@ export interface GatewayModelResolution {
   adapter: ChatAdapter;
 }
 
+const slotEnv: Record<KeySlot, string> = {
+  deepseek: 'DEEPSEEK_API_KEY',
+  minimax: 'MINIMAX_API_KEY',
+  moonshot: 'MOONSHOT_API_KEY',
+  zhipu: 'ZHIPUAI_API_KEY',
+  qwen: 'DASHSCOPE_API_KEY',
+  openai: 'OPENAI_API_KEY',
+  relay: 'ANTHROPIC_AUTH_TOKEN',
+};
+
 export async function resolveGatewayModel(
   modelId: string,
   vault: DpapiVault
 ): Promise<GatewayModelResolution | undefined> {
   const model = gatewayModels.find(
-    (item) => item.id === modelId || item.profileId === modelId
+    (item) => item.id === modelId || item.keyRef === modelId || item.slot === modelId
   );
   if (!model) return undefined;
 
-  const profile = liveProfiles.find((item) => item.id === model.profileId);
-  if (!profile) return undefined;
+  const profile = profileForModel(model.id, model.label);
 
-  const fromVault = await vault.get(model.keyRef);
-  const apiKey =
-    fromVault ??
-    (model.keyRef === 'conn-deepseek'
-      ? process.env.DEEPSEEK_API_KEY
-      : model.keyRef === 'conn-minimax'
-        ? process.env.MINIMAX_API_KEY
-        : process.env.ANTHROPIC_AUTH_TOKEN) ??
-    '';
+  const family = modelFamilies().find((item) => item.slot === model.slot);
+  let fromVault = await vault.get(model.keyRef);
+  for (const alias of family?.vaultAliases ?? []) {
+    if (fromVault) break;
+    fromVault = await vault.get(alias);
+  }
+  const apiKey = fromVault ?? process.env[slotEnv[model.slot]] ?? '';
 
   const adapter =
     profile.protocol === 'anthropic-messages'

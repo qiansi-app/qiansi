@@ -1,13 +1,7 @@
-import {
-  AnthropicMessagesAdapter,
-  buildChatRequest,
-  type AcceptanceResult,
-  type CapabilityProfile,
-  type Plan,
-  type Subtask,
-} from '@qiansi/engine';
+import type { CapabilityProfile, Plan } from '@qiansi/engine';
+import { createRoutedJudge } from './acceptance.js';
 
-const relayBase = (process.env.ANTHROPIC_BASE_URL ?? 'http://127.0.0.1:15721').replace(/\/+$/, '');
+export const relayBase = (process.env.ANTHROPIC_BASE_URL ?? 'http://127.0.0.1:15721').replace(/\/+$/, '');
 
 function relayProfile(
   id: string,
@@ -118,108 +112,20 @@ export const livePlan: Plan = {
   ],
 };
 
-function extractJson(text: string): Record<string, unknown> | null {
-  const cleaned = text.replace(/```json/gi, '').replace(/```/g, '');
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  try {
-    return JSON.parse(cleaned.slice(start, end + 1)) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Real acceptance judge. Uses the sonnet relay profile so it never grades its
  * own output (workers are sonnet/haiku/opus and the judge is always sonnet,
  * except when the assignee itself is sonnet; the live plan assigns sonnet only
  * to the research task, so self-judging is avoided for the writer/reviewer).
+ *
+ * Kept as a single-stage judge for callers that have no router model; the
+ * server uses createRoutedJudge from ./acceptance.js, which adds the cheap gate
+ * in front of this one.
  */
 export function createLiveJudge(apiKey: string, teamContext?: string) {
   const judgeProfile = liveProfiles.find((profile) => profile.id === 'live-sonnet')!;
-  const adapter = new AnthropicMessagesAdapter();
-
-  return async (task: Subtask, output: string): Promise<AcceptanceResult> => {
-    if (output.trim().length < 20) {
-      return {
-        pass: false,
-        score: 0,
-        reasons: ['output too short'],
-        suggestedFix: 'Write a substantive answer that satisfies the acceptance criteria.',
-      };
-    }
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 25000);
-
-    const prompt = [
-      `任务：${task.title}`,
-      `验收标准：${task.acceptanceCriteria}`,
-      `产出：`,
-      output,
-      '',
-      '请严格验收。只返回一个 JSON 对象，不要 Markdown、不要代码围栏、不要解释：',
-      '{"pass":true|false,"score":0到1,"reasons":["..."],"suggested_fix":"..."}',
-    ].join('\n');
-
-    const request = buildChatRequest(
-      judgeProfile,
-      [
-        {
-          role: 'system',
-          content: `你是严格的验收评委。只返回一个 JSON 对象。${
-            teamContext ? `\n团队身份：\n${teamContext}` : ''
-          }`,
-        },
-        { role: 'user', content: prompt },
-      ],
-      'off',
-      { apiKey, maxTokens: 1024, signal: controller.signal }
-    );
-
-    let text = '';
-    try {
-      for await (const event of adapter.stream(request)) {
-        if (event.type === 'text-delta') text += event.text;
-        if (event.type === 'error') throw new Error(event.message);
-      }
-    } catch (error) {
-      if (controller.signal.aborted) {
-        return {
-          pass: true,
-          score: 0.6,
-          reasons: ['judge timeout; fallback pass for live demo'],
-        };
-      }
-      return {
-        pass: false,
-        score: 0,
-        reasons: [`judge error: ${error instanceof Error ? error.message : String(error)}`],
-      };
-    } finally {
-      clearTimeout(timer);
-    }
-
-    const verdict = extractJson(text);
-    if (!verdict) {
-      // A reasoning relay may spend the whole budget on thinking. For the live
-      // demo we fall back to a soft pass rather than burning retries; the run
-      // log marks this as unparseable so it is auditable.
-      return {
-        pass: true,
-        score: 0.6,
-        needsHuman: true,
-        reasons: ['评委返回无法解析，已标记为需人工确认'],
-      };
-    }
-
-    return {
-      pass: Boolean(verdict.pass),
-      score: Number(verdict.score ?? 0),
-      reasons: Array.isArray(verdict.reasons) ? verdict.reasons.map(String) : [],
-      suggestedFix:
-        typeof verdict.suggested_fix === 'string' ? verdict.suggested_fix : undefined,
-    };
-  };
+  return createRoutedJudge({
+    full: { profile: judgeProfile, apiKey },
+    teamContext,
+  });
 }

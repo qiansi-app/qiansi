@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from 'node:path';
 import type { Plan, RunEvent, UsageSnapshot } from '@qiansi/engine';
 import { ensureStateDir } from './state-dir.js';
+import type { Mandate } from './policy.js';
 
 export interface RunEnvelope {
   seq: number;
@@ -18,6 +19,8 @@ export interface RunRecord {
   plan?: Plan;
   outputs: Record<string, string>;
   usage: UsageSnapshot;
+  /** What this run was authorised to do, and under which policy version. */
+  mandate?: Mandate;
   events: RunEnvelope[];
   seq: number;
   startedAt: number;
@@ -121,8 +124,22 @@ export class RunStore {
     for (const subscriber of record.subscribers) subscriber(envelope);
   }
 
-  subscribe(runId: string, subscriber: (envelope: RunEnvelope) => void): () => void {
+  /**
+   * Persisted immediately: a mandate is the evidence of who authorised a run,
+   * so it must survive a crash that happens while the run is still going.
+   */
+  setMandate(runId: string, mandate: Mandate): void {
     const record = this.runs.get(runId);
+    if (!record) return;
+    record.mandate = mandate;
+    this.persist(record);
+  }
+
+  getMandate(runId: string): Mandate | undefined {
+    return this.get(runId)?.mandate;
+  }
+
+  subscribe(runId: string, subscriber: (envelope: RunEnvelope) => void): () => void {    const record = this.runs.get(runId);
     if (!record) return () => {};
     record.subscribers.add(subscriber);
     return () => record.subscribers.delete(subscriber);
@@ -141,6 +158,7 @@ export class RunStore {
       plan: record.plan,
       outputs: record.outputs,
       usage: record.usage,
+      mandate: record.mandate,
       lastSeq: record.seq,
       startedAt: record.startedAt,
       finishedAt: record.finishedAt,

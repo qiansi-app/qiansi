@@ -5,16 +5,18 @@ import { getCookie, setCookie } from 'hono/cookie';
 import { streamSSE } from 'hono/streaming';
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
+  accessSync,
   appendFileSync,
+  constants as fsConstants,
   existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import {
   AnthropicMessagesAdapter,
   OpenAIChatAdapter,
@@ -25,10 +27,32 @@ import {
   type CapabilityProfile,
   type Protocol,
 } from '@qiansi/engine';
+import { AuditLog } from './audit.js';
+import {
+  CanvasConflict,
+  CanvasStore,
+  canvasSummary,
+  canvasSvg,
+  writeRunArtifacts,
+  type CanvasOp,
+} from './canvas.js';
+import { collectCanvasFiles, fileSummary } from './canvas-files.js';
 import { DemoAdapter, demoPlan, demoProfiles } from './demo.js';
 import { completeChat, type ChatConnection } from './chat.js';
 import { gatewayModels, GatewayUsage, resolveGatewayModel, toNormalizedMessages } from './gateway.js';
-import { createLiveJudge, livePlan, liveProfiles } from './live.js';
+import { livePlan, liveProfiles } from './live.js';
+import { createRoutedJudge } from './acceptance.js';
+import { buildPlanFromCanvas, diagnoseCanvas } from './plan-from-canvas.js';
+import {
+  isCheapModel,
+  modelFamilies,
+  profileForModel,
+  resolveModelRoute,
+  routerChoice,
+  type KeySlot,
+} from './model-catalog.js';
+import { PolicyStore, scopeForRequest, type Mandate } from './policy.js';
+import { part, summarize, type HealthPart, type StatusReport } from './status.js';
 import { RunStore, type RunEnvelope } from './store.js';
 import { ensureStateDir } from './state-dir.js';
 import { DpapiVault } from './vault.js';
@@ -68,6 +92,51 @@ loadLocalEnv();
 const store = new RunStore();
 const idempotency = new Map<string, unknown>();
 const runAborts = new Map<string, AbortController>();
+/** A second live run would write its artifacts over the first one's. */
+let activeLiveRunId: string | null = null;
+/** Whether a run came from the drawing or from the built-in demo plan. */
+const runPlanSource = new Map<string, 'canvas' | 'builtin'>();
+
+/**
+ * Provider errors echo key ids back (Moonshot reports `ak-…` in billing
+ * failures). Scrub before the event reaches the run log, the SSE stream or the
+ * result endpoint.
+ */
+function redactRunEvent<T extends { type: string }>(event: T): T {
+  const record = event as unknown as Record<string, unknown>;
+  const next: Record<string, unknown> = { ...record };
+  let changed = false;
+  if (typeof record.error === 'string') {
+    next.error = redactSecrets(record.error, []);
+    changed = true;
+  }
+  const result = record.result as { reasons?: unknown } | undefined;
+  if (result && Array.isArray(result.reasons)) {
+    next.result = {
+      ...result,
+      reasons: result.reasons.map((reason) =>
+        typeof reason === 'string' ? redactSecrets(reason, []) : reason
+      ),
+    };
+    changed = true;
+  }
+  return (changed ? next : record) as unknown as T;
+}
+
+const approvalsFile = () => join(stateDir, 'approvals.json');
+
+/** Approvals must survive a restart: an agent may still be waiting on one. */
+function persistApprovals(): void {
+  try {
+    const items = [...approvals.values()].slice(-200);
+    writeFileSync(approvalsFile(), JSON.stringify(items, null, 1), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+  } catch {
+    // persistence is best effort; the in-memory record still works
+  }
+}
 const vault = new DpapiVault();
 const gatewayUsage = new GatewayUsage(Number(process.env.QIANSI_GATEWAY_TPM ?? 20000));
 
@@ -209,12 +278,77 @@ function recordExternalCall(input: {
 }
 
 const stateDir = ensureStateDir();
-const tokenPath = join(stateDir, 'server-token');
-const token =
-  process.env.QIANSI_TOKEN ?? process.env.AGENTWEAVE_TOKEN ?? randomBytes(24).toString('hex');
-if (!process.env.QIANSI_TOKEN && !process.env.AGENTWEAVE_TOKEN) {
-  writeFileSync(tokenPath, token, { mode: 0o600 });
+const canvasStore = new CanvasStore(stateDir);
+const audit = new AuditLog(stateDir);
+const policy = new PolicyStore(stateDir);
+/** The port the listener actually bound, which can differ from QIANSI_PORT. */
+let boundPort: number | null = null;
+const serverStartedAt = Date.now();
+/** Written by an intentional stop, so a watchdog can tell it from a crash. */
+const manualStopPath = join(stateDir, 'manual-stop');
+// Starting is the counterpart of stopping: a fresh process clears the marker,
+// otherwise a deliberate stop would look permanent.
+try {
+  if (existsSync(manualStopPath)) unlinkSync(manualStopPath);
+} catch {
+  // a read-only state dir just keeps the marker; the watchdog stays quiet
 }
+try {
+  const persisted = JSON.parse(readFileSync(approvalsFile(), 'utf8')) as ApprovalRecord[];
+  if (Array.isArray(persisted)) {
+    for (const record of persisted) {
+      if (record && typeof record.id === 'string') approvals.set(record.id, record);
+    }
+  }
+} catch {
+  // no approvals file yet
+}
+const tokenPath = join(stateDir, 'server-token');
+/**
+ * The token must survive a restart: agents (and the MCP server) read it from
+ * disk, so rotating it on every launch logged them out for no reason.
+ */
+function resolveToken(): string {
+  const fromEnv = process.env.QIANSI_TOKEN ?? process.env.AGENTWEAVE_TOKEN;
+  if (fromEnv) return fromEnv;
+  try {
+    const existing = readFileSync(tokenPath, 'utf8').trim();
+    if (existing) return existing;
+  } catch {
+    // first run: generate below
+  }
+  const generated = randomBytes(24).toString('hex');
+  try {
+    writeFileSync(tokenPath, generated, { mode: 0o600 });
+  } catch {
+    // a read-only state dir still leaves the token valid for this process
+  }
+  return generated;
+}
+const token = resolveToken();
+
+/**
+ * A second token that can only read. Anything handed to an external script gets
+ * this one, so a mistake there cannot rewrite the board, the vault or the runs.
+ */
+const readTokenPath = join(stateDir, 'server-token-read');
+const readToken = (() => {
+  const fromEnv = process.env.QIANSI_READ_TOKEN;
+  if (fromEnv) return fromEnv;
+  try {
+    const existing = readFileSync(readTokenPath, 'utf8').trim();
+    if (existing) return existing;
+  } catch {
+    // first run: generate below
+  }
+  const generated = randomBytes(24).toString('hex');
+  try {
+    writeFileSync(readTokenPath, generated, { mode: 0o600 });
+  } catch {
+    // a read-only state dir still leaves the token valid for this process
+  }
+  return generated;
+})();
 
 const allowedOrigins = new Set(
   (
@@ -245,6 +379,16 @@ function originAllowed(context: Context): boolean {
   return false;
 }
 
+/** Who caused this request: the UI, or a named agent through MCP. */
+function actorOf(context: Context): string {
+  const agent = context.req.header('x-qiansi-agent') ?? context.req.header('x-agentweave-agent');
+  if (agent) return agent;
+  if (context.req.header('x-qiansi-session') ?? context.req.header('x-agentweave-session')) {
+    return 'agent';
+  }
+  return 'local-ui';
+}
+
 app.use('/api/*', async (context, next) => {
   if (context.req.path === '/api/health' || context.req.path === '/api/bootstrap') {
     return next();
@@ -255,10 +399,51 @@ app.use('/api/*', async (context, next) => {
   const cookie = getCookie(context, 'qs_session') ?? getCookie(context, 'aw_session');
   const header =
     context.req.header('x-qiansi-token') ?? context.req.header('x-agentweave-token');
-  if (cookie !== token && header !== token) {
-    return context.json({ error: 'unauthorized' }, 401);
+  const presented = header || cookie || '';
+  if (presented === token) {
+    // The shared token says "a local caller"; the policy says what that caller
+    // may do. Named callers (x-qiansi-agent) can be given more or less than the
+    // wildcard, and acceptMode decides whether unlisted agents get in at all.
+    const scope = scopeForRequest(context.req.method, context.req.path);
+    if (scope) {
+      const actor = actorOf(context);
+      const admission = policy.admit(actor, scope);
+      if (!admission.allowed) {
+        audit.record({
+          actor,
+          action: 'policy.denied',
+          target: context.req.path,
+          detail: { scope, reason: admission.reason },
+        });
+        return context.json(
+          {
+            error: 'not_admitted',
+            scope,
+            actor,
+            reason: admission.reason,
+            policyVersion: admission.policyVersion,
+            hint: '在 ~/.qiansi/policy.json 或 GET/PUT /api/policy 里给这个 agent 授权。',
+          },
+          403
+        );
+      }
+    }
+    return next();
   }
-  return next();
+
+  if (presented === readToken) {
+    const method = context.req.method.toUpperCase();
+    if (method === 'GET' || method === 'HEAD') return next();
+    audit.record({
+      actor: actorOf(context),
+      action: 'auth.read_only_denied',
+      target: context.req.path,
+      detail: { method },
+    });
+    return context.json({ error: 'read_only_token' }, 403);
+  }
+
+  return context.json({ error: 'unauthorized' }, 401);
 });
 
 app.get('/api/health', (context) =>
@@ -271,6 +456,185 @@ app.get('/api/health', (context) =>
     moonshot: Boolean(process.env.MOONSHOT_API_KEY),
   })
 );
+
+/**
+ * Everything a supervisor needs to decide "restart it", "leave it" or "tell a
+ * person", without reading logs. Mirrors dsh-superagent's status contract so a
+ * cron entry, a shell script or an agent can all treat the four codes the same
+ * way.
+ */
+async function buildStatus(): Promise<StatusReport> {
+  const parts: Record<string, HealthPart> = {};
+  const setup: string[] = [];
+  const warnings: string[] = [];
+
+  try {
+    accessSync(stateDir, fsConstants.W_OK);
+    parts.state = part('ready', stateDir);
+  } catch (error) {
+    parts.state = part(
+      'error',
+      `状态目录不可写：${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  let refs: string[] = [];
+  try {
+    refs = await vault.refs();
+    parts.vault = part('ready', `${refs.length} 个凭据`);
+  } catch (error) {
+    parts.vault = part(
+      'error',
+      `保险库读不出来：${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  const configured = modelFamilies().filter(
+    (family) =>
+      refs.includes(family.vaultRef) ||
+      (family.vaultAliases ?? []).some((alias) => refs.includes(alias)) ||
+      Boolean(process.env[family.envVar])
+  );
+  if (configured.length === 0) {
+    parts.models = part('setup', '没有可用的模型 Key');
+    setup.push('没有配置任何模型 Key：打开连接面板，或用 CC Switch 导入');
+  } else {
+    parts.models = part('ready', configured.map((family) => family.slot).join(', '));
+  }
+
+  try {
+    const document = canvasStore.read();
+    const diagnosis = diagnoseCanvas(document);
+    parts.canvas = part('ready', `revision ${document.revision}`);
+    if (!diagnosis.runnable) {
+      warnings.push(`画布当前不能运行：${diagnosis.reasons.join('；')}`);
+    }
+  } catch (error) {
+    parts.canvas = part(
+      'error',
+      `画布读不出来：${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  let runningTasks = 0;
+  let activeRunAgeMs: number | null = null;
+  if (activeLiveRunId) {
+    const record = store.get(activeLiveRunId);
+    const lastEvent = record?.events.at(-1);
+    const lastAt = lastEvent?.ts ?? record?.startedAt ?? Date.now();
+    activeRunAgeMs = Date.now() - lastAt;
+    runningTasks = record?.plan?.subtasks.length ?? 0;
+    // A run that has not emitted an event in ten minutes is not "slow", it is
+    // stuck: every model call has a 45s timeout above it.
+    if (activeRunAgeMs > 10 * 60_000) {
+      parts.run = part(
+        'error',
+        `运行 ${activeLiveRunId} 已 ${Math.round(activeRunAgeMs / 60000)} 分钟没有事件，疑似卡死`
+      );
+    } else {
+      parts.run = part('starting', `运行中：${activeLiveRunId}`);
+    }
+  } else {
+    parts.run = part('ready', '没有在跑的任务');
+  }
+
+  const portFile = join(stateDir, 'server-port');
+  try {
+    const published = Number(readFileSync(portFile, 'utf8').trim());
+    if (boundPort && published !== boundPort) {
+      parts.port = part('error', `端口文件写着 ${published}，实际监听 ${boundPort}`);
+    } else {
+      parts.port = part('ready', String(boundPort ?? published));
+    }
+  } catch {
+    parts.port = part('error', '端口文件缺失：依赖它的 MCP 与 hook 找不到服务');
+  }
+
+  return summarize({
+    startedAt: serverStartedAt,
+    manuallyStopped: existsSync(manualStopPath),
+    parts,
+    setup,
+    warnings,
+    load: {
+      activeRunId: activeLiveRunId,
+      activeRunAgeMs,
+      runningTasks,
+    },
+  });
+}
+
+app.get('/api/status', async (context) => context.json(await buildStatus()));
+
+app.get('/api/policy', (context) => {
+  const current = policy.read();
+  return context.json({ ok: true, policy: current, revision: current.version });
+});
+
+/**
+ * Editing the policy is a human action: an agent that could rewrite the policy
+ * could grant itself anything, so the route needs policy.write, which the
+ * default agent entry does not have.
+ */
+app.put('/api/policy', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as
+    | { acceptMode?: unknown; humans?: unknown; agents?: unknown; revision?: unknown }
+    | null;
+  if (!body) return context.json({ error: 'invalid_body' }, 400);
+
+  const revision = Number(body.revision ?? NaN);
+  if (!Number.isFinite(revision)) {
+    return context.json({ error: 'revision_required' }, 400);
+  }
+
+  const result = policy.update(
+    {
+      acceptMode:
+        body.acceptMode === 'off' || body.acceptMode === 'observe' ? body.acceptMode : 'auto',
+      humans: Array.isArray(body.humans) ? (body.humans as never) : policy.read().humans,
+      agents: Array.isArray(body.agents) ? (body.agents as never) : policy.read().agents,
+    },
+    revision
+  );
+
+  if (!result.ok) {
+    return context.json({ error: 'stale_revision', policy: result.current }, 409);
+  }
+  audit.record({
+    actor: actorOf(context),
+    action: 'policy.update',
+    target: `v${result.policy.version}`,
+    detail: { acceptMode: result.policy.acceptMode, agents: result.policy.agents.length },
+  });
+  return context.json({ ok: true, policy: result.policy, revision: result.policy.version });
+});
+
+/**
+ * An intentional stop. It is recorded on disk so the watchdog can tell "I was
+ * told to stop" from "it died", and leaves it stopped instead of resurrecting
+ * something a person deliberately turned off.
+ */
+app.post('/api/admin/stop', async (context) => {
+  const actor = actorOf(context);
+  const admission = policy.admit(actor, 'policy.write');
+  if (!admission.allowed) {
+    audit.record({
+      actor,
+      action: 'policy.denied',
+      target: '/api/admin/stop',
+      detail: { reason: admission.reason },
+    });
+    return context.json({ error: 'not_admitted', reason: admission.reason }, 403);
+  }
+  try {
+    writeFileSync(manualStopPath, new Date().toISOString(), { encoding: 'utf8', mode: 0o600 });
+  } catch {
+    // still stop; only the watchdog hint is lost
+  }
+  audit.record({ actor, action: 'server.stop', target: 'manual' });
+  setTimeout(() => process.exit(0), 150);
+  return context.json({ ok: true, stopping: true, manuallyStopped: true });
+});
 
 app.get('/api/bootstrap', (context) => {
   if (!originAllowed(context)) {
@@ -305,6 +669,7 @@ app.post('/api/vault/set', async (context) => {
     return context.json({ error: 'ref_and_value_required' }, 400);
   }
   await vault.set(ref, value);
+  audit.record({ actor: actorOf(context), action: 'vault.set', target: ref });
   return context.json({ ok: true, ref });
 });
 
@@ -315,7 +680,270 @@ app.post('/api/vault/remove', async (context) => {
     return context.json({ error: 'invalid_ref' }, 400);
   }
   await vault.remove(ref);
+  audit.record({ actor: actorOf(context), action: 'vault.remove', target: ref });
   return context.json({ ok: true, ref });
+});
+
+/**
+ * The official model catalog a key can call, straight from the provider's own
+ * /models endpoint — the canvas never asks the user to type model ids by hand.
+ */
+type CatalogPayload = { data?: Array<{ id?: string }>; models?: Array<{ id?: string }> };
+type CatalogCache = Record<string, { models: string[]; fetchedAt: number; baseUrl: string }>;
+const catalogCachePath = () => join(stateDir, 'model-catalogs.json');
+
+function readCatalogCache(): CatalogCache {
+  try {
+    const parsed = JSON.parse(readFileSync(catalogCachePath(), 'utf8')) as CatalogCache;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeCatalogCache(cache: CatalogCache): void {
+  try {
+    writeFileSync(catalogCachePath(), JSON.stringify(cache, null, 1), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+  } catch {
+    // caching is an optimisation, never a requirement
+  }
+}
+
+async function fetchProviderModels(
+  protocol: 'openai-chat' | 'anthropic-messages',
+  baseUrl: string,
+  apiKey: string
+): Promise<{ ok: boolean; models?: string[]; source?: string; error?: string }> {
+  // Anthropic-compatible gateways often skip /v1/models, so fall back to the
+  // same origin's OpenAI-style endpoint before giving up.
+  const candidates =
+    protocol === 'anthropic-messages'
+      ? [`${baseUrl}/v1/models`, `${baseUrl.replace(/\/anthropic$/, '')}/v1/models`]
+      : [`${baseUrl}/models`];
+  const headers: Record<string, string> =
+    protocol === 'anthropic-messages'
+      ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+      : { authorization: `Bearer ${apiKey}` };
+  let lastStatus = 0;
+  for (const url of candidates) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 12000);
+      let payload: CatalogPayload | null = null;
+      try {
+        const response = await fetch(url, { headers, signal: controller.signal });
+        lastStatus = response.status;
+        if (!response.ok) continue;
+        payload = (await response.json().catch(() => null)) as CatalogPayload | null;
+      } finally {
+        clearTimeout(timer);
+      }
+      const raw: Array<{ id?: string }> = payload?.data ?? payload?.models ?? [];
+      const models = [
+        ...new Set(
+          raw
+            .map((item) => String(item?.id ?? '').trim())
+            .filter((id) => id && !/embedding|tts|whisper|rerank|audio|image/i.test(id))
+        ),
+      ].sort((a, b) => a.localeCompare(b));
+      if (models.length) return { ok: true, models, source: url };
+    } catch {
+      continue;
+    }
+  }
+  return { ok: false, error: `provider returned ${lastStatus || 'no catalog'}` };
+}
+
+app.get('/api/models/catalog', (context) =>
+  context.json({ ok: true, catalogs: readCatalogCache() })
+);
+
+/** Pull every configured key's real catalog once and cache it. */
+app.post('/api/models/refresh', async (context) => {
+  const cache = readCatalogCache();
+  const refreshed: string[] = [];
+  const failed: Array<{ ref: string; error: string }> = [];
+  for (const family of modelFamilies()) {
+    const apiKey = await vault.get(family.vaultRef);
+    if (!apiKey) continue;
+    const result = await fetchProviderModels(family.protocol, family.baseUrl, apiKey);
+    if (result.ok && result.models?.length) {
+      cache[family.vaultRef] = {
+        models: result.models,
+        fetchedAt: Date.now(),
+        baseUrl: family.baseUrl,
+      };
+      refreshed.push(`${family.slot}:${result.models.length}`);
+    } else {
+      failed.push({ ref: family.vaultRef, error: result.error ?? 'unknown' });
+    }
+  }
+  writeCatalogCache(cache);
+  audit.record({
+    actor: actorOf(context),
+    action: 'models.refresh',
+    detail: { refreshed: refreshed.length, failed: failed.length },
+  });
+  return context.json({ ok: failed.length === 0, refreshed, failed, catalogs: cache });
+});
+
+app.post('/api/connections/models', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, unknown> | null;
+  const protocol = body?.protocol === 'anthropic-messages' ? 'anthropic-messages' : 'openai-chat';
+  const baseUrl = String(body?.baseUrl ?? '').trim().replace(/\/+$/, '');
+  if (!baseUrl) return context.json({ ok: false, error: 'baseUrl_required' }, 400);
+
+  const connectionId = typeof body?.connectionId === 'string' ? body.connectionId : '';
+  const apiKey =
+    String(body?.apiKey ?? '').trim() ||
+    (connectionId ? ((await vault.get(connectionId)) ?? '') : '');
+  if (!apiKey) return context.json({ ok: false, error: 'key_required' }, 400);
+
+  const result = await fetchProviderModels(protocol, baseUrl, apiKey);
+  if (result.ok) {
+    // remember what this key can really call, so defaults stop being guesses
+    const cache = readCatalogCache();
+    cache[connectionId || baseUrl] = {
+      models: result.models ?? [],
+      fetchedAt: Date.now(),
+      baseUrl,
+    };
+    writeCatalogCache(cache);
+    return context.json({ ok: true, models: result.models, source: result.source });
+  }
+  return context.json({ ok: false, error: result.error ?? 'fetch_failed' }, 502);
+});
+
+/** Providers saved in CC Switch (~/.cc-switch/cc-switch.db). Keys are never returned. */
+app.get('/api/connections/ccswitch', async (context) => {
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import('node:sqlite'));
+  } catch {
+    return context.json({ ok: false, error: 'node:sqlite_unavailable' }, 503);
+  }
+  const dbPath = join(homedir(), ".cc-switch", "cc-switch.db");
+  if (!existsSync(dbPath)) return context.json({ ok: true, providers: [] });
+  try {
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const rows = db.prepare('SELECT id, app_type, name, settings_config, is_current FROM providers').all() as Array<Record<string, unknown>>;
+    db.close();
+    const providers = [];
+    for (const row of rows) {
+      if (row.app_type !== 'claude') continue;
+      let baseUrl = '';
+      let hasKey = false;
+      try {
+        const parsed = JSON.parse(String(row.settings_config ?? '{}'));
+        const env = parsed.env ?? parsed;
+        baseUrl = String(env.ANTHROPIC_BASE_URL ?? '').trim();
+        hasKey = Boolean(env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY);
+      } catch {
+        continue;
+      }
+      if (!baseUrl || !hasKey) continue;
+      providers.push({
+        id: String(row.id),
+        name: String(row.name ?? row.id),
+        baseUrl,
+        protocol: 'anthropic-messages',
+        isCurrent: Boolean(row.is_current),
+      });
+    }
+    return context.json({ ok: true, providers });
+  } catch (error) {
+    return context.json(
+      { ok: false, error: error instanceof Error ? error.message : 'ccswitch_read_failed' },
+      500
+    );
+  }
+});
+
+/** Imports the selected CC Switch providers: keys go straight into the vault and are never echoed back. */
+app.post('/api/connections/ccswitch/import', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, unknown> | null;
+  const ids = Array.isArray(body?.ids) ? body.ids.map(String).slice(0, 20) : [];
+  if (!ids.length) return context.json({ ok: false, error: 'ids_required' }, 400);
+
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import('node:sqlite'));
+  } catch {
+    return context.json({ ok: false, error: 'node:sqlite_unavailable' }, 503);
+  }
+  const dbPath = join(homedir(), ".cc-switch", "cc-switch.db");
+  if (!existsSync(dbPath)) return context.json({ ok: false, error: 'ccswitch_not_found' }, 404);
+  try {
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const imported = [];
+    const failed: string[] = [];
+    for (const id of ids) {
+      const row = db
+        .prepare('SELECT id, name, settings_config FROM providers WHERE id = ?')
+        .get(id) as Record<string, unknown> | undefined;
+      if (!row) {
+        failed.push(String(id));
+        continue;
+      }
+      let baseUrl = '';
+      let apiKey = '';
+      try {
+        const parsed = JSON.parse(String(row.settings_config ?? '{}'));
+        const env = parsed.env ?? parsed;
+        baseUrl = String(env.ANTHROPIC_BASE_URL ?? '').trim();
+        apiKey = String(env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY ?? '');
+      } catch {
+        failed.push(String(id));
+        continue;
+      }
+      if (!baseUrl || !apiKey) {
+        failed.push(String(id));
+        continue;
+      }
+      const connectionId = `ccsw-${String(row.id).replace(/-/g, '').slice(0, 12)}`;
+      await vault.set(connectionId, apiKey);
+      // The catalog routes by model to a key SLOT (conn-moonshot, conn-zhipu,
+      // …). Seed the slot with this key when the slot is still empty, so an
+      // imported provider works in live runs without extra configuration.
+      const slot =
+        baseUrl.includes('moonshot.cn') ? 'conn-moonshot'
+        : baseUrl.includes('deepseek') ? 'conn-deepseek'
+        : baseUrl.includes('minimaxi') ? 'conn-minimax'
+        : baseUrl.includes('bigmodel') ? 'conn-zhipu'
+        : '';
+      if (slot && !(await vault.get(slot))) {
+        await vault.set(slot, apiKey);
+      }
+      audit.record({
+        actor: actorOf(context),
+        action: 'ccswitch.import',
+        target: connectionId,
+        detail: { slot: slot || 'none' },
+      });
+      imported.push({
+        id: connectionId,
+        label: `${row.name}（CC Switch）`,
+        provider: String(row.name ?? row.id),
+        protocol: 'anthropic-messages',
+        baseUrl,
+        models: [],
+        status: 'untested',
+        tools: ['fs.read'],
+        approval: 'always',
+        note: '从 CC Switch 导入：key 已存入保险库。点「拉取官方模型」填充目录。',
+      });
+    }
+    db.close();
+    return context.json({ ok: failed.length === 0, imported, failed });
+  } catch (error) {
+    return context.json(
+      { ok: false, error: error instanceof Error ? error.message : 'ccswitch_import_failed' },
+      500
+    );
+  }
 });
 
 app.post('/api/connections/test', async (context) => {
@@ -713,13 +1341,13 @@ app.post('/api/files', async (context) => {
 });
 
 app.get('/api/canvas', (context) => {
-  const file = join(stateDir, 'canvas.json');
-  if (!existsSync(file)) return context.json({ ok: true, canvas: null });
-  try {
-    return context.json({ ok: true, canvas: JSON.parse(readFileSync(file, 'utf8')) });
-  } catch {
-    return context.json({ ok: true, canvas: null });
-  }
+  const document = canvasStore.read();
+  const exists = existsSync(join(stateDir, 'canvas.json'));
+  return context.json({
+    ok: true,
+    canvas: exists ? document : null,
+    revision: document.revision,
+  });
 });
 
 app.put('/api/canvas', async (context) => {
@@ -727,21 +1355,144 @@ app.put('/api/canvas', async (context) => {
   if (!body || !Array.isArray(body.nodes) || !Array.isArray(body.edges)) {
     return context.json({ error: 'nodes_and_edges_required' }, 400);
   }
-  const payload = JSON.stringify({
-    version: 1,
-    savedAt: Date.now(),
-    orchestratorId: String(body.orchestratorId ?? ''),
-    nodes: body.nodes.slice(0, 300),
-    edges: body.edges.slice(0, 600),
-  });
-  if (payload.length > 5 * 1024 * 1024) {
-    return context.json({ error: 'canvas_too_large' }, 413);
+  try {
+    const document = canvasStore.write({
+      orchestratorId: String(body.orchestratorId ?? ''),
+      nodes: body.nodes,
+      edges: body.edges,
+      baseRevision: typeof body.revision === 'number' ? body.revision : undefined,
+    });
+    audit.record({
+      actor: actorOf(context),
+      action: 'canvas.put',
+      target: `r${document.revision}`,
+      detail: { nodes: document.nodes.length, edges: document.edges.length },
+    });
+    return context.json({ ok: true, revision: document.revision });
+  } catch (error) {
+    if (error instanceof CanvasConflict) {
+      return context.json(
+        {
+          ok: false,
+          error: 'canvas_conflict',
+          revision: error.serverRevision,
+          canvas: error.serverDocument,
+        },
+        409
+      );
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return context.json({ ok: false, error: message }, message === 'canvas_too_large' ? 413 : 400);
   }
-  const file = join(stateDir, 'canvas.json');
-  const temp = join(stateDir, 'canvas.json.tmp');
-  writeFileSync(temp, payload, { encoding: 'utf8', mode: 0o600 });
-  renameSync(temp, file);
-  return context.json({ ok: true });
+});
+
+app.get('/api/canvas/summary', (context) => {
+  const summary = canvasSummary(canvasStore.read());
+  return context.body(summary, 200, {
+    'content-type': 'text/plain; charset=utf-8',
+    'cache-control': 'no-store',
+  });
+});
+
+app.get('/api/canvas/svg', (context) => {
+  const svg = canvasSvg(canvasStore.read());
+  return context.body(svg, 200, {
+    'content-type': 'image/svg+xml; charset=utf-8',
+    'cache-control': 'no-store',
+  });
+});
+
+/**
+ * A canvas you cannot hand to anyone else is a dead end. This produces a
+ * standalone page (or Markdown) with the diagram inlined, so the board can be
+ * attached to a PR, a doc, or a chat without the app running.
+ */
+app.get('/api/canvas/export', (context) => {
+  const document = canvasStore.read();
+  const format = context.req.query('format');
+  if (format === 'md') {
+    const markdown =
+      '# 牵丝画布\n\n' +
+      '导出于 ' +
+      new Date().toLocaleString('zh-CN') +
+      '\n\n```text\n' +
+      canvasSummary(document) +
+      '\n```\n';
+    return context.body(markdown, 200, {
+      'content-type': 'text/markdown; charset=utf-8',
+      'content-disposition': 'attachment; filename="qiansi-canvas.md"',
+    });
+  }
+  const escapeHtml = (value: string) =>
+    value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  const html =
+    '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<title>牵丝画布</title><style>' +
+    'body{margin:0;background:#0b1622;color:#e6edf6;font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif}' +
+    'header{padding:20px 28px;border-bottom:1px solid #1c2836;display:flex;gap:12px;align-items:baseline}' +
+    'h1{margin:0;font-size:16px;font-weight:600;letter-spacing:.06em}' +
+    'header span{color:#7c8ba1;font-size:12px}' +
+    'main{padding:20px 28px 40px}svg{max-width:100%;height:auto;border:1px solid #1c2836;border-radius:12px}' +
+    'pre{margin-top:28px;padding:18px 20px;background:#0e1621;border:1px solid #1c2836;border-radius:12px;' +
+    'color:#9fb0c6;font-size:12.5px;line-height:1.75;white-space:pre-wrap;word-break:break-word}' +
+    'footer{padding:0 28px 28px;color:#5b6b80;font-size:11px}' +
+    '</style></head><body><header><h1>牵丝 · 画布</h1><span>' +
+    document.nodes.length +
+    ' 节点 / ' +
+    document.edges.length +
+    ' 连线 · r' +
+    document.revision +
+    '</span></header><main>' +
+    canvasSvg(document) +
+    '<pre>' +
+    escapeHtml(canvasSummary(document)) +
+    '</pre></main><footer>由牵丝导出于 ' +
+    escapeHtml(new Date().toLocaleString('zh-CN')) +
+    '</footer></body></html>';
+  return context.body(html, 200, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store',
+  });
+});
+
+/**
+ * The single write path for agents: small, batched, and each op reports its own
+ * error so one bad op never discards the rest of the batch.
+ */
+app.post('/api/canvas/ops', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const ops = Array.isArray(body?.ops) ? (body.ops as CanvasOp[]) : [];
+  if (!ops.length) return context.json({ ok: false, error: 'ops_required' }, 400);
+  if (ops.length > 200) return context.json({ ok: false, error: 'too_many_ops' }, 400);
+  try {
+    const result = canvasStore.apply(ops);
+    if (result.applied > 0) {
+      audit.record({
+        actor: actorOf(context),
+        action: 'canvas.ops',
+        target: `r${result.document.revision}`,
+        detail: {
+          applied: result.applied,
+          ops: ops.slice(0, 12).map((op) => (op as { op?: string })?.op ?? 'unknown'),
+          errors: result.errors.length,
+        },
+      });
+    }
+    return context.json({
+      ok: result.errors.length === 0,
+      applied: result.applied,
+      errors: result.errors,
+      revision: result.document.revision,
+      summary: canvasSummary(result.document),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return context.json({ ok: false, error: message }, message === 'canvas_too_large' ? 413 : 400);
+  }
 });
 
 app.delete('/api/files/:id', (context) => {
@@ -771,6 +1522,13 @@ app.post('/api/approvals', async (context) => {
     createdAt: Date.now(),
   };
   approvals.set(record.id, record);
+  persistApprovals();
+  audit.record({
+    actor: actorOf(context),
+    action: 'approval.request',
+    target: record.id,
+    detail: { risk: record.risk, action: record.action.slice(0, 120) },
+  });
   return context.json(record);
 });
 
@@ -795,6 +1553,13 @@ app.post('/api/approvals/:id/resolve', async (context) => {
   record.status = decision;
   record.note = typeof body?.note === 'string' ? body.note.slice(0, 500) : undefined;
   record.resolvedAt = Date.now();
+  persistApprovals();
+  audit.record({
+    actor: actorOf(context),
+    action: 'approval.resolve',
+    target: record.id,
+    detail: { decision, note: record.note },
+  });
   return context.json(record);
 });
 
@@ -818,6 +1583,12 @@ app.get('/api/activity', async (context) =>
     await new Promise<void>(() => {});
   })
 );
+
+app.get('/api/audit', (context) => {
+  const limit = Math.max(1, Math.min(2000, Number(context.req.query('limit') ?? 200)));
+  const items = audit.tail(limit);
+  return context.json({ ok: true, count: items.length, items });
+});
 
 app.get('/api/usage', (context) =>
   context.json({
@@ -860,12 +1631,29 @@ app.post('/api/commands', async (context) => {
   if (cached) return context.json(cached);
 
   if (body?.type === 'run.stop') {
+    const stopAdmission = policy.admit(actorOf(context), 'run.stop');
+    if (!stopAdmission.allowed) {
+      audit.record({
+        actor: actorOf(context),
+        action: 'policy.denied',
+        target: 'run.stop',
+        detail: { reason: stopAdmission.reason },
+      });
+      return context.json(
+        { error: 'not_admitted', scope: 'run.stop', reason: stopAdmission.reason },
+        403
+      );
+    }
     const runId = String(body?.payload?.runId ?? '');
     const controller = runAborts.get(runId);
     if (!controller) {
       return context.json({ error: 'run_not_found' }, 404);
     }
     controller.abort();
+    if (activeLiveRunId === runId) activeLiveRunId = null;
+    // Every stop is recorded, because stopping is allowed to anyone holding the
+    // token — that is only safe if it always leaves a trace.
+    audit.record({ actor: actorOf(context), action: 'run.stop', target: runId });
     const response = { ok: true, runId, stopped: true };
     idempotency.set(commandId, response);
     return context.json(response);
@@ -877,6 +1665,31 @@ app.post('/api/commands', async (context) => {
 
   const runId = randomUUID();
   const mode = body?.payload?.mode === 'live' ? 'live' : 'demo';
+
+  // Who is asking for this run, and does the policy let them? A refusal here is
+  // the difference between "an agent can start a paid run whenever it likes"
+  // and "an agent can start one because someone allowed it".
+  const runActor = actorOf(context);
+  const runAdmission = policy.admit(runActor, 'run.start');
+  if (!runAdmission.allowed) {
+    audit.record({
+      actor: runActor,
+      action: 'policy.denied',
+      target: 'run.start',
+      detail: { reason: runAdmission.reason },
+    });
+    return context.json(
+      {
+        error: 'not_admitted',
+        scope: 'run.start',
+        actor: runActor,
+        reason: runAdmission.reason,
+        policyVersion: runAdmission.policyVersion,
+      },
+      403
+    );
+  }
+
   const requestedBudget = (body?.payload?.budget ?? {}) as Record<string, unknown>;
   const budget = {
     maxTotalTokens: Number(requestedBudget.maxTotalTokens ?? 200000),
@@ -902,23 +1715,162 @@ app.post('/api/commands', async (context) => {
     .join('\n');
 
   if (mode === 'live') {
+    const requestedGoal =
+      typeof body?.payload?.goal === 'string' ? String(body.payload.goal).trim().slice(0, 500) : '';
+    const liveRunPlan = requestedGoal ? { ...livePlan, goal: requestedGoal } : livePlan;
     const credentials = (body?.payload?.credentials ?? {}) as Record<string, string | undefined>;
     const vaultDeepseek = await vault.get('conn-deepseek');
     const vaultMinimax = await vault.get('conn-minimax');
     const vaultRelay = await vault.get('conn-claude-relay');
+    const vaultMoonshot =
+      (await vault.get('conn-moonshot')) ?? (await vault.get('conn-kimi'));
+    const vaultZhipu = await vault.get('conn-zhipu');
+    const vaultQwen = await vault.get('conn-qwen');
+    const vaultOpenai = await vault.get('conn-openai');
     const deepseekKey = String(credentials.deepseek ?? vaultDeepseek ?? process.env.DEEPSEEK_API_KEY ?? '');
     const minimaxKey = String(credentials.minimax ?? vaultMinimax ?? process.env.MINIMAX_API_KEY ?? '');
+    const moonshotKey = String(credentials.moonshot ?? vaultMoonshot ?? process.env.MOONSHOT_API_KEY ?? '');
+    const zhipuKey = String(credentials.zhipu ?? vaultZhipu ?? process.env.ZHIPUAI_API_KEY ?? '');
+    const qwenKey = String(credentials.qwen ?? vaultQwen ?? process.env.DASHSCOPE_API_KEY ?? '');
+    const openaiKey = String(credentials.openai ?? vaultOpenai ?? process.env.OPENAI_API_KEY ?? '');
     const relayKey = String(credentials.relay ?? vaultRelay ?? process.env.ANTHROPIC_AUTH_TOKEN ?? '');
+    const keyBySlot: Record<KeySlot, string> = {
+      deepseek: deepseekKey,
+      minimax: minimaxKey,
+      moonshot: moonshotKey,
+      zhipu: zhipuKey,
+      qwen: qwenKey,
+      openai: openaiKey,
+      relay: relayKey,
+    };
+
+    /**
+     * What is drawn on the board is what runs: nodes become model profiles
+     * routed through the catalog (one key serves its whole model family), and
+     * the orchestrator's outgoing wires become subtasks. A canvas that cannot
+     * run is refused outright — falling back to a built-in demo would look
+     * like it worked.
+     */
+    const canvasDocument = canvasStore.read();
+    const canvasFiles = collectCanvasFiles(canvasDocument, stateDir);
+    const allowDemoFallback = body?.payload?.allowDemoFallback === true;
+    const canvasPlan = buildPlanFromCanvas(canvasDocument, requestedGoal, {
+      files: canvasFiles,
+    });
+
+    if (!canvasPlan && !allowDemoFallback) {
+      const diagnosis = diagnoseCanvas(canvasDocument);
+      audit.record({
+        actor: actorOf(context),
+        action: 'run.refused',
+        target: 'canvas_not_runnable',
+        detail: { reasons: diagnosis.reasons },
+      });
+      return context.json(
+        {
+          error: 'canvas_not_runnable',
+          reasons: diagnosis.reasons,
+          hint: '在画布上至少放两个带模型的节点并设好主控再运行；只想看流程可以传 allowDemoFallback: true 跑内置演示。',
+        },
+        422
+      );
+    }
+
+    const profilesToRun = canvasPlan?.profiles ?? liveProfiles;
+    const planSource: 'canvas' | 'builtin' = canvasPlan ? 'canvas' : 'builtin';
+    runPlanSource.set(runId, planSource);
+
+    /**
+     * The 主控 node produces nothing — it routes. Its model is used for the
+     * acceptance gate only when it is a cheap tier; otherwise the catalog's
+     * cheapest reachable model takes the job, because a gate that costs as
+     * much as the work it gates saves nothing.
+     */
+    const orchestratorModel = String(
+      canvasDocument.nodes.find((node) => node.id === canvasDocument.orchestratorId)?.data
+        ?.model ?? ''
+    );
+    const orchestratorSlot = orchestratorModel ? resolveModelRoute(orchestratorModel).slot : null;
+    const routerPick =
+      orchestratorModel &&
+      isCheapModel(orchestratorModel) &&
+      orchestratorSlot &&
+      keyBySlot[orchestratorSlot]
+        ? { slot: orchestratorSlot, model: orchestratorModel }
+        : routerChoice(keyBySlot);
+
+    const basePlan = canvasPlan?.plan ?? liveRunPlan;
+    const planToRun = routerPick
+      ? {
+          ...basePlan,
+          rationale: `${basePlan.rationale ?? ''} 分派闸门：${routerPick.model}（只判定明显通过，拿不准交给完整评委）。`.trim(),
+        }
+      : basePlan;
+
+    // relay is always required: the acceptance judge runs on it even when every
+    // worker node is served by another key.
+    const needed = new Set<KeySlot>(canvasPlan ? ['relay'] : ['deepseek', 'minimax', 'relay']);
+    for (const slot of canvasPlan?.slotByProfile.values() ?? []) needed.add(slot);
 
     const missing: string[] = [];
-    if (!deepseekKey) missing.push('deepseek');
-    if (!minimaxKey) missing.push('minimax');
-    if (!relayKey) missing.push('relay');
+    for (const slot of needed) {
+      if (!keyBySlot[slot]) missing.push(slot);
+    }
     if (missing.length > 0) {
       return context.json({ error: 'live_mode_missing_credentials', missing }, 503);
     }
 
-    store.create(runId, livePlan.goal);
+    if (activeLiveRunId) {
+      audit.record({
+        actor: actorOf(context),
+        action: 'run.rejected',
+        target: 'run_in_progress',
+        detail: { active: activeLiveRunId },
+      });
+      return context.json(
+        {
+          error: 'run_in_progress',
+          runId: activeLiveRunId,
+          hint: '已有一个真实运行在进行。等它结束，或先 POST run.stop 停掉它。',
+        },
+        409
+      );
+    }
+    activeLiveRunId = runId;
+
+    audit.record({
+      actor: actorOf(context),
+      action: 'run.start',
+      target: runId,
+      detail: {
+        mode,
+        planSource,
+        tasks: planToRun.subtasks.length,
+        models: profilesToRun.map((profile) => profile.model).slice(0, 8),
+        files: fileSummary(canvasFiles) || undefined,
+      },
+    });
+
+    store.create(runId, planToRun.goal);
+    const mandate: Mandate = {
+      runId,
+      actor: runActor,
+      admission: runAdmission.admission === 'explicit' ? 'explicit' : 'inferred',
+      policyVersion: runAdmission.policyVersion,
+      scopes: runAdmission.scopes,
+      tasks: planToRun.subtasks.length,
+      createdAt: Date.now(),
+      needsReview: runAdmission.admission === 'inferred',
+    };
+    store.setMandate(runId, mandate);
+    if (mandate.needsReview) {
+      audit.record({
+        actor: runActor,
+        action: 'run.needs_review',
+        target: runId,
+        detail: { reason: runAdmission.reason },
+      });
+    }
     const apiKeys: Record<string, string> = {
       'live-deepseek': deepseekKey,
       'live-minimax': minimaxKey,
@@ -926,11 +1878,17 @@ app.post('/api/commands', async (context) => {
       'live-opus': relayKey,
       'live-haiku': relayKey,
     };
+    if (canvasPlan) {
+      for (const profile of canvasPlan.profiles) {
+        const slot = canvasPlan.slotByProfile.get(profile.id);
+        apiKeys[profile.id] = slot ? keyBySlot[slot] : relayKey;
+      }
+    }
     const controller = new AbortController();
     runAborts.set(runId, controller);
 
     const orchestrator = new Orchestrator({
-      profiles: liveProfiles,
+      profiles: profilesToRun,
       adapters: {
         'openai-chat': new OpenAIChatAdapter(),
         'anthropic-messages': new AnthropicMessagesAdapter(),
@@ -939,22 +1897,81 @@ app.post('/api/commands', async (context) => {
       concurrency: 1,
       maxRetries: 1,
       taskTimeoutMs: 45000,
-      maxOutputTokens: 512,
+      // Reasoning models spend this budget on thinking before the answer; 512
+      // left real runs with an empty output and a "too short" verdict.
+      maxOutputTokens: 4096,
       budget,
       teamContext,
       signal: controller.signal,
       runId,
-      accept: createLiveJudge(relayKey, teamContext),
+      accept: createRoutedJudge({
+        router: routerPick
+          ? {
+              profile: profileForModel(routerPick.model, '分派闸门'),
+              apiKey: keyBySlot[routerPick.slot],
+            }
+          : undefined,
+        full: {
+          profile: liveProfiles.find((profile) => profile.id === 'live-sonnet')!,
+          apiKey: relayKey,
+        },
+        teamContext,
+      }),
     });
+    const gateCounts = { structural: 0, cheap: 0, full: 0 };
     orchestrator.on((event) => {
-      store.append(runId, event);
-      if (event.type === 'run.finished') runAborts.delete(runId);
+      store.append(runId, redactRunEvent(event));
+      if (event.type === 'task.acceptance' && event.result.gate) gateCounts[event.result.gate] += 1;
+      if (event.type !== 'run.finished') return;
+      runAborts.delete(runId);
+      if (activeLiveRunId === runId) activeLiveRunId = null;
+      audit.record({
+        actor: 'server',
+        action: 'run.gates',
+        target: runId,
+        detail: { ...gateCounts, router: routerPick?.model ?? null },
+      });
+      if (planSource !== 'canvas') return;
+      // A mandate is re-checked before it is used again. If the policy tightened
+      // while the run was going, the run still finishes, but it no longer gets
+      // to write back what it produced.
+      const revalidated = policy.revalidate(store.getMandate(runId), 'canvas.write');
+      if (!revalidated.ok) {
+        audit.record({
+          actor: 'server',
+          action: 'mandate.revoked',
+          target: runId,
+          detail: { reason: revalidated.reason },
+        });
+        return;
+      }
+      // No studio window is necessarily open when an agent starts a run, so the
+      // server is the one that puts the artifacts back on the board.
+      const snapshot = store.snapshot(runId);
+      const applied = writeRunArtifacts(
+        canvasStore,
+        planToRun,
+        snapshot?.outputs ?? {},
+        event.status !== 'done'
+      );
+      if (applied > 0) {
+        audit.record({
+          actor: 'server',
+          action: 'canvas.writeback',
+          target: runId,
+          detail: { nodes: applied, status: event.status },
+        });
+      }
     });
-    void orchestrator.run(livePlan).catch(() => {
+    void orchestrator.run(planToRun).catch(() => {
+      if (activeLiveRunId === runId) activeLiveRunId = null;
       store.append(runId, { type: 'run.finished', runId, status: 'failed' });
     });
   } else {
-    const plan = body?.payload?.plan ?? demoPlan;
+    const requestedPlan = body?.payload?.plan ?? demoPlan;
+    const requestedGoal =
+      typeof body?.payload?.goal === 'string' ? String(body.payload.goal).trim().slice(0, 500) : '';
+    const plan = requestedGoal ? { ...requestedPlan, goal: requestedGoal } : requestedPlan;
     store.create(runId, String(plan.goal ?? 'demo'));
     const controller = new AbortController();
     runAborts.set(runId, controller);
@@ -972,7 +1989,7 @@ app.post('/api/commands', async (context) => {
       runId,
     });
     orchestrator.on((event) => {
-      store.append(runId, event);
+      store.append(runId, redactRunEvent(event));
       if (event.type === 'run.finished') runAborts.delete(runId);
     });
     void orchestrator.run(plan).catch(() => {
@@ -986,6 +2003,94 @@ app.post('/api/commands', async (context) => {
 });
 
 app.get('/api/runs', (context) => context.json({ items: store.list() }));
+
+/**
+ * Live snapshot of the run currently in flight, for any client that did not
+ * start it — an agent driving the canvas through MCP, or a second window.
+ * Task statuses are folded from the event log because the stored plan keeps
+ * every subtask at `pending`.
+ */
+app.get('/api/runs/active', (context) => {
+  if (!activeLiveRunId) return context.json({ ok: true, run: null });
+  const record = store.get(activeLiveRunId);
+  if (!record) return context.json({ ok: true, run: null });
+
+  const statuses = new Map<string, 'pending' | 'running' | 'done' | 'failed'>();
+  for (const envelope of record.events) {
+    const event = envelope.event as { type: string; taskId?: string };
+    if (!event.taskId) continue;
+    if (event.type === 'task.started') statuses.set(event.taskId, 'running');
+    else if (event.type === 'task.completed') statuses.set(event.taskId, 'done');
+    else if (event.type === 'task.failed') statuses.set(event.taskId, 'failed');
+  }
+
+  const tasks = (record.plan?.subtasks ?? []).map((task) => ({
+    taskId: task.id,
+    nodeId: task.assignedNodeId ?? null,
+    title: task.title,
+    effort: task.effort,
+    status: statuses.get(task.id) ?? 'pending',
+  }));
+
+  return context.json({
+    ok: true,
+    run: {
+      runId: record.runId,
+      status: record.status,
+      goal: record.goal,
+      startedAt: record.startedAt,
+      tokens: record.usage?.total ?? 0,
+      tasks,
+    },
+  });
+});
+
+/**
+ * The structured contract an agent (or a script) needs after starting a run:
+ * did it finish, what did each task produce, where did the plan come from.
+ */
+app.get('/api/runs/:id/result', (context) => {
+  const runId = context.req.param('id');
+  const snapshot = store.snapshot(runId);
+  if (!snapshot) return context.json({ error: 'not_found' }, 404);
+  const outputs = (snapshot.outputs ?? {}) as Record<string, string>;
+  const tasks = (snapshot.plan?.subtasks ?? []).map(
+    (task: { id: string; title: string; assignedNodeId?: string; status?: string; acceptanceCriteria?: string }) => {
+      const output = outputs[task.id] ?? '';
+      // The stored plan is the one the engine was handed; its subtask statuses
+      // are never mutated, so derive the real outcome from what came back.
+      const status = output
+        ? 'done'
+        : snapshot.status === 'failed'
+          ? 'failed'
+          : snapshot.status === 'done'
+            ? 'done'
+            : 'pending';
+      return {
+        id: task.id,
+        title: task.title,
+        nodeId: task.assignedNodeId ?? null,
+        status,
+        acceptance: task.acceptanceCriteria ?? '',
+        output,
+        chars: output.length,
+      };
+    }
+  );
+  return context.json({
+    ok: true,
+    runId,
+    status: snapshot.status,
+    goal: snapshot.goal,
+    planSource: runPlanSource.get(runId) ?? 'builtin',
+    startedAt: snapshot.startedAt,
+    finishedAt: snapshot.finishedAt ?? null,
+    usage: snapshot.usage,
+    mandate: snapshot.mandate ?? null,
+    tasks,
+    canvasUrl: `/api/runs/${runId}/events`,
+  });
+});
 
 app.get('/api/runs/:id/snapshot', (context) => {
   const snapshot = store.snapshot(context.req.param('id'));
@@ -1045,6 +2150,19 @@ app.use('/v1/*', async (context, next) => {
   if (bearer !== token && header !== token) {
     return context.json({ error: { message: 'unauthorized', type: 'auth_error' } }, 401);
   }
+  const admission = policy.admit(actorOf(context), 'gateway.use');
+  if (!admission.allowed) {
+    audit.record({
+      actor: actorOf(context),
+      action: 'policy.denied',
+      target: context.req.path,
+      detail: { scope: 'gateway.use', reason: admission.reason },
+    });
+    return context.json(
+      { error: { message: `not_admitted: ${admission.reason}`, type: 'auth_error' } },
+      403
+    );
+  }
   return next();
 });
 
@@ -1055,7 +2173,8 @@ app.get('/v1/models', (context) =>
       id: model.id,
       object: 'model',
       created: 0,
-      owned_by: 'qiansi',
+      owned_by: model.slot,
+      label: model.label,
     })),
   })
 );
@@ -1221,14 +2340,36 @@ app.post('/v1/chat/completions', async (context) => {
 const studioDir =
   process.env.QIANSI_STUDIO_DIR ?? join(process.cwd(), '..', 'studio', 'dist');
 
+// Anything under /api or /v1 that no route claimed is a 404 JSON, never the SPA.
+// This must sit before the static catch-all, which would otherwise swallow it.
+app.all('/api/*', (context) =>
+  context.json({ error: 'not_found', path: context.req.path }, 404)
+);
+app.all('/v1/*', (context) =>
+  context.json({ error: { message: 'not_found', type: 'not_found_error' } }, 404)
+);
+
 if (existsSync(join(studioDir, 'index.html'))) {
   app.use('/*', serveStatic({ root: studioDir }));
   app.get('*', serveStatic({ root: studioDir, path: 'index.html' }));
 }
 
+app.notFound((context) => context.text('not found', 404));
+
 const port = Number(process.env.QIANSI_PORT ?? 8787);
 serve({ fetch: app.fetch, port, hostname: '127.0.0.1' }, (info) => {
+  boundPort = info.port;
   console.log(`[qiansi] server http://127.0.0.1:${info.port}`);
+  // The packaged desktop app picks a free port, so agents cannot assume 8787.
+  // Publishing the live port here is what lets the MCP server and hooks find us.
+  try {
+    writeFileSync(join(stateDir, 'server-port'), String(info.port), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+  } catch {
+    // a read-only state dir is not fatal: agents fall back to QIANSI_URL/8787
+  }
   if (process.env.QIANSI_TOKEN) {
     console.log('[qiansi] token from QIANSI_TOKEN');
   } else {

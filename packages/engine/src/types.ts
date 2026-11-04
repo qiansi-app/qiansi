@@ -203,6 +203,10 @@ export interface AcceptanceResult {
   suggestedFix?: string;
   /** True when the judge could not produce a usable verdict and a human should look. */
   needsHuman?: boolean;
+  /** Which stage settled this verdict: free structural check, cheap router, or full judge. */
+  gate?: 'structural' | 'cheap' | 'full';
+  /** The router's confidence, when the cheap gate made the call. */
+  confidence?: number;
 }
 
 export interface ChoiceOption {

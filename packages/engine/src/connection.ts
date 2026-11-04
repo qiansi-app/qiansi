@@ -126,5 +126,9 @@ export function redactSecrets(text: string, secrets: Array<string | undefined>):
   }
   return output
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
-    .replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-[redacted]');
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-[redacted]')
+    // Providers echo key ids back in billing errors (Moonshot reports `ak-…`).
+    .replace(/\b(?:ak|pk|rk|gsk|sk-ant|sk-or)-[A-Za-z0-9_-]{8,}/g, '[redacted]')
+    .replace(/\bAIza[0-9A-Za-z_-]{20,}/g, '[redacted]')
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '[redacted]');
 }
