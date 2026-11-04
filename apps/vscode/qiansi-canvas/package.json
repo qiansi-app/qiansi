@@ -1,0 +1,65 @@
+{
+  "name": "qiansi-canvas",
+  "displayName": "牵丝画布 Qiansi Canvas",
+  "description": "在 VS Code 侧边打开牵丝的多 AI 协作画布：拖拽节点、看产物、跑编排，与 Claude Code 共享同一份实时画布。",
+  "publisher": "qiansi",
+  "version": "0.1.0",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onUri",
+    "onView:qiansi.canvas.view"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "qiansi",
+          "title": "牵丝画布",
+          "icon": "media/qiansi.svg"
+        }
+      ]
+    },
+    "views": {
+      "qiansi": [
+        {
+          "type": "webview",
+          "id": "qiansi.canvas.view",
+          "name": "画布"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "qiansi.canvas.open",
+        "title": "打开画布面板",
+        "category": "牵丝"
+      },
+      {
+        "command": "qiansi.canvas.openBrowser",
+        "title": "在浏览器打开画布",
+        "category": "牵丝"
+      },
+      {
+        "command": "qiansi.canvas.refresh",
+        "title": "重新连接画布",
+        "category": "牵丝"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "qiansi.canvas.open",
+          "group": "navigation"
+        }
+      ]
+    }
+  }
+}
