@@ -58,7 +58,24 @@ npm run desktop:portable  # 生成 release/Qiansi-portable/Qiansi.exe
 
 便携版自带服务端与画布，双击即可运行。打包、开机自启与已知限制见 [docs/desktop.md](docs/desktop.md)。
 
-模型管理里的“测试连接”已经走本地服务真实探测，不再假装成功。画布的「运行编排」会向本地服务提交真实 live 运行（3 个任务 + 真实评委）；服务或中转凭据不可用时自动回退到本地演示。节点状态与输出通过 SSE 实时流入画布。
+模型管理里的“测试连接”已经走本地服务真实探测，不再假装成功。画布的「运行编排」会向本地服务提交真实 live 运行；服务或中转凭据不可用时自动回退到本地演示。节点状态与输出通过 SSE 实时流入画布。
+
+## 接进 Claude Code / Codex
+
+画布本身就是一个 MCP server，agent 能读、能改，改完牵丝界面 1.5 秒内自动跟上。
+
+```powershell
+claude plugin marketplace add <repo>\plugin
+claude plugin install qiansi@qiansi
+```
+
+装好之后，在 Claude Code 里提一句「画布」就会自动带上当前画布摘要；`/qiansi` 直接读出结构；让 agent「加一个审校节点接到写手后面」，它会在画布上真的加上。
+
+Codex 用 `codex mcp add qiansi -- node <repo>\packages\mcp\server.mjs`，或把 `codex/config.toml.example` 追加进 `~/.codex/config.toml`。
+
+**在 VS Code 里直接看画布**：装 [画布面板扩展](apps/vscode/qiansi-canvas/)，编辑器旁边就是完整可拖拽的牵丝界面，与 agent 的改动实时同步。agent 也可以执行 `start "" "vscode://qiansi.qiansi-canvas/open"` 自动唤起画布面板。
+
+画布也可以导出成独立网页分享：界面「更多 → 导出画布」，或 `GET /api/canvas/export`。
 
 ## 文档
 
@@ -71,7 +88,10 @@ npm run desktop:portable  # 生成 release/Qiansi-portable/Qiansi.exe
 - [连接、执行与保密](docs/connections-and-security.md) — 模型身份可编辑、Key 探测、沙箱工具、连接稳定性、信息保密
 - [本地服务 API](docs/server-api.md) — 端点、认证、SSE、探测行为
 - [桌面版](docs/desktop.md) — Electron 壳、便携打包、开机自启与限制
-- [接入主流 Agent](docs/agent-integration.md) — MCP 工具、OpenAI 兼容网关、审批中继、预算
+- [接入主流 Agent](docs/agent-integration.md) — MCP 工具与资源、画布 API、Claude Code 插件、Codex 接入、审批中继
+- [定位与竞品](docs/positioning.md) — 六种用户需求对应的操作模式、竞品对照、我们满足不了的、差距收敛方案
+- [差距可行性评估](docs/gap-analysis.md) — 定时触发 / SaaS 集成 / RAG / 发布 / 协作 / 移动端 / 模板市场 / 企业能力，逐项判断在单人本地条件下能不能做
+- [从 dsh-superagent 借来的四件事](docs/superagent-adoption.md) — 状态契约与看门狗、验收分流、主控只做分派、Policy + Mandate
 - [架构决策 0003](docs/decisions/0003-desktop.md) — Electron + 便携打包
 - [English README](README.md)
 

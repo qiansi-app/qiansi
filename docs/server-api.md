@@ -10,8 +10,28 @@
 - 数据目录为 `~/.qiansi`；首次启动若只存在旧的 `~/.agentweave`，会整体改名迁移，DPAPI 保险库与运行历史随之保留。
 - Origin 白名单：默认 `http://localhost:5173`、`http://127.0.0.1:5173`；无 Origin 的本地 CLI 请求允许。
 - 未授权返回 401，Origin 不合法返回 403。
+- **策略闸门**：通过 token 之后还要过 Policy（见 `GET /api/policy`）。调用方身份取自 `x-qiansi-agent`（缺省视为 `local-ui`）；作用域不足或 `acceptMode=off` 时返回 403 `not_admitted`。细节见 [superagent-adoption.md](superagent-adoption.md)。
 
 ## 端点
+
+### `GET /api/status`
+
+健康契约，给看门狗用。返回四个退出码之一以及逐部件状态：
+
+```json
+{
+  "code": 0,
+  "state": "ok",
+  "manuallyStopped": false,
+  "parts": { "state": {...}, "vault": {...}, "models": {...}, "canvas": {...}, "run": {...}, "port": {...} },
+  "errors": [],
+  "setup": [],
+  "warnings": [],
+  "load": { "activeRunId": null, "activeRunAgeMs": null, "runningTasks": 0 }
+}
+```
+
+`code`：0 正常或人为停止，1 没在跑（由 CLI 判定），2 有部件坏了且重启无效，3 等人配置。CLI 侧封装为 `qiansi status`，退出码一致。
 
 ### `GET /api/health`
 
@@ -81,6 +101,20 @@ Key 解析顺序：
 
 说明：探测预算 512 token。推理模型可能先输出 `thinking` 再输出正文；`streaming` 认可任一增量，`text` 单独报告是否已进入正文。错误信息在返回前经 `redactSecrets()` 脱敏。
 
+### `GET /api/policy` / `PUT /api/policy`
+
+授权策略。`GET` 返回 `{ ok, policy, revision }`；`PUT` 需要 `policy.write` 作用域（人员默认有，agent 默认没有），body 为 `{ revision, acceptMode, humans, agents }`，版本不匹配返回 409。
+
+- `acceptMode`：`off` 拒绝未在名单内的 agent 发起工作（读与停止不受限），`observe` 放行但标记待复核，`auto` 放行。
+- `agents[].scopes` 从 `canvas.read`、`canvas.write`、`run.start`、`run.stop`、`vault.write`、`model.catalog`、`policy.write`、`gateway.use` 中取。
+- `run.stop` 永远放行（策略不该能挡住停止），每次停止都记审计。
+
+策略文件在 `~/.qiansi/policy.json`，首次启动按「升级不改行为」写入默认值：`acceptMode=auto` + 通配 agent。
+
+### `POST /api/admin/stop`
+
+人为停止：写 `~/.qiansi/manual-stop` 标记后退出进程。需要 `policy.write`。对应 `qiansi stop`，服务启动时清掉标记。
+
 ### `POST /api/commands`
 
 幂等命令入口。支持：
@@ -98,7 +132,7 @@ Key 解析顺序：
 
 相同 `commandId` 重复提交返回同一结果，不会重复执行。
 
-Live 运行限制：每个任务 45 秒超时、输出上限 512 token、最多 1 次重试；依赖任务的产出会作为上游上下文注入下游 prompt。评委使用独立的 sonnet 档连接，25 秒超时后软通过（日志会标注）。
+Live 运行限制：每个任务 45 秒超时、输出上限 4096 token、最多 1 次重试；依赖任务的产出会作为上游上下文注入下游 prompt。验收分三级：结构检查（0 token）→ 便宜闸门（主控节点或目录里最便宜的模型，只放行明显通过）→ 完整评委（sonnet 档，25 秒超时后软通过）。每条判定带 `gate` 字段，运行结束的 `run.gates` 审计给出各级命中次数。`run.start` 还要过策略闸门，运行记录里保存 mandate（谁批准、按哪个策略版本）。
 
 ### `GET /api/runs`
 
