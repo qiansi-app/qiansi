@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Qiansi promo</title>
+<style>
+  :root {
+    --indigo: #0b1622;
+    --indigo-2: #12263a;
+    --silk: #efe7d6;
+    --silk-dim: #c7bda9;
+    --vermilion: #c94f3d;
+    --celadon: #6fb3a8;
+    --ink: #14171a;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    background: var(--indigo);
+    color: var(--silk);
+  }
+  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
+  .stage {
+    position: relative;
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    background:
+      radial-gradient(1200px 700px at 18% 8%, rgba(111, 179, 168, 0.12), transparent 62%),
+      repeating-linear-gradient(90deg, rgba(239, 231, 214, 0.025) 0 1px, transparent 1px 7px),
+      var(--indigo);
+  }
+  .scene {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    visibility: hidden;
+  }
+  .display {
+    font-family: "Source Han Serif SC", "Noto Serif SC", "STZhongsong", "SimSun", serif;
+    font-weight: 700;
+    line-height: 1.12;
+    letter-spacing: 0.01em;
+    margin: 0;
+  }
+  .lede {
+    font-size: 30px;
+    line-height: 1.7;
+    color: var(--silk-dim);
+    margin: 0;
+    font-weight: 400;
+  }
+  .thread-svg { position: absolute; inset: 0; }
+  .thread-svg path, .thread-svg line { fill: none; }
+
+  /* scene 1 */
+  .brandline {
+    position: absolute;
+    left: 120px;
+    top: 92px;
+    font-size: 22px;
+    letter-spacing: 0.18em;
+    color: var(--silk-dim);
+  }
+  .s1 h1 {
+    position: absolute;
+    left: 120px;
+    top: 300px;
+    font-size: 136px;
+  }
+  .s1 h1 span {
+    display: block;
+    clip-path: inset(0 100% 0 0);
+  }
+  .s1 .lede { position: absolute; left: 126px; top: 748px; }
+  .s1 .caption { position: absolute; left: 126px; top: 820px; font-size: 22px; color: rgba(239, 231, 214, 0.45); }
+  .node-dot { fill: var(--silk); opacity: 0; }
+
+  /* scene 2 */
+  .paper {
+    position: absolute;
+    inset: 0;
+    background:
+      repeating-linear-gradient(0deg, rgba(20, 23, 26, 0.035) 0 1px, transparent 1px 5px),
+      repeating-linear-gradient(90deg, rgba(20, 23, 26, 0.025) 0 1px, transparent 1px 6px),
+      #e7deca;
+    clip-path: inset(100% 0 0 0);
+  }
+  .s2 h2 {
+    position: absolute;
+    left: 130px;
+    top: 210px;
+    font-size: 118px;
+    color: var(--ink);
+  }
+  .s2 h2 span { display: block; clip-path: inset(0 100% 0 0); }
+  .s2 .lede {
+    position: absolute;
+    left: 136px;
+    top: 636px;
+    color: #5b5344;
+    max-width: 720px;
+  }
+  .s2 .afterword {
+    position: absolute;
+    left: 136px;
+    top: 760px;
+    font-size: 24px;
+    color: #7b7160;
+  }
+  .loose { position: absolute; left: 1110px; top: 236px; width: 690px; height: 560px; opacity: 0; }
+  .loose .model {
+    position: absolute;
+    font-size: 22px;
+    color: #4c4538;
+    letter-spacing: 0.02em;
+  }
+  .loose .line {
+    position: absolute;
+    height: 2px;
+    background: #8c8270;
+    transform-origin: left center;
+  }
+  .loose .break {
+    position: absolute;
+    height: 3px;
+    background: var(--vermilion);
+    transform-origin: left center;
+  }
+
+  /* scenes 3 and 4 */
+  .s3 .caption, .s4 .caption { position: absolute; left: 118px; top: 160px; width: 660px; }
+  .s3 h2, .s4 h2 { font-size: 78px; margin-bottom: 34px; }
+  .s3 .caption h2 span, .s4 .caption h2 span { display: block; clip-path: inset(0 0 100% 0); }
+  .s3 .lede, .s4 .lede { font-size: 27px; }
+  .s4 .shot img { filter: brightness(1.42) contrast(1.06); }
+  .shot {
+    position: absolute;
+    left: 760px;
+    top: 132px;
+    width: 1060px;
+    padding: 10px;
+    border: 1px solid rgba(239, 231, 214, 0.22);
+    background: rgba(239, 231, 214, 0.025);
+    box-shadow: 0 40px 90px rgba(0, 0, 0, 0.45);
+  }
+  .shot img { display: block; width: 100%; height: auto; }
+  .shot .rule { height: 1px; background: rgba(239, 231, 214, 0.28); margin: 8px 0; }
+  .s3 .callout, .s4 .callout {
+    position: absolute;
+    font-size: 21px;
+    color: var(--silk-dim);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .callout i { display: block; width: 64px; height: 1px; background: var(--celadon); }
+  .s3 .c1 { left: 610px; top: 330px; }
+  .s3 .c2 { left: 610px; top: 560px; }
+  .s3 .c3 { left: 610px; top: 760px; }
+  .s4 .modal-note {
+    position: absolute;
+    left: 690px;
+    top: 838px;
+    font-size: 20px;
+    color: rgba(239, 231, 214, 0.55);
+  }
+
+  /* scene 5 */
+  .s5 h2 { position: absolute; left: 120px; top: 118px; font-size: 78px; }
+  .s5 .rows { position: absolute; left: 120px; top: 330px; width: 1680px; }
+  .row { position: relative; padding: 34px 0 30px; }
+  .row .hair { height: 1px; background: rgba(239, 231, 214, 0.26); transform-origin: left center; }
+  .row .content { display: flex; align-items: baseline; gap: 90px; padding-top: 26px; }
+  .row h3 { font-family: "Source Han Serif SC", "Noto Serif SC", "STZhongsong", "SimSun", serif; font-size: 52px; margin: 0; width: 520px; font-weight: 700; }
+  .row p { margin: 0; font-size: 25px; color: var(--silk-dim); max-width: 760px; line-height: 1.6; }
+
+  /* scene 6 */
+  .s6 { text-align: center; }
+  .s6 .mark { position: absolute; left: 870px; top: 214px; width: 180px; height: 180px; }
+  .s6 h2 { position: absolute; left: 0; right: 0; top: 452px; font-size: 104px; }
+  .s6 .sub { position: absolute; left: 0; right: 0; top: 610px; font-size: 28px; color: var(--silk-dim); }
+  .s6 .url { position: absolute; left: 0; right: 0; top: 760px; font-size: 34px; color: var(--silk); letter-spacing: 0.02em; }
+  .s6 .urlline { position: absolute; left: 660px; top: 822px; width: 600px; height: 2px; background: var(--vermilion); transform-origin: center; }
+  .s6 .fine { position: absolute; left: 0; right: 0; top: 880px; font-size: 21px; color: rgba(239, 231, 214, 0.45); }
+
+  #progress { stroke: var(--vermilion); stroke-width: 2; opacity: 0.6; }
+  .grain {
+    position: absolute; inset: 0; pointer-events: none;
+    background-image: radial-gradient(rgba(255,255,255,0.035) 0.6px, transparent 0.6px);
+    background-size: 3px 3px; opacity: 0.35;
+  }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <svg class="thread-svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+    <path id="progress" d="M 0 1044 L 1920 1044" stroke-dasharray="1920" stroke-dashoffset="1920" />
+  </svg>
+
+  <!-- 1: hook -->
+  <section class="scene s1">
+    <svg class="thread-svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+      <path id="thread1" d="M -80 690 C 360 610, 600 790, 960 690 S 1520 560, 2000 650"
+        stroke="#c94f3d" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="2400" stroke-dashoffset="2400" />
+      <circle class="node-dot" data-dot="1" cx="360" cy="655" r="7" />
+      <circle class="node-dot" data-dot="2" cx="960" cy="690" r="7" />
+      <circle class="node-dot" data-dot="3" cx="1520" cy="600" r="7" />
+    </svg>
+    <div class="brandline">牵丝 Qiansi</div>
+    <h1 class="display"><span>让每个 AI，</span><span>都成为队友</span></h1>
+    <p class="lede">把模型放上画布，让主控拆解、分派、验收。</p>
+    <div class="caption">本地优先的多 AI 协作画布</div>
+  </section>
+
+  <!-- 2: problem -->
+  <section class="scene s2">
+    <div class="paper" id="paper"></div>
+    <h2 class="display"><span>模型越来越多，</span><span>协作仍然靠人</span></h2>
+    <p class="lede">复制、粘贴、来回切换，上下文散在四个窗口里。每个模型都很强，合起来却不像一个团队。</p>
+    <div class="afterword">缺的不是模型，是把它们连起来的那根线。</div>
+    <div class="loose">
+      <div class="model" style="left:10px; top:26px;">DeepSeek</div>
+      <div class="line" data-loose style="left:10px; top:66px; width:520px;"></div>
+      <div class="model" style="left:90px; top:146px;">MiniMax</div>
+      <div class="line" data-loose style="left:90px; top:186px; width:470px;"></div>
+      <div class="model" style="left:40px; top:266px;">Claude</div>
+      <div class="line" data-loose style="left:40px; top:306px; width:560px;"></div>
+      <div class="model" style="left:120px; top:386px;">Kimi</div>
+      <div class="line" data-loose style="left:120px; top:426px; width:430px;"></div>
+      <div class="break" id="broken" style="left:30px; top:500px; width:600px;"></div>
+    </div>
+  </section>
+
+  <!-- 3: canvas -->
+  <section class="scene s3">
+    <div class="caption">
+      <h2 class="display"><span>一张画布，</span><span>把模型织成团队</span></h2>
+      <p class="lede">指定一个主控，它按能力分派任务，盯着验收，把不合格的活打回修改。产物挂在连线上，随时能追到问题出在哪一步。</p>
+    </div>
+    <div class="shot" id="shot3">
+      <div class="rule"></div>
+      <img src="assets/canvas.png" alt="Qiansi canvas" />
+      <div class="rule"></div>
+    </div>
+  </section>
+
+  <!-- 4: one-click workflow -->
+  <section class="scene s4">
+    <div class="caption">
+      <h2 class="display"><span>说清目标，</span><span>工作流自己长出来</span></h2>
+      <p class="lede">选主控、挑工作模型，附上文件或整个文件夹。主控生成分工与连线，画布自动排好。</p>
+    </div>
+    <div class="shot" id="shot4">
+      <div class="rule"></div>
+      <img src="assets/workflow-crop.png" alt="One-click workflow" />
+      <div class="rule"></div>
+    </div>
+    <div class="modal-note">任务目标 · 主控模型 · 工作模型 · 文件与文件夹</div>
+  </section>
+
+  <!-- 5: capabilities -->
+  <section class="scene s5">
+    <h2 class="display">协作发生在每一个环节</h2>
+    <div class="rows">
+      <div class="row"><div class="hair" data-hair></div><div class="content"><h3>多模型讨论</h3><p>让几个模型互相反驳，而不是各说各话。结论可以存成产物，留在画布上。</p></div></div>
+      <div class="row"><div class="hair" data-hair></div><div class="content"><h3>产物挂在流程线上</h3><p>每个任务的产出直接出现在连线中间，点击就能看验收结论，不用翻日志。</p></div></div>
+      <div class="row"><div class="hair" data-hair></div><div class="content"><h3>文件库与分项目</h3><p>文件可以单独上传，也可以整目录导入。用画笔圈出子项目，单向或双向接入主流程。</p></div></div>
+    </div>
+  </section>
+
+  <!-- 6: CTA -->
+  <section class="scene s6">
+    <img class="mark" id="mark" src="assets/icon.png" alt="Qiansi icon" />
+    <h2 class="display" id="cta-title">牵丝 Qiansi</h2>
+    <div class="sub">开源，本地优先，Windows 桌面</div>
+    <div class="url">github.com/qiansi-app/qiansi</div>
+    <div class="urlline" id="urlline"></div>
+    <div class="fine">数据留在本机，模型由你选择。</div>
+  </section>
+
+  <div class="grain"></div>
+</div>
+
+<script>
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ease = (p) => 1 - Math.pow(1 - p, 3);
+  const seg = (t, a, b) => clamp((t - a) / (b - a), 0, 1);
+  const sceneAlpha = (t, a, b) => {
+    if (t < a - 0.35 || t > b + 0.35) return 0;
+    return clamp(Math.min((t - a) / 0.45, (b - t) / 0.45), 0, 1);
+  };
+
+  const scenes = [...document.querySelectorAll('.scene')];
+  const ranges = [[0, 4.4], [4.4, 9.2], [9.2, 16.2], [16.2, 21.8], [21.8, 26.6], [26.6, 30.2]];
+  const thread = document.getElementById('thread1');
+  const progress = document.getElementById('progress');
+  const paper = document.getElementById('paper');
+  const shot3 = document.getElementById('shot3');
+  const shot4 = document.getElementById('shot4');
+  const marks = [...document.querySelectorAll('[data-dot]')];
+  const loose = [...document.querySelectorAll('[data-loose]')];
+  const broken = document.getElementById('broken');
+  const hairs = [...document.querySelectorAll('[data-hair]')];
+  const rows = [...document.querySelectorAll('.row')];
+  const mark = document.getElementById('mark');
+  const urlline = document.getElementById('urlline');
+
+  window.renderFrame = (t) => {
+    scenes.forEach((scene, index) => {
+      const [a, b] = ranges[index];
+      const alpha = sceneAlpha(t, a, b);
+      scene.style.opacity = String(alpha);
+      scene.style.visibility = alpha > 0 ? 'visible' : 'hidden';
+    });
+
+    const total = thread.getTotalLength();
+    thread.style.strokeDashoffset = String(total * (1 - ease(seg(t, 0.15, 3.4))));
+    marks.forEach((dot, index) => {
+      dot.style.opacity = String(ease(seg(t, 1.1 + index * 0.45, 1.9 + index * 0.45)));
+    });
+
+    const line1 = document.querySelector('.s1 h1 span:nth-child(1)');
+    const line2 = document.querySelector('.s1 h1 span:nth-child(2)');
+    line1.style.clipPath = `inset(0 ${(1 - ease(seg(t, 0.55, 2.1))) * 100}% 0 0)`;
+    line2.style.clipPath = `inset(0 ${(1 - ease(seg(t, 1.0, 2.6))) * 100}% 0 0)`;
+    document.querySelector('.s1 .lede').style.opacity = String(ease(seg(t, 2.1, 3.1)));
+    document.querySelector('.s1 .caption').style.opacity = String(ease(seg(t, 2.4, 3.4)));
+
+    paper.style.clipPath = `inset(${(1 - ease(seg(t, 4.4, 5.2))) * 100}% 0 0 0)`;
+    const h2lines = document.querySelectorAll('.s2 h2 span');
+    h2lines.forEach((line, index) => {
+      line.style.clipPath = `inset(0 ${(1 - ease(seg(t, 5.2 + index * 0.25, 6.4 + index * 0.25))) * 100}% 0 0)`;
+    });
+    document.querySelector('.s2 .lede').style.opacity = String(ease(seg(t, 6.2, 7.3)));
+    document.querySelector('.s2 .afterword').style.opacity = String(ease(seg(t, 7.1, 8.2)));
+    document.querySelector('.loose').style.opacity = String(ease(seg(t, 5.6, 6.6)));
+    loose.forEach((line, index) => {
+      const drift = ease(seg(t, 5.6, 8.6));
+      line.style.transform = `translateX(${(index % 2 === 0 ? 1 : -1) * 26 * drift}px) rotate(${(index - 1.5) * 0.35 * drift}deg)`;
+    });
+    broken.style.transform = `scaleX(${ease(seg(t, 6.6, 7.8))})`;
+    broken.style.opacity = String(ease(seg(t, 6.6, 7.4)) * 0.8);
+
+    const p3 = ease(seg(t, 9.4, 11.0));
+    shot3.style.transform = `translateY(${(1 - p3) * 44}px) scale(${0.975 + p3 * 0.025})`;
+    shot3.style.opacity = String(p3);
+    const s3lines = document.querySelectorAll('.s3 .caption h2 span');
+    s3lines.forEach((line, index) => {
+      line.style.clipPath = `inset(0 0 ${(1 - ease(seg(t, 9.3 + index * 0.2, 10.6 + index * 0.2))) * 100}% 0)`;
+    });
+    document.querySelector('.s3 .lede').style.opacity = String(ease(seg(t, 10.2, 11.4)));
+    document.querySelectorAll('.s3 .callout').forEach((item, index) => {
+      item.style.opacity = String(ease(seg(t, 11.0 + index * 0.5, 11.8 + index * 0.5)));
+    });
+
+    const p4 = ease(seg(t, 16.5, 18.0));
+    shot4.style.transform = `translateY(${(1 - p4) * 44}px) scale(${0.975 + p4 * 0.025})`;
+    shot4.style.opacity = String(p4);
+    const s4lines = document.querySelectorAll('.s4 .caption h2 span');
+    s4lines.forEach((line, index) => {
+      line.style.clipPath = `inset(0 0 ${(1 - ease(seg(t, 16.4 + index * 0.2, 17.7 + index * 0.2))) * 100}% 0)`;
+    });
+    document.querySelector('.s4 .lede').style.opacity = String(ease(seg(t, 17.2, 18.4)));
+    document.querySelector('.s4 .modal-note').style.opacity = String(ease(seg(t, 18.2, 19.2)));
+
+    document.querySelector('.s5 h2').style.opacity = String(ease(seg(t, 22.0, 23.0)));
+    rows.forEach((row, index) => {
+      const p = ease(seg(t, 22.3 + index * 0.55, 23.4 + index * 0.55));
+      hairs[index].style.transform = `scaleX(${p})`;
+      row.querySelector('.content').style.opacity = String(Math.max(0, p - 0.25) / 0.75);
+      row.querySelector('.content').style.transform = `translateY(${(1 - p) * 18}px)`;
+    });
+
+    const p6 = ease(seg(t, 27.0, 28.2));
+    mark.style.transform = `scale(${0.82 + p6 * 0.18})`;
+    mark.style.opacity = String(p6);
+    document.getElementById('cta-title').style.opacity = String(ease(seg(t, 27.4, 28.6)));
+    document.querySelector('.s6 .sub').style.opacity = String(ease(seg(t, 27.8, 28.8)));
+    document.querySelector('.s6 .url').style.opacity = String(ease(seg(t, 28.2, 29.2)));
+    urlline.style.transform = `scaleX(${ease(seg(t, 28.4, 29.4))})`;
+    document.querySelector('.s6 .fine').style.opacity = String(ease(seg(t, 28.8, 29.6)));
+
+    progress.style.strokeDashoffset = String(1920 * (1 - clamp(t / 30, 0, 1)));
+  };
+
+  window.renderFrame(0);
+</script>
+</body>
+</html>

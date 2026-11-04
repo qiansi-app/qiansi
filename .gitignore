@@ -20,3 +20,13 @@ server-dist/
 
 # local release verification downloads
 release-check/
+
+# 本地 Claude Code 工具目录（含第三方技能，不随本仓库分发）
+.claude/
+
+# VS Code 扩展的构建产物，由 npm run vscode:ext 重新生成
+apps/vscode/qiansi-canvas/server.cjs
+apps/vscode/qiansi-canvas/studio/
+
+# 宣传片体积大，按需本地重新渲染
+promo/qiansi-promo.mp4
