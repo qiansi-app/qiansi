@@ -1,0 +1,11 @@
+{
+  "name": "qiansi",
+  "version": "0.1.0",
+  "description": "把牵丝的多 AI 协作画布接进 Claude Code：读画布、看产物、加节点、连线、换主控、触发编排运行。",
+  "author": {
+    "name": "Qiansi",
+    "url": "https://github.com/qiansi-app/qiansi"
+  },
+  "license": "MIT",
+  "keywords": ["qiansi", "canvas", "multi-agent", "orchestration", "mcp"]
+}

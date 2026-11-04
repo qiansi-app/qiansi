@@ -1,0 +1,21 @@
+# 把牵丝接进 Codex。
+# 用法：把下面这段追加到 ~/.codex/config.toml，或直接运行
+#   codex mcp add qiansi -- node <仓库路径>/packages/mcp/server.mjs
+# 然后重启 Codex，`codex mcp list` 里应该能看到 qiansi。
+
+[mcp_servers.qiansi]
+command = "node"
+# 换成你克隆本仓库的位置，Windows 下反斜杠要写两遍
+args = ["C:\\path\\to\\qiansi\\packages\\mcp\\server.mjs"]
+env = { QIANSI_AGENT = "codex" }
+startup_timeout_sec = 20
+tool_timeout_sec = 120
+
+# 说明：
+# - 不要在这里写 QIANSI_URL：打包版桌面应用每次启动的端口都不同，服务端会把
+#   实际端口写到 %USERPROFILE%\.qiansi\server-port，MCP server 会自己读。
+#   只有在你自己跑 `npm run dev:server`（固定 8787）时才需要显式指定。
+# - 令牌默认从 %USERPROFILE%\.qiansi\server-token 读取，不要写进这个文件。
+# - 想只放开部分工具时加一行（示例）：
+#   enabled_tools = ["describe_canvas", "get_canvas", "get_canvas_svg", "add_node", "connect_nodes"]
+# - 使用前请先打开牵丝应用；没开时工具会返回「连不上牵丝本地服务」而不是崩溃。

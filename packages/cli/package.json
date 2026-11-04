@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "probe": "tsx src/index.ts probe",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "status": "tsx src/index.ts status",
+    "start": "tsx src/index.ts start",
+    "stop": "tsx src/index.ts stop"
   },
   "dependencies": {
     "@qiansi/engine": "*"

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "qiansi",
+  "description": "牵丝 Qiansi：把多 AI 协作画布接进 Claude Code",
+  "owner": {
+    "name": "Qiansi",
+    "url": "https://github.com/qiansi-app/qiansi"
+  },
+  "plugins": [
+    {
+      "name": "qiansi",
+      "description": "让 Claude Code 直接读写牵丝画布：看节点与产物、连线、改主控、跑编排。",
+      "source": "./qiansi",
+      "category": "productivity"
+    }
+  ]
+}

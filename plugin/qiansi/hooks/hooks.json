@@ -1,0 +1,16 @@
+{
+  "description": "当对话涉及画布时，把当前画布摘要注入上下文，让 Claude 不用先调工具就知道画布长什么样。",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/inject-canvas-context.mjs\"",
+            "timeout": 6
+          }
+        ]
+      }
+    ]
+  }
+}
