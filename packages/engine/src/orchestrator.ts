@@ -271,7 +271,12 @@ export class Orchestrator {
       }
 
       if (attempt < maxRetries) {
-        const raised = nextEffort(effort);
+        // An empty or near-empty answer means thinking (or truncation) consumed
+        // the completion budget. Raising effort makes a thinking model reason
+        // MORE, leaving even less room for the answer — the opposite of a fix.
+        // Back off instead, and let the bigger output budget do the work.
+        const emptyFailure = output.trim().length < 40;
+        const raised = emptyFailure ? 'low' : nextEffort(effort);
         if (raised !== effort) {
           effort = raised;
           task.effort = raised;
@@ -279,7 +284,9 @@ export class Orchestrator {
             type: 'task.revised',
             taskId: task.id,
             nextEffort: raised,
-            reason: acceptance.suggestedFix ?? (acceptance.reasons.join('; ') || 'acceptance failed'),
+            reason: emptyFailure
+              ? '产出为空：降低思考强度，把完成预算留给答案'
+              : acceptance.suggestedFix ?? (acceptance.reasons.join('; ') || 'acceptance failed'),
           });
         }
         continue;

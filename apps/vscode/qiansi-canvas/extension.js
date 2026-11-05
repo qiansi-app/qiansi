@@ -44,6 +44,27 @@ function probe(port) {
   });
 }
 
+/**
+ * The API being healthy is not the same as the canvas being servable: a dev
+ * server started from the wrong working directory answers every API call but
+ * returns "not found" for the studio itself. The panel used to cement whatever
+ * it saw first; now it waits on this check and flips over when the page is real.
+ */
+function studioReady(base) {
+  return new Promise((resolve) => {
+    const port = Number(new URL(base).port) || 80;
+    const request = http.get({ host: '127.0.0.1', port, path: '/', timeout: 1500 }, (response) => {
+      response.resume();
+      resolve(response.statusCode === 200);
+    });
+    request.on('error', () => resolve(false));
+    request.on('timeout', () => {
+      request.destroy();
+      resolve(false);
+    });
+  });
+}
+
 function findFreePort(start) {
   return new Promise((resolve) => {
     const attempt = (port) => {
@@ -169,11 +190,62 @@ function failedHtml() {
 </html>`;
 }
 
+function waitingHtml(base) {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><style>
+  body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; background: #0b1622;
+         color: #93a4bb; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+  div { text-align: center; line-height: 2; }
+  b { color: #e6edf6; }
+  code { color: #38d9c2; }
+</style></head>
+<body><div><b>牵丝服务已连上（${base}）</b><br>画布界面还没就绪，正在自动重试…<br>几秒内会自动进入画布，无需手动刷新。</div></body>
+</html>`;
+}
+
+let watching = false;
+
+/**
+ * Keeps retrying until the canvas page actually renders, then swaps it in.
+ * This is what makes the panel self-healing: a server restart, a port change
+ * or a half-configured dev server all recover on their own.
+ */
+function scheduleWatch() {
+  if (watching) return;
+  watching = true;
+  const timer = setInterval(async () => {
+    if (!sidebarView && !panel) {
+      clearInterval(timer);
+      watching = false;
+      return;
+    }
+    ensurePromise = null;
+    const base = await ensureServer();
+    if (base && (await studioReady(base))) {
+      clearInterval(timer);
+      watching = false;
+      if (sidebarView) sidebarView.webview.html = pageHtml(base);
+      if (panel) panel.webview.html = pageHtml(base);
+    }
+  }, 3000);
+}
+
 async function renderSidebar() {
   if (!sidebarView) return;
   sidebarView.webview.html = startingHtml();
   const base = await ensureServer();
-  sidebarView.webview.html = base ? pageHtml(base) : failedHtml();
+  if (!base) {
+    sidebarView.webview.html = failedHtml();
+    scheduleWatch();
+    return;
+  }
+  if (await studioReady(base)) {
+    sidebarView.webview.html = pageHtml(base);
+  } else {
+    sidebarView.webview.html = waitingHtml(base);
+    scheduleWatch();
+  }
 }
 
 async function openPanel() {
@@ -183,11 +255,14 @@ async function openPanel() {
       '牵丝服务自动启动失败：查看「输出」面板里的 Qiansi 日志。'
     );
     await renderSidebar();
+    scheduleWatch();
     return;
   }
+  const html = (await studioReady(base)) ? pageHtml(base) : waitingHtml(base);
+  if (!html.includes('<iframe')) scheduleWatch();
   if (panel) {
     panel.reveal(undefined, true);
-    panel.webview.html = pageHtml(base);
+    panel.webview.html = html;
     return;
   }
   panel = vscode.window.createWebviewPanel(
@@ -196,7 +271,7 @@ async function openPanel() {
     { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
     { enableScripts: true, retainContextWhenHidden: true }
   );
-  panel.webview.html = pageHtml(base);
+  panel.webview.html = html;
   panel.onDidDispose(() => {
     panel = null;
   });

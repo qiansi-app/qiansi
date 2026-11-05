@@ -26,7 +26,7 @@ export interface ModelFamily {
   models: string[];
   contextWindow: number;
   maxOutput: number;
-  effortDialect: 'none' | 'minimax-output-effort';
+  effortDialect: 'none' | 'minimax-output-effort' | 'glm-thinking';
 }
 
 export function modelFamilies(relay: string = relayBase): ModelFamily[] {
@@ -41,7 +41,7 @@ export function modelFamilies(relay: string = relayBase): ModelFamily[] {
       envVar: 'DEEPSEEK_API_KEY',
       models: ['deepseek-v4-pro', 'deepseek-flash'],
       contextWindow: 128000,
-      maxOutput: 4096,
+      maxOutput: 16384,
       effortDialect: 'none',
     },
     {
@@ -54,7 +54,7 @@ export function modelFamilies(relay: string = relayBase): ModelFamily[] {
       envVar: 'MINIMAX_API_KEY',
       models: ['MiniMax-M3.1-Flash', 'MiniMax-M2.7-highspeed', 'MiniMax-M2.7'],
       contextWindow: 200000,
-      maxOutput: 4096,
+      maxOutput: 16384,
       effortDialect: 'minimax-output-effort',
     },
     {
@@ -68,7 +68,7 @@ export function modelFamilies(relay: string = relayBase): ModelFamily[] {
       envVar: 'MOONSHOT_API_KEY',
       models: ['kimi-k2.7-code', 'kimi-k2.6'],
       contextWindow: 128000,
-      maxOutput: 4096,
+      maxOutput: 16384,
       effortDialect: 'none',
     },
     {
@@ -81,8 +81,11 @@ export function modelFamilies(relay: string = relayBase): ModelFamily[] {
       envVar: 'ZHIPUAI_API_KEY',
       models: ['glm-5.3-flash', 'glm-5.3-flashx', 'glm-4.6'],
       contextWindow: 128000,
-      maxOutput: 4096,
-      effortDialect: 'none',
+      maxOutput: 16384,
+      // GLM hybrid models accept a thinking switch; without it a heavy prompt
+      // makes them reason until the completion budget is gone (observed:
+      // 12k reasoning deltas, zero answer text).
+      effortDialect: 'glm-thinking',
     },
     {
       slot: 'qwen',
@@ -94,7 +97,7 @@ export function modelFamilies(relay: string = relayBase): ModelFamily[] {
       envVar: 'DASHSCOPE_API_KEY',
       models: ['qwen-max', 'qwen-plus', 'qwen-turbo'],
       contextWindow: 128000,
-      maxOutput: 4096,
+      maxOutput: 16384,
       effortDialect: 'none',
     },
     {
@@ -107,7 +110,7 @@ export function modelFamilies(relay: string = relayBase): ModelFamily[] {
       envVar: 'OPENAI_API_KEY',
       models: ['gpt-4o', 'gpt-4o-mini'],
       contextWindow: 128000,
-      maxOutput: 4096,
+      maxOutput: 16384,
       effortDialect: 'none',
     },
     {
@@ -120,7 +123,7 @@ export function modelFamilies(relay: string = relayBase): ModelFamily[] {
       envVar: 'ANTHROPIC_AUTH_TOKEN',
       models: ['claude-opus-4-8[1M]', 'claude-sonnet-4-6[1M]', 'claude-haiku-4-5'],
       contextWindow: 1000000,
-      maxOutput: 2048,
+      maxOutput: 8192,
       effortDialect: 'none',
     },
   ];
@@ -215,7 +218,7 @@ export function profileForModel(model: string, label?: string): CapabilityProfil
       protocol: 'anthropic-messages',
       baseUrl: relayBase,
       contextWindow: 128000,
-      maxOutput: 2048,
+      maxOutput: 8192,
       effort: { dialect: 'none', canDisable: true },
     };
   }
@@ -241,8 +244,7 @@ export function profileForModel(model: string, label?: string): CapabilityProfil
   };
 }
 
-/** Every model every configured family advertises — for /v1/models. */
-export function catalogEntries(): Array<{
+/** Every model every configured family advertises — for /v1/models. */export function catalogEntries(): Array<{
   id: string;
   label: string;
   slot: KeySlot;

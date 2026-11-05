@@ -395,6 +395,23 @@ const tools = [
     },
   },
   {
+    name: 'upload_file',
+    description:
+      'Upload a text file into the Qiansi library and optionally attach it to a library node. Attached files are injected into every live run\'s context (each file up to 24KB; if the pack exceeds a task\'s budget, tasks receive rotated slices). This is the only way an agent can feed reference material to a run — do it BEFORE run_canvas.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'File name shown on the canvas; keep the .md/.txt extension' },
+        text: { type: 'string', description: 'File content (plain text, UTF-8)' },
+        attach_to: {
+          type: 'string',
+          description: 'Optional library node id to attach the file to; omitted = upload only, return the file id',
+        },
+      },
+      required: ['name', 'text'],
+    },
+  },
+  {
     name: 'get_status',
     description:
       'Health of the local Qiansi server as an exit code plus named parts: 0 healthy, 1 down, 2 running but broken, 3 waiting for configuration. Use it instead of guessing whether the app is up, and read `errors`/`setup` to tell the user what to fix. `load.activeRunAgeMs` reveals a run that has stopped emitting events.',
@@ -409,6 +426,43 @@ const tools = [
 ];
 
 async function callTool(name, args = {}) {
+  if (name === 'upload_file') {
+    const response = await request('/api/files', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: String(args.name ?? 'file.md'),
+        type: 'text/markdown',
+        data: Buffer.from(String(args.text ?? ''), 'utf8').toString('base64'),
+      }),
+    });
+    const file = response.file ?? {};
+    if (args.attach_to) {
+      const current = await request('/api/canvas');
+      const lib = (current.canvas?.nodes ?? []).find((node) => node.id === args.attach_to);
+      if (!lib) {
+        return { ok: false, error: `找不到资料库节点 ${args.attach_to}；文件已上传，id=${file.id}`, file };
+      }
+      const files = [
+        ...((lib.data?.libraryFiles ?? []).filter((f) => f.id !== file.id)),
+        { id: file.id, name: file.name, size: file.size },
+      ];
+      await request('/api/canvas/ops', {
+        method: 'POST',
+        body: JSON.stringify({
+          ops: [{ op: 'update_node', id: args.attach_to, patch: { libraryFiles: files } }],
+        }),
+      });
+      return {
+        ok: true,
+        file,
+        attached_to: args.attach_to,
+        files_on_node: files.length,
+        note: '文件已挂上资料库，下次 live 运行会注入每个任务的上下文。',
+      };
+    }
+    return { ok: true, file, note: '已上传；用 attach_to 再调一次可挂到资料库节点。' };
+  }
+
   if (name === 'get_status') {
     return request('/api/status');
   }

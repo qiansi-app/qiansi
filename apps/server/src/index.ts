@@ -1694,7 +1694,9 @@ app.post('/api/commands', async (context) => {
   const budget = {
     maxTotalTokens: Number(requestedBudget.maxTotalTokens ?? 200000),
     maxTokensPerModel: Number(requestedBudget.maxTokensPerModel ?? 100000),
-    maxTokensPerMinute: Number(requestedBudget.maxTokensPerMinute ?? 20000),
+    // 20k/min was sized for short chat tasks; one thinking-model attempt with a
+    // real document pack blows through it and kills the whole run mid-flight.
+    maxTokensPerMinute: Number(requestedBudget.maxTokensPerMinute ?? 60000),
     maxCallsPerTask: Number(requestedBudget.maxCallsPerTask ?? 4),
   };
 
@@ -1894,12 +1896,18 @@ app.post('/api/commands', async (context) => {
         'anthropic-messages': new AnthropicMessagesAdapter(),
       },
       apiKeys,
-      concurrency: 1,
+      // Independent lanes run in parallel; dependsOn still serializes chains.
+      // 1 used to make a heavy matrix task block a light one for minutes.
+      concurrency: 3,
       maxRetries: 1,
-      taskTimeoutMs: 45000,
-      // Reasoning models spend this budget on thinking before the answer; 512
-      // left real runs with an empty output and a "too short" verdict.
-      maxOutputTokens: 4096,
+      // 45s repeatedly aborted thinking models mid-stream the moment a real
+      // research pack was injected (5398 reasoning deltas then a hard abort);
+      // 120s still aborted deepseek-v4-pro at ~30k reasoning chars with zero
+      // answer text. 240s gives heavy lanes room; parallel lanes absorb it.
+      taskTimeoutMs: 240_000,
+      // Thinking models burn reasoning out of the same completion budget; 4096
+      // let a heavy matrix task think until the answer had no room left.
+      maxOutputTokens: 12288,
       budget,
       teamContext,
       signal: controller.signal,

@@ -83,17 +83,30 @@ export function collectCanvasFiles(
   return collected;
 }
 
-/** Splits a byte budget across tasks so the same files do not multiply the prompt. */
+/**
+ * Decides what one task sees of the uploaded pack.
+ *
+ * When everything fits the per-task budget, every task gets the whole pack.
+ * When it does not, tasks get rotated slices (task 0 starts at file 0, task 1
+ * at file 1, …): collectively the run still reads every file, instead of the
+ * old behaviour where every task saw the same first N kilobytes and the tail
+ * of the pack never reached any task at all.
+ */
 export function filesForTask(
   files: CanvasFileText[],
   taskIndex: number,
   taskCount: number
 ): string {
   if (!files.length) return '';
+  const totalBytes = files.reduce((sum, file) => sum + Buffer.byteLength(file.text, 'utf8'), 0);
   const budget = Math.max(
     8 * 1024,
     Math.min(24 * 1024, Math.floor((80 * 1024) / Math.max(1, taskCount)))
   );
+  const ordered =
+    totalBytes <= budget
+      ? files
+      : [...files.slice(taskIndex % files.length), ...files.slice(0, taskIndex % files.length)];
   let used = 0;
   const parts: string[] = [];
   for (const file of files) {
