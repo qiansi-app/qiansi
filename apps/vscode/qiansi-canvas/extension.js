@@ -138,7 +138,14 @@ function ensureServer() {
   return ensurePromise;
 }
 
+let renderSeq = 0;
+
 function pageHtml(base) {
+  // VS Code only rebuilds a webview when its html actually CHANGES. A static
+  // template string means every re-render is a silent no-op and the panel
+  // shows whatever it loaded days ago. A unique nonce per render (in the
+  // iframe URL and in the markup) forces a genuine reload every time.
+  const nonce = `r${Date.now().toString(36)}${++renderSeq}`;
   const csp = [
     "default-src 'none'",
     `frame-src ${base}`,
@@ -155,8 +162,9 @@ function pageHtml(base) {
   iframe { display: block; width: 100%; height: 100%; border: 0; }
 </style>
 </head>
-<body>
-<iframe src="${base}/" title="牵丝画布"></iframe>
+<body data-nonce="${nonce}">
+<!-- ${nonce} -->
+<iframe src="${base}/?${nonce}" title="牵丝画布"></iframe>
 </body>
 </html>`;
 }
