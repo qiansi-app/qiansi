@@ -250,7 +250,12 @@ export function App() {
       try {
         await fetch('/api/bootstrap');
         const response = await fetch('/api/canvas');
-        if (!response.ok) return;
+        if (!response.ok) {
+          // The starter graph renders below; say so instead of letting a 401
+          // look like a fully working canvas showing mysterious content.
+          setToast(`连不上本地服务（HTTP ${response.status}），当前显示的是演示画布`);
+          return;
+        }
         const data = (await response.json()) as {
           canvas?: {
             nodes?: StudioNode[];
@@ -264,7 +269,8 @@ export function App() {
         if (!alive || !data.canvas || !Array.isArray(data.canvas.nodes)) return;
         applyRemoteCanvas(data.canvas);
       } catch {
-        // server unavailable: keep the starter graph and do not overwrite a saved canvas
+        // server unavailable: keep the starter graph and say what is showing
+        setToast('连不上本地服务，当前显示的是演示画布');
       } finally {
         if (loaded) {
           canvasReady.current = true;

@@ -646,7 +646,13 @@ app.get('/api/bootstrap', (context) => {
     path: '/',
     maxAge: 86400,
   });
-  return context.json({ ok: true });
+  // The VS Code panel embeds this page in a cross-site iframe, where a
+  // SameSite=Strict cookie is never sent — every API call 401'd and the studio
+  // silently fell back to the demo graph. The page keeps this token in memory
+  // and authenticates by header, which has no SameSite rules. Reading the body
+  // is railguarded by same-origin policy, and any local process could read
+  // ~/.qiansi/server-token anyway.
+  return context.json({ ok: true, token });
 });
 
 app.get('/api/connections', async (context) =>
