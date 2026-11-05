@@ -2604,6 +2604,16 @@ export function App() {
     }
   };
 
+  /**
+   * 画布顶栏的「重载」按钮：先把未保存的编辑落盘，再整页刷新。
+   * 整页刷新会重新拉取界面代码与画布数据——版本更新或页面状态异常时，
+   * 点这一下就是完全换血，不依赖任何外部刷新手段。
+   */
+  const reloadCanvas = async () => {
+    await flushCanvas();
+    window.location.reload();
+  };
+
   const run = async (goalOverride?: string) => {
     if (running) return;
     setRunning(true);
@@ -2953,6 +2963,7 @@ export function App() {
         layouting={layouting}
         brushMode={brushMode}
         onBrushMode={setBrushMode}
+        onReload={() => void reloadCanvas()}
       />
 
       <div className="workspace">

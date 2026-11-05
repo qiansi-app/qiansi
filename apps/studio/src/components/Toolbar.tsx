@@ -14,6 +14,7 @@ import {
   Paperclip,
   Play,
   Plus,
+  RefreshCw,
   RotateCcw,
   Settings,
   ShieldAlert,
@@ -53,6 +54,7 @@ interface ToolbarProps {
   layouting: boolean;
   brushMode: RegionMode | null;
   onBrushMode: (mode: RegionMode | null) => void;
+  onReload: () => void;
 }
 
 function MenuItem({
@@ -111,6 +113,7 @@ export function Toolbar({
   layouting,
   brushMode,
   onBrushMode,
+  onReload,
 }: ToolbarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -227,6 +230,14 @@ export function Toolbar({
         </button>
 
         <span className="toolbar-divider" />
+
+        <button
+          className="btn"
+          onClick={onReload}
+          title="重载画布：先保存本地编辑，再整页刷新——版本更新或页面状态不对时点这里"
+        >
+          <RefreshCw size={13} /> 重载
+        </button>
 
         <div className="toolbar-more" ref={menuRef}>
           <button
