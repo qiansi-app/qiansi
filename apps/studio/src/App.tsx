@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   MarkerType,
   addEdge,
@@ -169,6 +169,8 @@ export function App() {
   const remoteApplying = useRef(false);
   /** True while local edits have not reached the server yet. */
   const dirty = useRef(false);
+  /** When the oldest unsaved edit happened; a stale one triggers a re-save. */
+  const dirtyAt = useRef(0);
   const runToken = useRef(0);
   const streamBuffers = useRef<Record<string, string>>({});
   const taskNodes = useRef<Record<string, string>>({});
@@ -287,6 +289,129 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [canvasLoaded, fitView]);
 
+  /**
+   * Saves the whole board. Shared by the edit-debounce and by the reverse-sync
+   * poller's stale-dirty retry, so both get the 409 merge/adopt behaviour.
+   */
+  const saveCanvas = useCallback(() => {
+    const nodesPayload = nodes
+      .filter((node) => node.id !== '__final__')
+      .map((node) => {
+        const {
+          onDelete: _onDelete,
+          onMakeOrchestrator: _onMakeOrchestrator,
+          onOpen: _onOpen,
+          onOpenSession: _onOpenSession,
+          ...data
+        } = node.data as AgentNodeData & {
+          onOpenSession?: unknown;
+        };
+        return { ...node, data };
+      });
+    const edgesPayload = edges
+      .filter((edge) => edge.id !== '__final-edge')
+      .map((edge) => ({
+        ...edge,
+        data: edge.data ? { ...(edge.data as Record<string, unknown>), onOpen: undefined } : edge.data,
+      }));
+    void (async () => {
+      try {
+        const response = await fetch('/api/canvas', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            orchestratorId,
+            nodes: nodesPayload,
+            edges: edgesPayload,
+            revision: canvasRevision.current,
+          }),
+        });
+        const data = (await response.json().catch(() => null)) as {
+          revision?: number;
+          canvas?: { nodes?: StudioNode[]; edges?: Edge[]; orchestratorId?: string } | null;
+        } | null;
+        if (response.status === 409) {
+          // Someone else wrote while we were editing. Merge instead of
+          // choosing a winner: keep our board, adopt nodes we never had, and
+          // retry against the server's revision.
+          const serverRevision = Number(data?.revision) || 0;
+          const serverCanvas = data?.canvas ?? null;
+          const serverNodes = Array.isArray(serverCanvas?.nodes) ? serverCanvas.nodes : [];
+          const serverEdges = Array.isArray(serverCanvas?.edges) ? serverCanvas.edges : [];
+          const localIds = new Set(nodesPayload.map((node) => node.id));
+          const localEdgeIds = new Set(edgesPayload.map((edge) => edge.id));
+          const mergedNodes = [
+            ...serverNodes.filter((node) => !localIds.has(node.id)),
+            ...nodesPayload,
+          ];
+          const mergedEdges = [
+            ...serverEdges.filter((edge) => !localEdgeIds.has(edge.id)),
+            ...edgesPayload,
+          ];
+          canvasRevision.current = serverRevision;
+          let merged = false;
+          try {
+            const retry = await fetch('/api/canvas', {
+              method: 'PUT',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                orchestratorId,
+                nodes: mergedNodes,
+                edges: mergedEdges,
+                revision: serverRevision,
+              }),
+            });
+            const retryData = (await retry.json().catch(() => null)) as {
+              revision?: number;
+            } | null;
+            merged = retry.ok && typeof retryData?.revision === 'number';
+            if (merged) canvasRevision.current = retryData!.revision!;
+          } catch {
+            merged = false;
+          }
+          if (merged) {
+            dirty.current = false;
+            dirtyAt.current = 0;
+            setToast('已合并外部改动，保留了你当前的编辑');
+            // pull the merged document so nodes the agent added appear
+            const fresh = (await fetch('/api/canvas')
+              .then((response) => response.json())
+              .catch(() => null)) as {
+              canvas?: { nodes?: StudioNode[]; edges?: Edge[]; orchestratorId?: string } | null;
+              revision?: number;
+            } | null;
+            if (fresh?.canvas && typeof fresh.revision === 'number') {
+              canvasRevision.current = fresh.revision;
+              remoteApplying.current = true;
+              window.setTimeout(() => {
+                remoteApplying.current = false;
+              }, 250);
+              applyRemoteCanvas(fresh.canvas);
+            }
+          } else {
+            canvasRevision.current = serverRevision;
+            remoteApplying.current = true;
+            window.setTimeout(() => {
+              remoteApplying.current = false;
+            }, 250);
+            applyRemoteCanvas(serverCanvas);
+            dirty.current = false;
+            dirtyAt.current = 0;
+            setToast('画布已被外部修改，已同步');
+          }
+          return;
+        }
+        if (response.ok && typeof data?.revision === 'number') {
+          canvasRevision.current = data.revision;
+          dirty.current = false;
+          dirtyAt.current = 0;
+        }
+      } catch {
+        // offline: the poller retries stale dirty state; the next edit retries too
+      }
+    })();
+  }, [nodes, edges, orchestratorId, applyRemoteCanvas]);
+
   useEffect(() => {
     if (!canvasReady.current) return;
     if (remoteApplying.current) {
@@ -294,122 +419,10 @@ export function App() {
       return;
     }
     dirty.current = true;
-    const timer = window.setTimeout(() => {
-      const nodesPayload = nodes
-        .filter((node) => node.id !== '__final__')
-        .map((node) => {
-          const {
-            onDelete: _onDelete,
-            onMakeOrchestrator: _onMakeOrchestrator,
-            onOpen: _onOpen,
-            onOpenSession: _onOpenSession,
-            ...data
-          } = node.data as AgentNodeData & {
-            onOpenSession?: unknown;
-          };
-          return { ...node, data };
-        });
-      const edgesPayload = edges
-        .filter((edge) => edge.id !== '__final-edge')
-        .map((edge) => ({
-          ...edge,
-          data: edge.data ? { ...(edge.data as Record<string, unknown>), onOpen: undefined } : edge.data,
-        }));
-      void (async () => {
-        try {
-          const response = await fetch('/api/canvas', {
-            method: 'PUT',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
-              orchestratorId,
-              nodes: nodesPayload,
-              edges: edgesPayload,
-              revision: canvasRevision.current,
-            }),
-          });
-          const data = (await response.json().catch(() => null)) as {
-            revision?: number;
-            canvas?: { nodes?: StudioNode[]; edges?: Edge[]; orchestratorId?: string } | null;
-          } | null;
-          if (response.status === 409) {
-            // Someone else wrote while we were editing. Merge instead of
-            // choosing a winner: keep our board, adopt nodes we never had, and
-            // retry against the server's revision.
-            const serverRevision = Number(data?.revision) || 0;
-            const serverCanvas = data?.canvas ?? null;
-            const serverNodes = Array.isArray(serverCanvas?.nodes) ? serverCanvas.nodes : [];
-            const serverEdges = Array.isArray(serverCanvas?.edges) ? serverCanvas.edges : [];
-            const localIds = new Set(nodesPayload.map((node) => node.id));
-            const localEdgeIds = new Set(edgesPayload.map((edge) => edge.id));
-            const mergedNodes = [
-              ...serverNodes.filter((node) => !localIds.has(node.id)),
-              ...nodesPayload,
-            ];
-            const mergedEdges = [
-              ...serverEdges.filter((edge) => !localEdgeIds.has(edge.id)),
-              ...edgesPayload,
-            ];
-            canvasRevision.current = serverRevision;
-            let merged = false;
-            try {
-              const retry = await fetch('/api/canvas', {
-                method: 'PUT',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({
-                  orchestratorId,
-                  nodes: mergedNodes,
-                  edges: mergedEdges,
-                  revision: serverRevision,
-                }),
-              });
-              const retryData = (await retry.json().catch(() => null)) as {
-                revision?: number;
-              } | null;
-              merged = retry.ok && typeof retryData?.revision === 'number';
-              if (merged) canvasRevision.current = retryData!.revision!;
-            } catch {
-              merged = false;
-            }
-            if (merged) {
-              dirty.current = false;
-              setToast('已合并外部改动，保留了你当前的编辑');
-              // pull the merged document so nodes the agent added appear
-              const fresh = (await fetch('/api/canvas')
-                .then((response) => response.json())
-                .catch(() => null)) as {
-                canvas?: { nodes?: StudioNode[]; edges?: Edge[]; orchestratorId?: string } | null;
-                revision?: number;
-              } | null;
-              if (fresh?.canvas && typeof fresh.revision === 'number') {
-                canvasRevision.current = fresh.revision;
-                remoteApplying.current = true;
-                window.setTimeout(() => {
-                  remoteApplying.current = false;
-                }, 250);
-                applyRemoteCanvas(fresh.canvas);
-              }
-            } else {
-              canvasRevision.current = serverRevision;
-              remoteApplying.current = true;
-              window.setTimeout(() => {
-                remoteApplying.current = false;
-              }, 250);
-              applyRemoteCanvas(serverCanvas);
-              setToast('画布已被外部修改，已同步');
-            }
-            return;
-          }
-          if (response.ok && typeof data?.revision === 'number') {
-            canvasRevision.current = data.revision;
-            dirty.current = false;
-          }
-        } catch {
-          // offline: the next edit retries
-        }
-      })();
-    }, 800);
+    if (!dirtyAt.current) dirtyAt.current = Date.now();
+    const timer = window.setTimeout(saveCanvas, 800);
     return () => window.clearTimeout(timer);
-  }, [nodes, edges, orchestratorId, applyRemoteCanvas]);
+  }, [nodes, edges, orchestratorId, applyRemoteCanvas, saveCanvas]);
 
   /**
    * Reverse sync: an agent (Claude Code, Codex) writes through the MCP server,
@@ -420,8 +433,16 @@ export function App() {
     const timer = window.setInterval(() => {
       if (!canvasReady.current || document.hidden) return;
       // Local edits not yet saved win the race: pulling the server snapshot now
-      // would silently undo what the user just did.
-      if (dirty.current) return;
+      // would silently undo what the user just did. But a save that failed
+      // (server restarting mid-flight) used to keep `dirty` true forever, which
+      // froze this view on a stale board with no retry. Re-save stale dirty
+      // state instead — the save path merges or adopts on 409.
+      if (dirty.current) {
+        if (Date.now() - dirtyAt.current < 5000) return;
+        dirtyAt.current = Date.now();
+        saveCanvas();
+        return;
+      }
       void (async () => {
         try {
           const response = await fetch('/api/canvas');
@@ -447,7 +468,7 @@ export function App() {
       })();
     }, 1500);
     return () => window.clearInterval(timer);
-  }, [applyRemoteCanvas]);
+  }, [applyRemoteCanvas, saveCanvas]);
 
   /**
    * A run started by an agent (through MCP) never reaches this window's own SSE
