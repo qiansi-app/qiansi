@@ -16,6 +16,7 @@ import { DiscussionModal } from './components/DiscussionModal';
 import { ModelEditor } from './components/ModelEditor';
 import { NodeInspector } from './components/NodeInspector';
 import { ApprovalsModal } from './components/ApprovalsModal';
+import { KeysModal } from './components/KeysModal';
 import { ArtifactModal } from './components/ArtifactModal';
 import { ExternalModal } from './components/ExternalModal';
 import { RunProgress } from './components/RunProgress';
@@ -129,6 +130,7 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [approvalsOpen, setApprovalsOpen] = useState(false);
+  const [keysOpen, setKeysOpen] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState(0);
   const [artifactTaskId, setArtifactTaskId] = useState<string | null>(null);
   const [artifactOverride, setArtifactOverride] = useState<RunTaskView | null>(null);
@@ -2965,6 +2967,7 @@ export function App() {
         }}
         onUpload={() => fileInputRef.current?.click()}
         onAddLibrary={addLibrary}
+        onOpenKeys={() => setKeysOpen(true)}
         onAutoLayout={() => void autoLayout()}
         layouting={layouting}
         brushMode={brushMode}
@@ -3172,6 +3175,7 @@ export function App() {
       />
 
       <ApprovalsModal open={approvalsOpen} onClose={() => setApprovalsOpen(false)} />
+      <KeysModal open={keysOpen} onClose={() => setKeysOpen(false)} />
 
       <ArtifactModal
         open={Boolean(artifactOverride || artifactTaskId)}

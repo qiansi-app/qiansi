@@ -44,14 +44,18 @@ import { livePlan, liveProfiles } from './live.js';
 import { createRoutedJudge } from './acceptance.js';
 import { buildPlanFromCanvas, diagnoseCanvas } from './plan-from-canvas.js';
 import {
+  familyOf,
   isCheapModel,
   modelFamilies,
+  preferredModel,
   profileForModel,
   resolveModelRoute,
   routerChoice,
   type KeySlot,
 } from './model-catalog.js';
 import { PolicyStore, scopeForRequest, type Mandate } from './policy.js';
+import { QuotaStore } from './quota.js';
+import { substituteExhausted } from './quota-plan.js';
 import { part, summarize, type HealthPart, type StatusReport } from './status.js';
 import { RunStore, type RunEnvelope } from './store.js';
 import { ensureStateDir } from './state-dir.js';
@@ -281,6 +285,51 @@ const stateDir = ensureStateDir();
 const canvasStore = new CanvasStore(stateDir);
 const audit = new AuditLog(stateDir);
 const policy = new PolicyStore(stateDir);
+const quota = new QuotaStore(stateDir);
+let quotaSeeded = false;
+
+/**
+ * Keys that exist on disk become managed keys on first use, so quota controls
+ * appear for the accounts a user already configured without re-entering them.
+ */
+async function ensureQuotaSeeded(): Promise<void> {
+  if (quotaSeeded) return;
+  quotaSeeded = true;
+  try {
+    quota.seed(
+      modelFamilies().map((family) => ({
+        slot: family.slot,
+        label: family.label,
+        vaultRef: family.vaultRef,
+        envPresent: Boolean(process.env[family.envVar]),
+      })),
+      await vault.refs()
+    );
+  } catch {
+    // seeding is best effort; explicit key management still works
+  }
+}
+
+/**
+ * The credential a call should use right now: the active managed key when it
+ * has quota, otherwise the next key that does, otherwise the legacy ref/env.
+ */
+async function slotCredential(
+  slot: KeySlot
+): Promise<{ keyId: string; secret: string } | null> {
+  await ensureQuotaSeeded();
+  const family = modelFamilies().find((item) => item.slot === slot);
+  const envSecret = family ? (process.env[family.envVar] ?? '') : '';
+
+  const pick = quota.pick(slot);
+  if (pick) {
+    const secret = (await vault.get(pick.vaultRef)) || envSecret;
+    if (secret) return { keyId: pick.keyId, secret };
+  }
+  if (!family) return null;
+  const legacy = (await vault.get(family.vaultRef)) || envSecret;
+  return legacy ? { keyId: 'default', secret: legacy } : null;
+}
 /** The port the listener actually bound, which can differ from QIANSI_PORT. */
 let boundPort: number | null = null;
 const serverStartedAt = Date.now();
@@ -666,6 +715,126 @@ app.get('/api/connections', async (context) =>
 );
 
 app.get('/api/vault/status', async (context) => context.json({ refs: await vault.refs() }));
+
+/**
+ * Key management, CC Switch style: every subscription is a row you can see,
+ * measure, disable, or rotate to. Secrets go straight into the DPAPI vault and
+ * are never returned by any of these routes.
+ */
+async function keysSnapshot() {
+  await ensureQuotaSeeded();
+  return modelFamilies().map((family) => ({
+    ...quota.view(family.slot, family.label),
+    prices: quota.prices()[family.slot],
+    protocol: family.protocol,
+    models: family.models,
+  }));
+}
+
+function readQuotaInput(value: unknown): { period: 'day' | 'month'; limitTokens: number } | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const limitTokens = Number(raw.limitTokens ?? 0);
+  if (!Number.isFinite(limitTokens) || limitTokens <= 0) return null;
+  return { period: raw.period === 'day' ? 'day' : 'month', limitTokens };
+}
+
+app.get('/api/keys', async (context) =>
+  context.json({
+    ok: true,
+    slots: await keysSnapshot(),
+    recent: quota.recent(40),
+    seeded: quotaSeeded,
+  })
+);
+
+app.post('/api/keys', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const slot = String(body?.slot ?? '') as KeySlot;
+  const family = modelFamilies().find((item) => item.slot === slot);
+  if (!family) return context.json({ ok: false, error: 'unknown_slot' }, 400);
+  const secret = String(body?.secret ?? '').trim();
+  if (!secret) return context.json({ ok: false, error: 'secret_required' }, 400);
+
+  const id = String(body?.id ?? '').trim() || randomBytes(4).toString('hex');
+  const label = String(body?.label ?? '').trim() || `${family.label} · ${id}`;
+  const vaultRef = id === 'default' ? family.vaultRef : `conn-${slot}-${id}`;
+
+  await ensureQuotaSeeded();
+  try {
+    await vault.set(vaultRef, secret);
+    quota.addKey(slot, { id, label, vaultRef, quota: readQuotaInput(body?.quota) });
+  } catch (error) {
+    return context.json(
+      { ok: false, error: error instanceof Error ? error.message : 'add_failed' },
+      409
+    );
+  }
+  audit.record({ actor: actorOf(context), action: 'keys.add', target: `${slot}/${id}` });
+  return context.json({ ok: true, id, vaultRef, slots: await keysSnapshot() });
+});
+
+app.patch('/api/keys/:slot/:id', async (context) => {
+  const slot = context.req.param('slot') as KeySlot;
+  const id = context.req.param('id');
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  await ensureQuotaSeeded();
+  const updated = quota.updateKey(slot, id, {
+    label: typeof body?.label === 'string' ? body.label : undefined,
+    enabled: typeof body?.enabled === 'boolean' ? body.enabled : undefined,
+    quota: body?.quota === null ? null : readQuotaInput(body?.quota) ?? undefined,
+  });
+  if (!updated) return context.json({ ok: false, error: 'key_not_found' }, 404);
+  audit.record({
+    actor: actorOf(context),
+    action: 'keys.update',
+    target: `${slot}/${id}`,
+    detail: { enabled: updated.enabled, quota: updated.quota },
+  });
+  return context.json({ ok: true, slots: await keysSnapshot() });
+});
+
+app.post('/api/keys/:slot/:id/activate', async (context) => {
+  const slot = context.req.param('slot') as KeySlot;
+  const id = context.req.param('id');
+  await ensureQuotaSeeded();
+  if (!quota.setActive(slot, id)) return context.json({ ok: false, error: 'key_not_found' }, 404);
+  audit.record({ actor: actorOf(context), action: 'keys.activate', target: `${slot}/${id}` });
+  return context.json({ ok: true, slots: await keysSnapshot() });
+});
+
+app.post('/api/keys/:slot/:id/secret', async (context) => {
+  const slot = context.req.param('slot') as KeySlot;
+  const id = context.req.param('id');
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const secret = String(body?.secret ?? '').trim();
+  if (!secret) return context.json({ ok: false, error: 'secret_required' }, 400);
+  await ensureQuotaSeeded();
+  const vaultRef = quota.vaultRefFor(slot, id);
+  if (!vaultRef) return context.json({ ok: false, error: 'key_not_found' }, 404);
+  await vault.set(vaultRef, secret);
+  audit.record({ actor: actorOf(context), action: 'keys.secret', target: `${slot}/${id}` });
+  return context.json({ ok: true, slots: await keysSnapshot() });
+});
+
+app.delete('/api/keys/:slot/:id', async (context) => {
+  const slot = context.req.param('slot') as KeySlot;
+  const id = context.req.param('id');
+  await ensureQuotaSeeded();
+  const vaultRef = quota.vaultRefFor(slot, id);
+  if (!quota.removeKey(slot, id)) return context.json({ ok: false, error: 'key_not_found' }, 404);
+  // Default keys point at the family's original ref; removing the entry must not
+  // delete a secret other tooling still reads.
+  if (vaultRef && id !== 'default') {
+    try {
+      await vault.remove(vaultRef);
+    } catch {
+      // the entry is gone either way
+    }
+  }
+  audit.record({ actor: actorOf(context), action: 'keys.remove', target: `${slot}/${id}` });
+  return context.json({ ok: true, slots: await keysSnapshot() });
+});
 
 app.post('/api/vault/set', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, unknown> | null;
@@ -1751,6 +1920,17 @@ app.post('/api/commands', async (context) => {
       openai: openaiKey,
       relay: relayKey,
     };
+    // Managed keys are canonical: the active key — or the next one with quota
+    // left — wins over the legacy vault/env resolution above, and its id is
+    // what the usage is booked against.
+    const keyIdBySlot: Partial<Record<KeySlot, string>> = {};
+    for (const slot of Object.keys(keyBySlot) as KeySlot[]) {
+      const credential = await slotCredential(slot);
+      if (credential) {
+        keyBySlot[slot] = credential.secret;
+        keyIdBySlot[slot] = credential.keyId;
+      }
+    }
 
     /**
      * What is drawn on the board is what runs: nodes become model profiles
@@ -1808,17 +1988,41 @@ app.post('/api/commands', async (context) => {
         : routerChoice(keyBySlot);
 
     const basePlan = canvasPlan?.plan ?? liveRunPlan;
-    const planToRun = routerPick
-      ? {
-          ...basePlan,
-          rationale: `${basePlan.rationale ?? ''} 分派闸门：${routerPick.model}（只判定明显通过，拿不准交给完整评委）。`.trim(),
-        }
-      : basePlan;
+    const baseRationale = routerPick
+      ? `${basePlan.rationale ?? ''} 分派闸门：${routerPick.model}（只判定明显通过，拿不准交给完整评委）。`.trim()
+      : basePlan.rationale;
+
+    /**
+     * Quota preflight: a lane whose family is out of budget moves to the
+     * cheapest family that still has some, before the run starts rather than
+     * failing halfway with a 429.
+     */
+    const slotByProfile =
+      canvasPlan?.slotByProfile ??
+      new Map(profilesToRun.map((profile) => [profile.id, familyOf(profile.model)?.slot ?? 'relay']));
+    const substitutions = substituteExhausted({
+      plan: basePlan,
+      profiles: profilesToRun,
+      slotByProfile,
+      hasKey: (slot) => Boolean(keyBySlot[slot]),
+      headroom: (slot) => quota.headroom(slot),
+    });
+    const planToRun =
+      substitutions.length > 0
+        ? {
+            ...basePlan,
+            rationale: `${baseRationale ?? ''} 额度改派：${substitutions
+              .map((item) => `${item.nodeId ?? item.taskId} ${item.fromModel}→${item.toModel}`)
+              .join('、')}。`.trim(),
+          }
+        : routerPick
+          ? { ...basePlan, rationale: baseRationale }
+          : basePlan;
 
     // relay is always required: the acceptance judge runs on it even when every
     // worker node is served by another key.
     const needed = new Set<KeySlot>(canvasPlan ? ['relay'] : ['deepseek', 'minimax', 'relay']);
-    for (const slot of canvasPlan?.slotByProfile.values() ?? []) needed.add(slot);
+    for (const slot of slotByProfile.values()) needed.add(slot);
 
     const missing: string[] = [];
     for (const slot of needed) {
@@ -1856,6 +2060,10 @@ app.post('/api/commands', async (context) => {
         tasks: planToRun.subtasks.length,
         models: profilesToRun.map((profile) => profile.model).slice(0, 8),
         files: fileSummary(canvasFiles) || undefined,
+        substitutions: substitutions.length
+          ? substitutions.map((item) => `${item.taskId}:${item.fromSlot}->${item.toSlot}`)
+          : undefined,
+        keys: keyIdBySlot,
       },
     });
 
@@ -1880,11 +2088,11 @@ app.post('/api/commands', async (context) => {
       });
     }
     const apiKeys: Record<string, string> = {
-      'live-deepseek': deepseekKey,
-      'live-minimax': minimaxKey,
-      'live-sonnet': relayKey,
-      'live-opus': relayKey,
-      'live-haiku': relayKey,
+      'live-deepseek': keyBySlot.deepseek,
+      'live-minimax': keyBySlot.minimax,
+      'live-sonnet': keyBySlot.relay,
+      'live-opus': keyBySlot.relay,
+      'live-haiku': keyBySlot.relay,
     };
     if (canvasPlan) {
       for (const profile of canvasPlan.profiles) {
@@ -1930,11 +2138,36 @@ app.post('/api/commands', async (context) => {
           apiKey: relayKey,
         },
         teamContext,
+        onUsage: (usage) => {
+          const slot =
+            usage.stage === 'full' ? 'relay' : familyOf(usage.model)?.slot ?? 'relay';
+          quota.record({
+            slot,
+            keyId: keyIdBySlot[slot] ?? 'default',
+            model: usage.model,
+            tokens: usage.input + usage.output,
+            source: 'judge',
+          });
+        },
       }),
     });
     const gateCounts = { structural: 0, cheap: 0, full: 0 };
     orchestrator.on((event) => {
       store.append(runId, redactRunEvent(event));
+      if (event.type === 'usage') {
+        // The event carries the profile id (canvas-<nodeId>), not the model
+        // name — resolve the slot from the plan map first, or every worker's
+        // spend would be booked against the relay.
+        const slot =
+          slotByProfile.get(event.modelId) ?? familyOf(event.modelId)?.slot ?? 'relay';
+        quota.record({
+          slot,
+          keyId: keyIdBySlot[slot] ?? 'default',
+          model: event.modelId,
+          tokens: event.input + event.output,
+          source: 'run',
+        });
+      }
       if (event.type === 'task.acceptance' && event.result.gate) gateCounts[event.result.gate] += 1;
       if (event.type !== 'run.finished') return;
       runAborts.delete(runId);
@@ -2196,7 +2429,8 @@ app.get('/v1/models', (context) =>
 app.post('/v1/chat/completions', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
   const modelId = String(body?.model ?? '');
-  const resolution = await resolveGatewayModel(modelId, vault);
+  await ensureQuotaSeeded();
+  const resolution = await resolveGatewayModel(modelId, vault, (slot) => quota.pick(slot));
 
   if (!resolution) {
     return context.json(
@@ -2274,6 +2508,13 @@ app.post('/v1/chat/completions', async (context) => {
       }
     }
     gatewayUsage.add(input + output);
+    quota.record({
+      slot: resolution.model.slot,
+      keyId: resolution.keyId,
+      model: modelId,
+      tokens: input + output,
+      source: 'gateway',
+    });
     recordExternalCall({
       sessionId,
       agent,
@@ -2328,6 +2569,13 @@ app.post('/v1/chat/completions', async (context) => {
       }
     }
     gatewayUsage.add(input + output);
+    quota.record({
+      slot: resolution.model.slot,
+      keyId: resolution.keyId,
+      model: modelId,
+      tokens: input + output,
+      source: 'gateway',
+    });
     recordExternalCall({
       sessionId,
       agent,

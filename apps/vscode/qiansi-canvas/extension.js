@@ -124,7 +124,8 @@ function startEmbedded() {
  * previous embedded boot); otherwise start our own. The promise is cached so a
  * burst of callers (sidebar + status bar + URI) share one boot.
  */
-function ensureServer() {
+function ensureServer(fresh = false) {
+  if (fresh) ensurePromise = null;
   if (!ensurePromise) {
     ensurePromise = (async () => {
       const existing = readPort();
@@ -242,7 +243,7 @@ function scheduleWatch() {
 async function renderSidebar() {
   if (!sidebarView) return;
   sidebarView.webview.html = startingHtml();
-  const base = await ensureServer();
+  const base = await ensureServer(true);
   if (!base) {
     sidebarView.webview.html = failedHtml();
     scheduleWatch();
@@ -257,7 +258,7 @@ async function renderSidebar() {
 }
 
 async function openPanel() {
-  const base = await ensureServer();
+  const base = await ensureServer(true);
   if (!base) {
     vscode.window.showErrorMessage(
       '牵丝服务自动启动失败：查看「输出」面板里的 Qiansi 日志。'

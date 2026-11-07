@@ -1343,3 +1343,41 @@ textarea {
   background: linear-gradient(90deg, #6ea8fe, #4ade80);
   transition: width 0.4s ease;
 }
+
+/* 密钥与额度面板 */
+.keys-modal { max-width: 860px; }
+.keys-list { display: flex; flex-direction: column; gap: 14px; overflow-y: auto; max-height: 62vh; padding-right: 4px; }
+.keys-slot { border: 1px solid rgba(147, 164, 187, 0.16); border-radius: 12px; padding: 12px 14px; background: rgba(14, 19, 24, 0.55); }
+.keys-slot.exhausted { border-color: rgba(239, 68, 68, 0.45); }
+.keys-slot.warn { border-color: rgba(245, 158, 11, 0.4); }
+.keys-slot > header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.keys-slot-name { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; color: #e6edf6; }
+.keys-chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: rgba(56, 217, 194, 0.12); color: #38d9c2; }
+.keys-chip.warn { background: rgba(245, 158, 11, 0.14); color: #f59e0b; }
+.keys-chip.exhausted { background: rgba(239, 68, 68, 0.14); color: #f87171; }
+.keys-chip.unconfigured { background: rgba(147, 164, 187, 0.12); color: #93a4bb; }
+.keys-row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px dashed rgba(147, 164, 187, 0.12); }
+.keys-row.active { background: rgba(56, 217, 194, 0.05); border-radius: 8px; padding-left: 8px; padding-right: 8px; }
+.keys-row-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.keys-row-title code { font-size: 10px; color: #5f7186; }
+.keys-badge { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: rgba(56, 217, 194, 0.18); color: #38d9c2; }
+.keys-badge.muted { background: rgba(147, 164, 187, 0.14); color: #93a4bb; }
+.keys-meter { height: 4px; border-radius: 2px; background: rgba(147, 164, 187, 0.14); margin: 6px 0 4px; overflow: hidden; }
+.keys-meter-fill { height: 100%; background: #38d9c2; transition: width 0.3s ease; }
+.keys-meter-fill.warn { background: #f59e0b; }
+.keys-meter-fill.exhausted { background: #ef4444; }
+.keys-meter-fill.unlimited { background: rgba(56, 217, 194, 0.35); }
+.keys-row-meta { font-size: 11px; color: #7f8fa3; }
+.keys-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.keys-mini { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 3px 8px; border-radius: 6px; border: 1px solid rgba(147, 164, 187, 0.22); background: transparent; color: #b7c4d4; cursor: pointer; }
+.keys-mini:hover { border-color: rgba(56, 217, 194, 0.5); color: #38d9c2; }
+.keys-mini.danger:hover { border-color: rgba(239, 68, 68, 0.6); color: #f87171; }
+.keys-quota-edit { display: flex; gap: 6px; align-items: center; }
+.keys-quota-edit input, .keys-quota-edit select { width: 92px; font-size: 11px; padding: 3px 6px; }
+.keys-add { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed rgba(147, 164, 187, 0.14); }
+.keys-add input { font-size: 12px; padding: 6px 8px; }
+.keys-add-quota { display: flex; gap: 8px; align-items: center; }
+.keys-add-quota input { flex: 1; }
+.keys-add-quota select { font-size: 12px; padding: 6px; }
+.keys-empty { font-size: 12px; color: #7f8fa3; padding: 4px 0; }
+.keys-error { margin-bottom: 10px; font-size: 12px; color: #f87171; }

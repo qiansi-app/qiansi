@@ -7,6 +7,7 @@ import {
   Eraser,
   FileText,
   FolderOpen,
+  KeyRound,
   Loader2,
   MessagesSquare,
   MoreHorizontal,
@@ -50,6 +51,7 @@ interface ToolbarProps {
   onDiscuss: () => void;
   onUpload: () => void;
   onAddLibrary: () => void;
+  onOpenKeys: () => void;
   onAutoLayout: () => void;
   layouting: boolean;
   brushMode: RegionMode | null;
@@ -109,6 +111,7 @@ export function Toolbar({
   onDiscuss,
   onUpload,
   onAddLibrary,
+  onOpenKeys,
   onAutoLayout,
   layouting,
   brushMode,
@@ -273,6 +276,12 @@ export function Toolbar({
                 label="模型连接"
                 hint="Key、协议与工具权限"
                 onClick={menuAction(onOpenModels)}
+              />
+              <MenuItem
+                icon={KeyRound}
+                label="密钥与额度"
+                hint="多账号、用量与自动轮换"
+                onClick={menuAction(onOpenKeys)}
               />
               <MenuItem
                 icon={FileText}

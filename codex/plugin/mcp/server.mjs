@@ -412,6 +412,12 @@ const tools = [
     },
   },
   {
+    name: 'get_quota',
+    description:
+      'Every model family\'s keys and remaining quota: per-key limits, spend in the current period, and which key is active. Call this before run_canvas to avoid starting a run a family cannot finish, and after a run to explain its cost.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'get_status',
     description:
       'Health of the local Qiansi server as an exit code plus named parts: 0 healthy, 1 down, 2 running but broken, 3 waiting for configuration. Use it instead of guessing whether the app is up, and read `errors`/`setup` to tell the user what to fix. `load.activeRunAgeMs` reveals a run that has stopped emitting events.',
@@ -461,6 +467,28 @@ async function callTool(name, args = {}) {
       };
     }
     return { ok: true, file, note: '已上传；用 attach_to 再调一次可挂到资料库节点。' };
+  }
+
+  if (name === 'get_quota') {
+    const data = await request('/api/keys');
+    return {
+      slots: (data.slots ?? []).map((slot) => ({
+        slot: slot.slot,
+        label: slot.label,
+        state: slot.state,
+        headroom: slot.headroomTokens,
+        active: slot.activeKeyId,
+        keys: (slot.keys ?? []).map((key) => ({
+          label: key.label,
+          enabled: key.enabled,
+          state: key.state,
+          spent: key.spentTokens,
+          limit: key.limitTokens,
+          period: key.quota?.period ?? null,
+        })),
+      })),
+      note: 'headroom 为正数是剩余 token；-1 表示不限；0 表示这个家族已无可用额度，运行会被改派到别的家族。',
+    };
   }
 
   if (name === 'get_status') {

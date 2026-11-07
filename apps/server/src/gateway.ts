@@ -33,6 +33,8 @@ export interface GatewayModelResolution {
   profile: CapabilityProfile;
   apiKey: string;
   adapter: ChatAdapter;
+  /** Which managed key served this call; usage is booked against it. */
+  keyId: string;
 }
 
 const slotEnv: Record<KeySlot, string> = {
@@ -47,7 +49,8 @@ const slotEnv: Record<KeySlot, string> = {
 
 export async function resolveGatewayModel(
   modelId: string,
-  vault: DpapiVault
+  vault: DpapiVault,
+  pickKey?: (slot: KeySlot) => { keyId: string; vaultRef: string } | null
 ): Promise<GatewayModelResolution | undefined> {
   const model = gatewayModels.find(
     (item) => item.id === modelId || item.keyRef === modelId || item.slot === modelId
@@ -56,20 +59,25 @@ export async function resolveGatewayModel(
 
   const profile = profileForModel(model.id, model.label);
 
+  // The managed key wins: it is the one whose quota was checked, and it may be
+  // a second account added after the first one ran out.
+  const picked = pickKey?.(model.slot) ?? null;
+  let apiKey = picked ? ((await vault.get(picked.vaultRef)) ?? '') : '';
+
   const family = modelFamilies().find((item) => item.slot === model.slot);
   let fromVault = await vault.get(model.keyRef);
   for (const alias of family?.vaultAliases ?? []) {
     if (fromVault) break;
     fromVault = await vault.get(alias);
   }
-  const apiKey = fromVault ?? process.env[slotEnv[model.slot]] ?? '';
+  if (!apiKey) apiKey = fromVault ?? process.env[slotEnv[model.slot]] ?? '';
 
   const adapter =
     profile.protocol === 'anthropic-messages'
       ? new AnthropicMessagesAdapter()
       : new OpenAIChatAdapter();
 
-  return { model, profile, apiKey, adapter };
+  return { model, profile, apiKey, adapter, keyId: picked?.keyId ?? 'default' };
 }
 
 export function toNormalizedMessages(

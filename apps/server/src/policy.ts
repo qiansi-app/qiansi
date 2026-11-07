@@ -298,7 +298,7 @@ export function scopeForRequest(method: string, path: string): Scope | null {
   const verb = method.toUpperCase();
   const write = verb !== 'GET' && verb !== 'HEAD';
   if (path.startsWith('/api/canvas')) return write ? 'canvas.write' : 'canvas.read';
-  if (path.startsWith('/api/connections') || path.startsWith('/api/vault')) {
+  if (path.startsWith('/api/connections') || path.startsWith('/api/vault') || path.startsWith('/api/keys')) {
     return write ? 'vault.write' : 'canvas.read';
   }
   if (path.startsWith('/api/models/refresh')) return 'model.catalog';

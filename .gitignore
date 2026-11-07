@@ -30,3 +30,7 @@ apps/vscode/qiansi-canvas/studio/
 
 # 宣传片体积大，按需本地重新渲染
 promo/qiansi-promo.mp4
+
+# DSH bundle generated artifacts
+dsh/qiansi/mcp/
+dsh/qiansi/cordis.patch.yml

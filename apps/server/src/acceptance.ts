@@ -43,6 +43,8 @@ export interface RoutedJudgeOptions {
   routerMinConfidence?: number;
   routerTimeoutMs?: number;
   fullTimeoutMs?: number;
+  /** Book the judge's own tokens too — they are a real part of a run's cost. */
+  onUsage?: (event: { stage: 'router' | 'full'; input: number; output: number; model: string }) => void;
 }
 
 function extractJson(text: string): Record<string, unknown> | null {
@@ -59,6 +61,8 @@ function extractJson(text: string): Record<string, unknown> | null {
 
 interface CallOutcome {
   text: string;
+  input: number;
+  output: number;
   failed?: string;
   aborted?: boolean;
 }
@@ -77,6 +81,8 @@ async function judgeOnce(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs);
   let text = '';
+  let input = 0;
+  let output = 0;
   try {
     const request = buildChatRequest(
       target.profile,
@@ -89,12 +95,16 @@ async function judgeOnce(
     );
     for await (const event of adapter.stream(request)) {
       if (event.type === 'text-delta') text += event.text;
+      if (event.type === 'usage') {
+        input += event.input;
+        output += event.output;
+      }
       if (event.type === 'error') throw new Error(event.message);
     }
-    return { text };
+    return { text, input, output };
   } catch (error) {
-    if (controller.signal.aborted) return { text, aborted: true };
-    return { text, failed: error instanceof Error ? error.message : String(error) };
+    if (controller.signal.aborted) return { text, input, output, aborted: true };
+    return { text, input, output, failed: error instanceof Error ? error.message : String(error) };
   } finally {
     clearTimeout(timer);
   }
@@ -154,6 +164,14 @@ export function createRoutedJudge(options: RoutedJudgeOptions) {
       );
 
       const verdict = gate.failed || gate.aborted ? null : extractJson(gate.text);
+      if (gate.input || gate.output) {
+        options.onUsage?.({
+          stage: 'router',
+          input: gate.input,
+          output: gate.output,
+          model: options.router.profile.model,
+        });
+      }
       if (verdict) routerFailures = 0;
       else routerFailures += 1;
       const confidence = Number(verdict?.confidence ?? 0);
@@ -188,6 +206,15 @@ export function createRoutedJudge(options: RoutedJudgeOptions) {
       ].join('\n'),
       { maxTokens: 1024, timeoutMs: fullTimeoutMs }
     );
+
+    if (full.input || full.output) {
+      options.onUsage?.({
+        stage: 'full',
+        input: full.input,
+        output: full.output,
+        model: options.full.profile.model,
+      });
+    }
 
     if (full.aborted) {
       return {
