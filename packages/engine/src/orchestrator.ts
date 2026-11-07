@@ -207,6 +207,8 @@ export class Orchestrator {
 
     let output = '';
     let effort = task.effort;
+    /** 上一次尝试是否空产出；是则本轮要求直接作答。 */
+    let directHint = false;
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       if (this.budgetExceeded) {
@@ -249,7 +251,7 @@ export class Orchestrator {
       output = '';
       let streamError: string | undefined;
       try {
-        output = await this.streamTask(task, effort, dependencyOutputs);
+        output = await this.streamTask(task, effort, dependencyOutputs, directHint);
       } catch (error) {
         streamError = error instanceof Error ? error.message : String(error);
         output = output || `Error: ${streamError}`;
@@ -277,6 +279,9 @@ export class Orchestrator {
         // MORE, leaving even less room for the answer — the opposite of a fix.
         // Back off instead, and let the bigger output budget do the work.
         const emptyFailure = output.trim().length < 40;
+        // 对没有 effort 控制阀的家族（如智谱始终思考），降档无效——
+        // 能压住「想一整天不写答案」的只有一条明确指令。
+        if (emptyFailure) directHint = true;
         const raised = emptyFailure ? 'low' : nextEffort(effort);
         if (raised !== effort) {
           effort = raised;
@@ -315,7 +320,8 @@ export class Orchestrator {
   private async streamTask(
     task: Subtask,
     effort: Subtask['effort'],
-    dependencyOutputs: Record<string, string>
+    dependencyOutputs: Record<string, string>,
+    directHint = false
   ): Promise<string> {
     const profile = profileById(this.options.profiles, task.profileId);
     const adapter = this.options.adapters[profile.protocol];
@@ -347,6 +353,12 @@ export class Orchestrator {
             stylePrompt(style),
             ...(this.options.teamContext
               ? [`Team roster (respect each member's model and effort):\n${this.options.teamContext}`]
+              : []),
+            ...(directHint
+              ? [
+                  'IMPORTANT: the previous attempt produced no answer because reasoning consumed the whole budget.',
+                  'Answer directly this time. No analysis, no step-by-step reasoning, no preamble — write the deliverable itself.',
+                ]
               : []),
             'Return the finished work only. Do not narrate your process.',
             'Keep the answer concise; do not repeat the prompt.',
