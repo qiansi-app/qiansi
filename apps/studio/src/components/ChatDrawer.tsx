@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import type { AgentNodeData, EffortLevel } from '../data/demoGraph';
 import { catalogOf, type ModelDraft } from '../data/models';
+import { CONVERSATION_STYLES, isConversationStyle, styleById, suggestStyle } from '@qiansi/engine';
 import type { ChatMessage } from '../types';
 
 type Tab = 'chat' | 'tasks' | 'logs' | 'profile';
@@ -36,7 +37,7 @@ interface ChatDrawerProps {
   onEffortChange: (effort: EffortLevel) => void;
   onModelChange: (connectionId: string, model: string) => void;
   onOpenModels: () => void;
-  onIdentityChange?: (patch: { name?: string; role?: string }) => void;
+  onIdentityChange?: (patch: { name?: string; role?: string; style?: string }) => void;
   onMakeOrchestrator?: () => void;
   onRerun: () => void;
   onDelete?: () => void;
@@ -198,6 +199,33 @@ export function ChatDrawer({
                   {effortOptions.map((effort) => (
                     <option key={effort} value={effort}>
                       effort: {effort}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {node && (
+                <select
+                  className="select"
+                  value={
+                    isConversationStyle(node.style)
+                      ? String(node.style)
+                      : suggestStyle(`${node.name} ${node.role}`)
+                  }
+                  onChange={(event) => onIdentityChange?.({ style: event.target.value })}
+                  title={`对话风格：${styleById(
+                    isConversationStyle(node.style)
+                      ? String(node.style)
+                      : suggestStyle(`${node.name} ${node.role}`)
+                  ).scenario}`}
+                >
+                  {!isConversationStyle(node.style) && (
+                    <option value={suggestStyle(`${node.name} ${node.role}`)}>
+                      {styleById(suggestStyle(`${node.name} ${node.role}`)).label}（按角色推荐）
+                    </option>
+                  )}
+                  {CONVERSATION_STYLES.map((style) => (
+                    <option key={style.id} value={style.id}>
+                      {style.label}
                     </option>
                   ))}
                 </select>

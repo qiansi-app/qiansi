@@ -91,6 +91,7 @@ Codex 用 `codex mcp add qiansi -- node <repo>\packages\mcp\server.mjs`，或把
 - [接入主流 Agent](docs/agent-integration.md) — MCP 工具与资源、画布 API、Claude Code 插件、Codex 接入、审批中继
 - [定位与竞品](docs/positioning.md) — 六种用户需求对应的操作模式、竞品对照、我们满足不了的、差距收敛方案
 - [差距可行性评估](docs/gap-analysis.md) — 定时触发 / SaaS 集成 / RAG / 发布 / 协作 / 移动端 / 模板市场 / 企业能力，逐项判断在单人本地条件下能不能做
+- [对话风格](docs/conversation-styles.md) — 九种场景对应九种说法：引导、头脑风暴、辩论、收敛、同行、顾问、专家直答、共情、角色扮演
 - [从 dsh-superagent 借来的四件事](docs/superagent-adoption.md) — 状态契约与看门狗、验收分流、主控只做分派、Policy + Mandate
 - [架构决策 0003](docs/decisions/0003-desktop.md) — Electron + 便携打包
 - [English README](README.md)

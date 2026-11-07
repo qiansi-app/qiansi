@@ -1,4 +1,4 @@
-import type { CapabilityProfile, Effort, Plan, Subtask } from '@qiansi/engine';
+import { isConversationStyle, suggestStyle, type CapabilityProfile, type Effort, type Plan, type Subtask } from '@qiansi/engine';
 import type { CanvasDocument, CanvasNode } from './canvas.js';
 import { filesForTask, type CanvasFileText } from './canvas-files.js';
 import { profileForModel, resolveModelRoute, type KeySlot } from './model-catalog.js';
@@ -146,6 +146,9 @@ export function buildPlanFromCanvas(
       profileId: `canvas-${nodeId}`,
       effort: asEffort(data.effort),
       acceptanceCriteria: DEFAULT_ACCEPTANCE,
+      style: isConversationStyle(data.style)
+        ? data.style
+        : suggestStyle(`${String(data.name ?? "")} ${String(data.role ?? "")}`),
       machineCheckable: false,
       dependsOn,
       status: 'pending',

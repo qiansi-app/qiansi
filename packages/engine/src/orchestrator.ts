@@ -1,5 +1,6 @@
 import { buildChatRequest, profileById } from './capability.js';
 import { nextEffort } from './effort.js';
+import { styleById, stylePrompt } from './styles.js';
 import type {
   AcceptanceResult,
   BudgetPolicy,
@@ -331,6 +332,7 @@ export class Orchestrator {
     }
 
     try {
+      const style = styleById(task.style);
       const upstream = Object.entries(dependencyOutputs)
         .filter(([, value]) => value.trim().length > 0)
         .map(([id, value]) => `### ${id}\n${value}`)
@@ -342,6 +344,7 @@ export class Orchestrator {
           content: [
             `You are a specialist agent on a multi-agent team. Role: ${task.title}.`,
             `Acceptance criteria: ${task.acceptanceCriteria}`,
+            stylePrompt(style),
             ...(this.options.teamContext
               ? [`Team roster (respect each member's model and effort):\n${this.options.teamContext}`]
               : []),
@@ -353,7 +356,7 @@ export class Orchestrator {
           ? [
               {
                 role: 'user' as const,
-                content: `Upstream task outputs (use them as the source of truth):\n\n${upstream}`,
+                content: `Upstream task outputs（按交接规则整理后再使用）:\n\n${upstream}`,
               },
             ]
           : []),

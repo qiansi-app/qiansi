@@ -1,10 +1,12 @@
 import {
   AnthropicMessagesAdapter,
   OpenAIChatAdapter,
+  buildChatRequest,
   type ChatAdapter,
   type NormalizedMessage,
   type Protocol,
 } from '@qiansi/engine';
+import { profileForModel } from './model-catalog.js';
 import type { DpapiVault } from './vault.js';
 
 export interface ChatConnection {
@@ -66,15 +68,17 @@ export async function completeChat(
   let text = '';
   const usage = { input: 0, output: 0, total: 0 };
   try {
-    for await (const event of adapter.stream({
-      baseUrl,
+    // Build through the shared request builder so the family's effort dialect
+    // applies: sending 'off' turns thinking OFF for GLM/Kimi/Qwen-class models.
+    // Constructing the request by hand here left thinking on, and a 500-token
+    // budget went entirely to reasoning — discussions came back empty.
+    const profile = { ...profileForModel(model), protocol, baseUrl };
+    const request = buildChatRequest(profile, messages, 'off', {
       apiKey,
-      model,
-      messages,
-      effort: 'medium',
-      maxTokens: options.maxTokens ?? 800,
+      maxTokens: options.maxTokens ?? 1600,
       signal: controller.signal,
-    })) {
+    });
+    for await (const event of adapter.stream(request)) {
       if (event.type === 'text-delta') text += event.text;
       if (event.type === 'usage') {
         usage.input += event.input;

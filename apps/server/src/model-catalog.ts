@@ -82,10 +82,10 @@ export function modelFamilies(relay: string = relayBase): ModelFamily[] {
       models: ['glm-5.3-flash', 'glm-5.3-flashx', 'glm-4.6'],
       contextWindow: 128000,
       maxOutput: 16384,
-      // GLM hybrid models accept a thinking switch; without it a heavy prompt
-      // makes them reason until the completion budget is gone (observed:
-      // 12k reasoning deltas, zero answer text).
-      effortDialect: 'glm-thinking',
+      // glm-5.3-flash always thinks and rejects thinking:disabled with 1210
+      // ("请使用 low、high 或 max"), so no thinking param is sent at all —
+      // instead the completion budget must be large enough to hold both.
+      effortDialect: 'none',
     },
     {
       slot: 'qwen',

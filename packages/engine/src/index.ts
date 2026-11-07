@@ -9,3 +9,4 @@ export { withConnection, probeConnection, redactSecrets } from './connection.js'
 export type { ProbeOptions } from './connection.js';
 export { OpenAIChatAdapter, AnthropicMessagesAdapter, readSSE } from './providers/index.js';
 export type { SSEMessage } from './providers/index.js';
+export * from './styles.js';

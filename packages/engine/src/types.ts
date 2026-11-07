@@ -183,6 +183,8 @@ export interface Subtask {
   profileId: string;
   effort: Effort;
   acceptanceCriteria: string;
+  /** 对话风格：决定这个任务怎么组织输出、怎么把上游交给下游。 */
+  style?: import("./styles.js").ConversationStyle;
   machineCheckable: boolean;
   dependsOn: string[];
   status: TaskStatus;

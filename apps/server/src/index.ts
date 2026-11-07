@@ -22,8 +22,11 @@ import {
   OpenAIChatAdapter,
   Orchestrator,
   buildChatRequest,
+  discussionPrompt,
+  isConversationStyle,
   probeConnection,
   redactSecrets,
+  styleById,
   type CapabilityProfile,
   type Protocol,
 } from '@qiansi/engine';
@@ -1212,6 +1215,8 @@ app.post('/api/discuss', async (context) => {
   const topic = String(body?.topic ?? '').trim().slice(0, 2000);
   const fileContext = String(body?.context ?? '').trim().slice(0, 4000);
   const rounds = Math.min(Math.max(Number(body?.rounds ?? 2) || 2, 1), 3);
+  // 讨论风格决定每个参与者怎么接别人的话；没指定时用「同行讨论式」。
+  const style = styleById(isConversationStyle(body?.style) ? body.style : 'peer');
   const participants = (Array.isArray(body?.participants) ? body.participants : [])
     .slice(0, 5)
     .map((item: any) => ({
@@ -1250,14 +1255,15 @@ app.post('/api/discuss', async (context) => {
               {
                 role: 'system',
                 content:
-                  '你正在参加一场多 AI 讨论。直接给出观点，引用或反驳前面发言者的具体内容；不要复述主题，不要使用客套话。控制在 300 字以内。',
+                  `你正在参加一场多 AI 讨论。直接给出观点，引用或反驳前面发言者的具体内容；不要复述主题，不要使用客套话。控制在 300 字以内。
+${discussionPrompt(style)}`,
               },
               {
                 role: 'user',
                 content: `讨论主题：${topic}\n\n${fileContext ? `文件上下文：\n${fileContext}\n\n` : ''}已有发言：\n${prior}\n\n现在轮到你（${participant.name}，模型 ${participant.model}）发言。`,
               },
             ],
-            { maxTokens: 500, timeoutMs: 40000 }
+            { maxTokens: 1600, timeoutMs: 60000 }
           );
           content = result.text || '（没有返回内容）';
         } catch (error) {
@@ -1275,6 +1281,8 @@ app.post('/api/discuss', async (context) => {
       rounds: transcript,
       requestedRounds: rounds,
       effectiveRounds,
+      style: style.id,
+      styleLabel: style.label,
     });
   } catch (error) {
     return context.json(

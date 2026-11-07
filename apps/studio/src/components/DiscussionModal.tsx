@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Loader2, MessagesSquare, Send, X } from 'lucide-react';
+import { CONVERSATION_STYLES, suggestStyle, type ConversationStyle } from '@qiansi/engine';
 
 export interface DiscussionParticipant {
   id: string;
@@ -38,6 +39,9 @@ export function DiscussionModal({
 }: DiscussionModalProps) {
   const [topic, setTopic] = useState('');
   const [rounds, setRounds] = useState(2);
+  const [style, setStyle] = useState(() => suggestStyle(topic));
+  // 用户一旦手动选过，就不再跟着主题自动改。
+  const [styleTouched, setStyleTouched] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<DiscussionRound[]>([]);
@@ -46,7 +50,11 @@ export function DiscussionModal({
   if (!open) return null;
 
   const start = async () => {
-    const text = topic.trim();
+    useEffect(() => {
+    if (!styleTouched) setStyle(suggestStyle(topic));
+  }, [topic, styleTouched]);
+
+  const text = topic.trim();
     if (!text || running) return;
     setRunning(true);
     setError(null);
@@ -56,11 +64,13 @@ export function DiscussionModal({
       const response = await fetch('/api/discuss', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ topic: text, rounds, participants, context }),
+        body: JSON.stringify({ topic: text, rounds, participants, context, style }),
       });
       if (!response.ok) throw new Error(await response.text());
       const data = (await response.json()) as {
         rounds?: DiscussionRound[];
+        style?: string;
+        styleLabel?: string;
         effectiveRounds?: number;
       };
       setTranscript(data.rounds ?? []);
@@ -117,6 +127,22 @@ export function DiscussionModal({
               if (event.key === 'Enter') void start();
             }}
           />
+          <label>
+            风格
+            <select
+              value={style}
+              onChange={(event) => {
+                setStyle(event.target.value as ConversationStyle);
+                setStyleTouched(true);
+              }}
+            >
+              {CONVERSATION_STYLES.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <label>
             轮数
             <select value={rounds} onChange={(event) => setRounds(Number(event.target.value))}>
