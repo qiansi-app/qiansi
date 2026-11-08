@@ -412,6 +412,20 @@ const tools = [
     },
   },
   {
+    name: 'handoff_from_agent',
+    description:
+      'Continue work that is already in progress in an external agent session. Reads the most recent Claude Code / Codex transcript plus the project facts, writes a 接续上下文 library into Qiansi, and optionally auto-arranges a workflow (autoArrange, default true) and starts it (autoRun, default false). Use it when the user says 接续/继续这个会话, or when the canvas should take over from the current conversation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        source: { type: 'string', description: 'auto | claude-code | codex' },
+        cwd: { type: 'string', description: 'Project directory; defaults to the Qiansi server working directory' },
+        autoArrange: { type: 'boolean', description: 'Let the orchestrator generate the workflow (default true)' },
+        autoRun: { type: 'boolean', description: 'Start a live run after writing (default false)' },
+      },
+    },
+  },
+  {
     name: 'get_quota',
     description:
       'Every model family\'s keys and remaining quota: per-key limits, spend in the current period, and which key is active. Call this before run_canvas to avoid starting a run a family cannot finish, and after a run to explain its cost.',
@@ -467,6 +481,18 @@ async function callTool(name, args = {}) {
       };
     }
     return { ok: true, file, note: '已上传；用 attach_to 再调一次可挂到资料库节点。' };
+  }
+
+  if (name === 'handoff_from_agent') {
+    return request('/api/handoff', {
+      method: 'POST',
+      body: JSON.stringify({
+        source: args.source,
+        cwd: args.cwd,
+        autoArrange: args.autoArrange !== false,
+        autoRun: args.autoRun === true,
+      }),
+    });
   }
 
   if (name === 'get_quota') {

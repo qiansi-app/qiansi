@@ -8,6 +8,7 @@ import {
   FileText,
   FolderOpen,
   KeyRound,
+  Link2,
   Loader2,
   MessagesSquare,
   MoreHorizontal,
@@ -52,6 +53,7 @@ interface ToolbarProps {
   onUpload: () => void;
   onAddLibrary: () => void;
   onOpenKeys: () => void;
+  onOpenHandoff: () => void;
   onAutoLayout: () => void;
   layouting: boolean;
   brushMode: RegionMode | null;
@@ -112,6 +114,7 @@ export function Toolbar({
   onUpload,
   onAddLibrary,
   onOpenKeys,
+  onOpenHandoff,
   onAutoLayout,
   layouting,
   brushMode,
@@ -276,6 +279,12 @@ export function Toolbar({
                 label="模型连接"
                 hint="Key、协议与工具权限"
                 onClick={menuAction(onOpenModels)}
+              />
+              <MenuItem
+                icon={Link2}
+                label="接续 Agent 会话"
+                hint="读对话与项目，接着干"
+                onClick={menuAction(onOpenHandoff)}
               />
               <MenuItem
                 icon={KeyRound}

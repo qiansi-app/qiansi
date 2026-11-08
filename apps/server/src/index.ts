@@ -59,6 +59,7 @@ import {
 import { PolicyStore, scopeForRequest, type Mandate } from './policy.js';
 import { QuotaStore } from './quota.js';
 import { substituteExhausted } from './quota-plan.js';
+import { buildHandoffPack } from './handoff.js';
 import { part, summarize, type HealthPart, type StatusReport } from './status.js';
 import { RunStore, type RunEnvelope } from './store.js';
 import { ensureStateDir } from './state-dir.js';
@@ -1372,6 +1373,266 @@ app.post('/api/layout', async (context) => {
       502
     );
   }
+});
+
+/**
+ * 接续外部 agent 的会话：读最近一段真实对话 + 项目事实，合成资料包挂到画布上，
+ * 可选自动编排（让主控生成工作流）与立即运行。读取全部在本地完成，注入前脱敏。
+ */
+app.post('/api/handoff', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const cwd = String(body?.cwd ?? process.cwd());
+  const source =
+    body?.source === 'codex' || body?.source === 'claude-code' ? body.source : 'auto';
+  const autoArrange = body?.autoArrange !== false;
+  const autoRun = body?.autoRun === true;
+
+  const pack = buildHandoffPack({ cwd, source });
+
+  const fileId = randomUUID();
+  const filesDir = join(stateDir, 'files');
+  mkdirSync(filesDir, { recursive: true });
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '');
+  const fileName = `接续上下文-${pack.session?.source ?? 'project'}-${stamp}.md`;
+  try {
+    writeFileSync(join(filesDir, `${fileId}-${fileName}`), pack.markdown, 'utf8');
+  } catch (error) {
+    return context.json(
+      {
+        ok: false,
+        error: `无法保存资料包：${error instanceof Error ? error.message : String(error)}`,
+      },
+      500
+    );
+  }
+
+  const document = canvasStore.read();
+  const ops: CanvasOp[] = [];
+  const library = document.nodes.find((node) => node.data?.name === '接续上下文');
+  const metric = `${pack.session?.source ?? 'project'} · ${pack.session?.messageCount ?? 0} 条`;
+  if (library) {
+    ops.push({
+      op: 'update_node',
+      id: library.id,
+      patch: { libraryFiles: [{ id: fileId, name: fileName, size: pack.bytes }], metric },
+    });
+  } else {
+    ops.push({
+      op: 'add_node',
+      node: {
+        id: `handoff-${fileId.slice(0, 8)}`,
+        type: 'library',
+        position: { x: 80, y: 80 },
+        data: {
+          kind: 'library',
+          name: '接续上下文',
+          role: '从 agent 会话与项目自动提取，运行时会注入各节点',
+          provider: 'local',
+          model: 'library',
+          effort: 'off',
+          status: 'idle',
+          accent: '#38d9c2',
+          isPublic: true,
+          metric,
+          libraryFiles: [{ id: fileId, name: fileName, size: pack.bytes }],
+        },
+      },
+    });
+  }
+  canvasStore.apply(ops);
+
+  const arranged: { nodes: number; edges: number } = { nodes: 0, edges: 0 };
+  if (autoArrange && pack.session) {
+    // 复用已有的工作流生成器，而不是写第二套：它已经会说画布图格式，也按计划选模型。
+    const origin = new URL(context.req.url).origin;
+    const available: Array<{
+      connectionId: string;
+      name: string;
+      provider: string;
+      model: string;
+      effort: string;
+    }> = [];
+    for (const family of modelFamilies()) {
+      const credential = await slotCredential(family.slot);
+      if (!credential) continue;
+      available.push({
+        connectionId: family.vaultRef,
+        name: family.label,
+        provider: family.label,
+        model: preferredModel(family.models),
+        effort: 'low',
+      });
+    }
+    const goalParts = [
+      pack.session.userAsks.at(-1) ?? '',
+      pack.session.conclusions.at(-1) ?? '',
+    ].filter(Boolean);
+    const goal = (goalParts.join('\n') || `接续 ${pack.session.source} 会话的工作`).slice(0, 1200);
+    console.log(`[handoff] available models: ${available.length}`, available.map((m) => m.connectionId).join(','));
+    if (available.length > 0) {
+      const current = canvasStore.read();
+      const orchestratorNode = current.nodes.find((node) => node.id === current.orchestratorId);
+      const orchestrator = orchestratorNode
+        ? {
+            connectionId: String(orchestratorNode.data?.connectionId ?? available[0]!.connectionId),
+            model: String(orchestratorNode.data?.model ?? available[0]!.model),
+            protocol: orchestratorNode.data?.protocol,
+            baseUrl: orchestratorNode.data?.baseUrl,
+          }
+        : { connectionId: available[0]!.connectionId, model: available[0]!.model };
+      // 先用画布自己的主控；它调不通（例如中转断了）就退到目录里可用的模型。
+      const orchestrators = [
+        orchestrator,
+        { connectionId: available[0]!.connectionId, model: available[0]!.model },
+      ];
+      try {
+        let response: Response | null = null;
+        for (const candidate of orchestrators) {
+          response = await fetch(`${origin}/api/workflow`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-qiansi-token': token },
+            body: JSON.stringify({
+              goal,
+              orchestrator: candidate,
+              models: available,
+              files: [{ name: fileName, preview: pack.markdown.slice(0, 900) }],
+            }),
+          });
+          if (response.ok) break;
+        }
+        if (!response) throw new Error('workflow_unavailable');
+        // /api/workflow 返回 { ok, workflow: { summary, nodes, edges } }
+        const raw = (await response.json().catch(() => null)) as {
+          workflow?: { nodes?: Array<Record<string, any>>; edges?: Array<Record<string, any>> };
+          nodes?: Array<Record<string, any>>;
+          edges?: Array<Record<string, any>>;
+        } | null;
+        const generated = {
+          nodes: raw?.workflow?.nodes ?? raw?.nodes ?? [],
+          edges: raw?.workflow?.edges ?? raw?.edges ?? [],
+        };
+        console.log(`[handoff] workflow status=${response.status} nodes=${generated.nodes.length}`);
+        if (!response.ok) {
+          pack.notes.push(`自动编排失败：/api/workflow 返回 HTTP ${response.status}`);
+        }
+        if (response.ok && generated?.nodes?.length) {
+          const doc = canvasStore.read();
+          const placed: CanvasOp[] = [];
+          const libId =
+            doc.nodes.find((node) => node.data?.name === '接续上下文')?.id ??
+            `handoff-${fileId.slice(0, 8)}`;
+          generated.nodes.slice(0, 6).forEach((item, index) => {
+            placed.push({
+              op: 'add_node',
+              node: {
+                id: String(item.id),
+                type: 'agent',
+                position: { x: 380 + (index % 2) * 320, y: 120 + Math.floor(index / 2) * 230 },
+                data: {
+                  kind: 'agent',
+                  name: String(item.name ?? `节点 ${index + 1}`),
+                  role: String(item.role ?? ''),
+                  provider: String(item.provider ?? ''),
+                  model: String(item.model ?? ''),
+                  effort: String(item.effort ?? 'medium'),
+                  status: 'idle',
+                  accent: '#4d6bfe',
+                  connectionId: String(item.connectionId ?? ''),
+                },
+              },
+            });
+            placed.push({
+              op: 'add_edge',
+              edge: { source: libId, target: String(item.id), label: '资料', data: { kind: 'context' } },
+            });
+          });
+          for (const item of generated.edges ?? []) {
+            placed.push({
+              op: 'add_edge',
+              edge: {
+                source: String(item.source ?? ''),
+                target: String(item.target ?? ''),
+                label: String(item.label ?? ''),
+                data: { kind: String(item.kind ?? 'handoff') },
+              },
+            });
+          }
+          const applied = canvasStore.apply(placed);
+          arranged.nodes = generated.nodes.length;
+          arranged.edges = (generated.edges ?? []).length + generated.nodes.length;
+          audit.record({
+            actor: actorOf(context),
+            action: 'handoff.arrange',
+            target: `r${applied.document.revision}`,
+            detail: arranged,
+          });
+        }
+      } catch (error) {
+        // 自动编排失败不影响资料包已经落地，但要说清楚为什么
+        pack.notes.push(
+          `自动编排失败：${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+    if (arranged.nodes === 0) {
+      pack.notes.push('自动编排没有产出（模型未配置或生成失败），仅写入了接续资料包。');
+    }
+  }
+
+  audit.record({
+    actor: actorOf(context),
+    action: 'handoff.read',
+    target: pack.session?.sessionId ?? 'project-only',
+    detail: {
+      source: pack.session?.source,
+      bytes: pack.bytes,
+      records: pack.session?.messageCount ?? 0,
+    },
+  });
+
+  let runId: string | null = null;
+  if (autoRun && arranged.nodes > 0) {
+    try {
+      const origin = new URL(context.req.url).origin;
+      const started = await fetch(`${origin}/api/commands`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-qiansi-token': token },
+        body: JSON.stringify({
+          commandId: `handoff-run-${randomUUID()}`,
+          type: 'run.start',
+          payload: { mode: 'live', goal: '接续 agent 会话继续工作' },
+        }),
+      });
+      const startedBody = (await started.json().catch(() => null)) as {
+        runId?: string;
+        ok?: boolean;
+      } | null;
+      if (started.ok && startedBody?.runId) runId = startedBody.runId;
+    } catch {
+      // 运行没起也不影响已写入的上下文
+    }
+  }
+
+  return context.json({
+    ok: true,
+    session: pack.session
+      ? {
+          source: pack.session.source,
+          sessionId: pack.session.sessionId,
+          file: pack.session.file,
+          records: pack.session.messageCount,
+          ageMinutes: Math.round((Date.now() - pack.session.updatedAt) / 60000),
+          tools: pack.session.tools,
+        }
+      : null,
+    project: pack.project
+      ? { cwd: pack.project.cwd, branch: pack.project.branch, files: pack.project.files.length }
+      : null,
+    pack: { bytes: pack.bytes, fileId, name: fileName },
+    arranged,
+    runId,
+    notes: pack.notes,
+  });
 });
 
 app.post('/api/workflow', async (context) => {
