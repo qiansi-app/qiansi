@@ -59,6 +59,7 @@ import {
 import { PolicyStore, scopeForRequest, type Mandate } from './policy.js';
 import { QuotaStore } from './quota.js';
 import { substituteExhausted } from './quota-plan.js';
+import { orderByStrategy, performanceOf } from './routing.js';
 import { buildHandoffPack } from './handoff.js';
 import { part, summarize, type HealthPart, type StatusReport } from './status.js';
 import { RunStore, type RunEnvelope } from './store.js';
@@ -749,6 +750,7 @@ app.get('/api/keys', async (context) =>
     slots: await keysSnapshot(),
     recent: quota.recent(40),
     seeded: quotaSeeded,
+    strategy: quota.strategy(),
   })
 );
 
@@ -767,7 +769,13 @@ app.post('/api/keys', async (context) => {
   await ensureQuotaSeeded();
   try {
     await vault.set(vaultRef, secret);
-    quota.addKey(slot, { id, label, vaultRef, quota: readQuotaInput(body?.quota) });
+    quota.addKey(slot, {
+      id,
+      label,
+      vaultRef,
+      quota: readQuotaInput(body?.quota),
+      billing: body?.billing === 'subscription' ? 'subscription' : 'metered',
+    });
   } catch (error) {
     return context.json(
       { ok: false, error: error instanceof Error ? error.message : 'add_failed' },
@@ -776,6 +784,18 @@ app.post('/api/keys', async (context) => {
   }
   audit.record({ actor: actorOf(context), action: 'keys.add', target: `${slot}/${id}` });
   return context.json({ ok: true, id, vaultRef, slots: await keysSnapshot() });
+});
+
+/** 路由策略：性能优先 / 订阅优先 / 成本优先。全局生效，运行时可覆盖。 */
+app.put('/api/keys/strategy', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const value = body?.strategy;
+  if (value !== 'performance' && value !== 'subscription' && value !== 'cost') {
+    return context.json({ ok: false, error: 'invalid_strategy' }, 400);
+  }
+  const strategy = quota.setStrategy(value);
+  audit.record({ actor: actorOf(context), action: 'keys.strategy', target: strategy });
+  return context.json({ ok: true, strategy, slots: await keysSnapshot() });
 });
 
 app.patch('/api/keys/:slot/:id', async (context) => {
@@ -787,6 +807,7 @@ app.patch('/api/keys/:slot/:id', async (context) => {
     label: typeof body?.label === 'string' ? body.label : undefined,
     enabled: typeof body?.enabled === 'boolean' ? body.enabled : undefined,
     quota: body?.quota === null ? null : readQuotaInput(body?.quota) ?? undefined,
+    billing: body?.billing === undefined ? undefined : body.billing === 'subscription' ? 'subscription' : 'metered',
   });
   if (!updated) return context.json({ ok: false, error: 'key_not_found' }, 404);
   audit.record({
@@ -1463,6 +1484,26 @@ app.post('/api/handoff', async (context) => {
         effort: 'low',
       });
     }
+    // 自动编排选谁，取决于计费策略：订阅优先时先用已付费的家族。
+    const strategy = quota.strategy();
+    const scores = available.map((item) => {
+      const slot = familyOf(item.model)?.slot ?? 'relay';
+      const price = quota.prices()[slot];
+      return {
+        slot,
+        billing: quota.billingOf(slot),
+        priceCnyPerM: (price.in + price.out) / 2,
+        performance: performanceOf(slot),
+        headroom: quota.headroom(slot),
+      };
+    });
+    const order = orderByStrategy(scores, strategy).map((score) => score.slot);
+    available.sort(
+      (a, b) =>
+        order.indexOf(familyOf(a.model)?.slot ?? 'relay') -
+        order.indexOf(familyOf(b.model)?.slot ?? 'relay')
+    );
+
     const goalParts = [
       pack.session.userAsks.at(-1) ?? '',
       pack.session.conclusions.at(-1) ?? '',
@@ -2269,12 +2310,23 @@ app.post('/api/commands', async (context) => {
     const slotByProfile =
       canvasPlan?.slotByProfile ??
       new Map(profilesToRun.map((profile) => [profile.id, familyOf(profile.model)?.slot ?? 'relay']));
+    const requestedStrategy = body?.payload?.strategy;
+    const runStrategy =
+      requestedStrategy === 'performance' || requestedStrategy === 'cost' || requestedStrategy === 'subscription'
+        ? requestedStrategy
+        : quota.strategy();
     const substitutions = substituteExhausted({
       plan: basePlan,
       profiles: profilesToRun,
       slotByProfile,
       hasKey: (slot) => Boolean(keyBySlot[slot]),
       headroom: (slot) => quota.headroom(slot),
+      strategy: runStrategy,
+      billingOf: (slot) => quota.billingOf(slot),
+      priceOf: (slot) => {
+        const price = quota.prices()[slot];
+        return (price.in + price.out) / 2;
+      },
     });
     const planToRun =
       substitutions.length > 0
@@ -2329,6 +2381,7 @@ app.post('/api/commands', async (context) => {
         tasks: planToRun.subtasks.length,
         models: profilesToRun.map((profile) => profile.model).slice(0, 8),
         files: fileSummary(canvasFiles) || undefined,
+        strategy: runStrategy,
         substitutions: substitutions.length
           ? substitutions.map((item) => `${item.taskId}:${item.fromSlot}->${item.toSlot}`)
           : undefined,

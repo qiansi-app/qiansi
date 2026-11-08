@@ -11,6 +11,12 @@ import type { KeySlot } from './model-catalog.js';
  */
 
 export type KeyPeriod = 'day' | 'month';
+
+/** 订阅制（已付费，边际成本≈0）或按量（每次调用都花钱）。 */
+export type Billing = 'subscription' | 'metered';
+
+/** 工作流路由策略：性能优先 / 订阅优先 / 成本优先。 */
+export type RoutingStrategy = 'performance' | 'subscription' | 'cost';
 export type UsageSource = 'run' | 'judge' | 'gateway' | 'chat';
 
 export interface KeyQuota {
@@ -25,6 +31,8 @@ export interface ManagedKey {
   /** Where the secret lives. Default keys reuse the family's original ref. */
   vaultRef: string;
   enabled: boolean;
+  /** 订阅制还是按量计费；路由策略据此排序。 */
+  billing: Billing;
   /** null = unlimited */
   quota: KeyQuota | null;
   createdAt: number;
@@ -50,6 +58,8 @@ export interface QuotaFile {
   version: 1;
   slots: Partial<Record<KeySlot, SlotRecord>>;
   usage: UsageRecord[];
+  /** 默认订阅优先：用户明确选择的策略，随文件持久化。 */
+  strategy?: RoutingStrategy;
   /** CNY per 1M tokens, by slot. Estimates; override here to match your bill. */
   prices?: Partial<Record<KeySlot, { in: number; out: number }>>;
 }
@@ -59,6 +69,7 @@ export interface KeyView {
   label: string;
   vaultRef: string;
   enabled: boolean;
+  billing: Billing;
   quota: KeyQuota | null;
   spentTokens: number;
   spentCny: number;
@@ -125,10 +136,19 @@ export class QuotaStore {
     if (!existsSync(this.file)) return { version: 1, slots: {}, usage: [] };
     try {
       const parsed = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<QuotaFile>;
+      // 旧文件没有 billing：按量是安全默认（订阅需要用户明确标注）。
+      for (const record of Object.values(parsed.slots ?? {})) {
+        for (const key of record?.keys ?? []) {
+          if (key.billing !== 'subscription' && key.billing !== 'metered') key.billing = 'metered';
+        }
+      }
       return {
         version: 1,
         slots: parsed.slots ?? {},
         usage: Array.isArray(parsed.usage) ? parsed.usage : [],
+        strategy: parsed.strategy === 'performance' || parsed.strategy === 'cost' || parsed.strategy === 'subscription'
+          ? parsed.strategy
+          : undefined,
         prices: parsed.prices,
       };
     } catch {
@@ -188,6 +208,7 @@ export class QuotaStore {
         label: `${family.label} 主账号`,
         vaultRef: family.vaultRef,
         enabled: true,
+        billing: 'metered',
         quota: null,
         createdAt: Date.now(),
       };
@@ -208,7 +229,10 @@ export class QuotaStore {
     return this.data.slots[slot]?.keys.find((key) => key.id === keyId)?.vaultRef;
   }
 
-  addKey(slot: KeySlot, input: { id: string; label: string; vaultRef: string; quota: KeyQuota | null }): ManagedKey {
+  addKey(
+    slot: KeySlot,
+    input: { id: string; label: string; vaultRef: string; quota: KeyQuota | null; billing?: Billing }
+  ): ManagedKey {
     const record = this.data.slots[slot] ?? { keys: [], activeKeyId: '' };
     if (record.keys.some((key) => key.id === input.id)) {
       throw new Error(`key ${input.id} already exists in ${slot}`);
@@ -218,6 +242,7 @@ export class QuotaStore {
       label: input.label,
       vaultRef: input.vaultRef,
       enabled: true,
+      billing: input.billing ?? 'metered',
       quota: input.quota,
       createdAt: Date.now(),
     };
@@ -231,13 +256,14 @@ export class QuotaStore {
   updateKey(
     slot: KeySlot,
     keyId: string,
-    patch: { label?: string; enabled?: boolean; quota?: KeyQuota | null; vaultRef?: string }
+    patch: { label?: string; enabled?: boolean; quota?: KeyQuota | null; vaultRef?: string; billing?: Billing }
   ): ManagedKey | undefined {
     const key = this.data.slots[slot]?.keys.find((item) => item.id === keyId);
     if (!key) return undefined;
     if (typeof patch.label === 'string' && patch.label.trim()) key.label = patch.label.trim();
     if (typeof patch.enabled === 'boolean') key.enabled = patch.enabled;
     if (patch.quota !== undefined) key.quota = patch.quota;
+    if (patch.billing === 'subscription' || patch.billing === 'metered') key.billing = patch.billing;
     if (typeof patch.vaultRef === 'string' && patch.vaultRef.trim()) key.vaultRef = patch.vaultRef.trim();
     this.flush();
     return key;
@@ -328,6 +354,7 @@ export class QuotaStore {
         label: key.label,
         vaultRef: key.vaultRef,
         enabled: key.enabled,
+        billing: key.billing,
         quota: key.quota,
         spentTokens: spent.tokens,
         spentCny: spent.costCny,
@@ -391,6 +418,24 @@ export class QuotaStore {
       total += Math.max(0, key.quota.limitTokens - spent);
     }
     return total;
+  }
+
+  strategy(): RoutingStrategy {
+    return this.data.strategy ?? 'subscription';
+  }
+
+  setStrategy(strategy: RoutingStrategy): RoutingStrategy {
+    this.data.strategy = strategy;
+    this.flush();
+    return strategy;
+  }
+
+  /** 当前生效 key 的计费类型，供路由排序使用。 */
+  billingOf(slot: KeySlot): Billing | null {
+    const record = this.data.slots[slot];
+    if (!record) return null;
+    const key = record.keys.find((item) => item.id === record.activeKeyId) ?? record.keys[0];
+    return key?.billing ?? null;
   }
 
   recent(limit = 50): UsageRecord[] {

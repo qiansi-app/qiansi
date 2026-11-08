@@ -13,6 +13,7 @@ interface KeyView {
   label: string;
   vaultRef: string;
   enabled: boolean;
+  billing: 'subscription' | 'metered';
   quota: { period: 'day' | 'month'; limitTokens: number } | null;
   spentTokens: number;
   spentCny: number;
@@ -39,6 +40,14 @@ interface KeysModalProps {
   onClose: () => void;
 }
 
+const BILLING_LABEL: Record<string, string> = { subscription: '订阅', metered: '按量' };
+
+const STRATEGIES: Array<{ id: 'performance' | 'subscription' | 'cost'; label: string; hint: string }> = [
+  { id: 'performance', label: '性能优先', hint: '先用最强模型，不计计费类型' },
+  { id: 'subscription', label: '订阅优先', hint: '先用已付费订阅的 Key，同类里挑更强的' },
+  { id: 'cost', label: '成本优先', hint: '按每百万 token 的边际花费从低到高' },
+];
+
 const STATE_LABEL: Record<string, string> = {
   ok: '正常',
   warn: '接近上限',
@@ -56,6 +65,7 @@ function formatTokens(value: number): string {
 
 export function KeysModal({ open, onClose }: KeysModalProps) {
   const [slots, setSlots] = useState<SlotView[]>([]);
+  const [strategy, setStrategy] = useState<'performance' | 'subscription' | 'cost'>('subscription');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [adding, setAdding] = useState<string | null>(null);
@@ -66,12 +76,17 @@ export function KeysModal({ open, onClose }: KeysModalProps) {
   const load = async () => {
     try {
       const response = await fetch('/api/keys');
-      const data = (await response.json()) as { slots?: SlotView[]; error?: string };
+      const data = (await response.json()) as {
+        slots?: SlotView[];
+        strategy?: 'performance' | 'subscription' | 'cost';
+        error?: string;
+      };
       if (!response.ok) {
         setError(data.error ?? `HTTP ${response.status}`);
         return;
       }
       setSlots(data.slots ?? []);
+      if (data.strategy) setStrategy(data.strategy);
       setError('');
     } catch {
       setError('连不上本地服务');
@@ -158,6 +173,29 @@ export function KeysModal({ open, onClose }: KeysModalProps) {
 
         {error && <div className="keys-error">{error}</div>}
 
+        <div className="keys-strategy">
+          <span className="keys-strategy-label">工作流路由</span>
+          {STRATEGIES.map((item) => (
+            <button
+              key={item.id}
+              className={`keys-strategy-chip ${strategy === item.id ? 'active' : ''}`}
+              title={item.hint}
+              onClick={() => {
+                setStrategy(item.id);
+                void call('/api/keys/strategy', {
+                  method: 'PUT',
+                  body: JSON.stringify({ strategy: item.id }),
+                });
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+          <span className="keys-strategy-hint">
+            {STRATEGIES.find((item) => item.id === strategy)?.hint}
+          </span>
+        </div>
+
         <div className="keys-list">
           {slots.map((slot) => (
             <section key={slot.slot} className={`keys-slot ${slot.state}`}>
@@ -182,6 +220,9 @@ export function KeysModal({ open, onClose }: KeysModalProps) {
                     <div className="keys-row-title">
                       <b>{key.label}</b>
                       {key.active && <span className="keys-badge">当前</span>}
+                      <span className={`keys-badge billing ${key.billing}`}>
+                        {BILLING_LABEL[key.billing]}
+                      </span>
                       {!key.enabled && <span className="keys-badge muted">已停用</span>}
                       <code>{key.vaultRef}</code>
                     </div>
@@ -237,6 +278,20 @@ export function KeysModal({ open, onClose }: KeysModalProps) {
                           }}
                         >
                           额度
+                        </button>
+                        <button
+                          className="keys-mini"
+                          title="切换计费类型：订阅（已付费）或按量（每次调用计费）"
+                          onClick={() =>
+                            void call(`/api/keys/${slot.slot}/${key.id}`, {
+                              method: 'PATCH',
+                              body: JSON.stringify({
+                                billing: key.billing === 'subscription' ? 'metered' : 'subscription',
+                              }),
+                            })
+                          }
+                        >
+                          {key.billing === 'subscription' ? '改按量' : '标为订阅'}
                         </button>
                         {!key.active && (
                           <button

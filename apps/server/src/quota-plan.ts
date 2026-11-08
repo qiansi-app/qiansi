@@ -1,5 +1,7 @@
 import type { CapabilityProfile, Plan } from '@qiansi/engine';
 import { modelFamilies, preferredModel, profileForModel, type KeySlot } from './model-catalog.js';
+import type { Billing, RoutingStrategy } from './quota.js';
+import { explainPick, orderByStrategy, performanceOf, type SlotScore } from './routing.js';
 
 /**
  * A run that would spend a key's last tokens is worse than a run that uses a
@@ -19,9 +21,6 @@ export interface Substitution {
   reason: string;
 }
 
-/** Order families are tried in when a lane has to move. */
-const FALLBACK_ORDER: KeySlot[] = ['deepseek', 'zhipu', 'minimax', 'qwen', 'moonshot', 'openai', 'relay'];
-
 export function substituteExhausted(input: {
   plan: Plan;
   profiles: CapabilityProfile[];
@@ -32,9 +31,32 @@ export function substituteExhausted(input: {
   headroom: (slot: KeySlot) => number;
   /** Rough per-task spend used to decide whether "almost exhausted" is enough. */
   estimatePerTask?: number;
+  /** 路由策略；默认订阅优先。 */
+  strategy?: RoutingStrategy;
+  /** 某个家族当前生效 Key 的计费类型。 */
+  billingOf?: (slot: KeySlot) => Billing | null;
+  /** 某个家族的按量单价（CNY/1M）。 */
+  priceOf?: (slot: KeySlot) => number;
 }): Substitution[] {
   const { plan, profiles, slotByProfile, hasKey, headroom } = input;
   const estimate = input.estimatePerTask ?? 6000;
+  const strategy = input.strategy ?? 'subscription';
+  const billingOf = input.billingOf ?? (() => null);
+  const priceOf = input.priceOf ?? (() => 0);
+
+  /** 策略排序后的候选（含解释），每次按当前余额现算。 */
+  const orderFor = (exclude: KeySlot): SlotScore[] => {
+    const scores: SlotScore[] = modelFamilies()
+      .filter((family) => family.slot !== exclude && hasKey(family.slot))
+      .map((family) => ({
+        slot: family.slot,
+        billing: billingOf(family.slot),
+        priceCnyPerM: priceOf(family.slot),
+        performance: performanceOf(family.slot),
+        headroom: headroom(family.slot),
+      }));
+    return orderByStrategy(scores, strategy);
+  };
   const needs = (slot: KeySlot): boolean => {
     const left = headroom(slot);
     return left !== -1 && left < estimate;
@@ -45,10 +67,11 @@ export function substituteExhausted(input: {
     const currentSlot = slotByProfile.get(task.profileId);
     if (!currentSlot || !needs(currentSlot)) continue;
 
-    const target = FALLBACK_ORDER.filter((slot) => slot !== currentSlot)
-      .map((slot) => ({ slot, left: headroom(slot) }))
-      .find((candidate) => hasKey(candidate.slot) && (candidate.left === -1 || candidate.left >= estimate));
+    const target = orderFor(currentSlot).find(
+      (candidate) => candidate.headroom === -1 || candidate.headroom >= estimate
+    );
     if (!target) continue;
+    const targetReason = explainPick(target, strategy);
 
     const family = modelFamilies().find((item) => item.slot === target.slot);
     if (!family) continue;
@@ -69,10 +92,11 @@ export function substituteExhausted(input: {
       fromModel: before,
       toSlot: target.slot,
       toModel: model,
-      reason:
+      reason: `${
         headroom(currentSlot) === 0
           ? `${currentSlot} 额度已用尽`
-          : `${currentSlot} 剩余额度不足一个任务（<${estimate} tok）`,
+          : `${currentSlot} 剩余额度不足一个任务（<${estimate} tok）`
+      }；按「${strategy}」改派到 ${target.slot}：${targetReason}`,
     });
   }
   return substitutions;
