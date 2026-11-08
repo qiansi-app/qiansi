@@ -13,8 +13,10 @@ import {
   type OnNodesChange,
   type ReactFlowInstance,
 } from '@xyflow/react';
+import { useMemo } from 'react';
 import { AgentNode } from './AgentNode';
 import { ArtifactEdge } from './ArtifactEdge';
+import { WireEdge } from './WireEdge';
 import { ArtifactNode } from './ArtifactNode';
 import { ExternalNode } from './ExternalNode';
 import { FileNode } from './FileNode';
@@ -32,7 +34,7 @@ const nodeTypes = {
   library: LibraryNode,
   region: RegionNode,
 };
-const edgeTypes = { artifact: ArtifactEdge };
+const edgeTypes = { artifact: ArtifactEdge, wire: WireEdge };
 
 interface CanvasProps {
   nodes: StudioNode[];
@@ -61,6 +63,13 @@ export function Canvas({
   onInit,
   onNodeDragStop,
 }: CanvasProps) {
+  // Every edge without an artifact gets the designed pill label; the artifact
+  // type keeps its own card component.
+  const renderedEdges = useMemo(
+    () => edges.map((edge) => (edge.type === 'artifact' ? edge : { ...edge, type: 'wire' })),
+    [edges]
+  );
+
   const handleNodeClick: NodeMouseHandler<StudioNode> = (_event, node) => {
     onNodeClick(node.id);
   };
@@ -71,7 +80,7 @@ export function Canvas({
   return (
     <ReactFlow<StudioNode, Edge>
       nodes={nodes}
-      edges={edges}
+      edges={renderedEdges}
       nodeTypes={nodeTypes}
       edgeTypes={edgeTypes}
       onNodesChange={onNodesChange}

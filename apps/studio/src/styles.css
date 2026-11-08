@@ -1455,3 +1455,34 @@ textarea {
 .artifact-anchor.ok { stroke: #4ade80; }
 .artifact-anchor.warn { stroke: #e0a458; }
 .artifact-anchor.fail { stroke: #f87171; }
+
+/* 连线上非产物边的标签：按类型着色的胶囊 + 偏移出线 */
+.wire-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 10px;
+  line-height: 16px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  backdrop-filter: blur(2px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  z-index: 3;
+}
+.wire-pill-glyph {
+  font-size: 10px;
+  opacity: 0.9;
+  line-height: 1;
+}
+.wire-tether { stroke: rgba(147, 164, 187, 0.35); stroke-width: 1; stroke-dasharray: 2 3; }
+.wire-tether.context { stroke: rgba(56, 217, 194, 0.4); }
+.wire-anchor { fill: #0b1622; stroke: rgba(147, 164, 187, 0.7); stroke-width: 1; }
+.wire-anchor.assign { stroke: #6366f1; }
+.wire-anchor.handoff { stroke: #10b981; }
+.wire-anchor.review { stroke: #f59e0b; }
+.wire-anchor.context { stroke: #38d9c2; }
