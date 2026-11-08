@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>牵丝 Qiansi — 宣传片</title>
+<style>
+  :root {
+    --indigo: #0b1622;
+    --silk: #efe7d6;
+    --dim: #93a4bb;
+    --vermilion: #e2705c;
+    --celadon: #6fb3a8;
+    --indigo-lit: #7d8cf0;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; width: 1920px; height: 1080px; overflow: hidden;
+    background: var(--indigo); color: var(--silk);
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+  }
+  .stage {
+    position: relative; width: 1920px; height: 1080px; overflow: hidden;
+    background:
+      radial-gradient(1400px 900px at 16% 6%, rgba(111, 179, 168, 0.10), transparent 60%),
+      radial-gradient(1200px 800px at 88% 96%, rgba(125, 140, 240, 0.10), transparent 62%),
+      repeating-linear-gradient(90deg, rgba(239, 231, 214, 0.022) 0 1px, transparent 1px 8px),
+      repeating-linear-gradient(0deg, rgba(239, 231, 214, 0.022) 0 1px, transparent 1px 8px),
+      var(--indigo);
+  }
+  .vignette {
+    position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(1300px 850px at 50% 50%, transparent 58%, rgba(4, 8, 12, 0.7) 100%);
+  }
+  .scene { position: absolute; inset: 0; opacity: 0; }
+
+  /* 全幅场景：原生 1920 截图铺满 */
+  .shot-wrap.full { position: absolute; inset: 0; overflow: hidden; background: #0a1017; }
+  .shot-wrap.full img { width: 100%; height: 100%; object-fit: cover; display: block; transform-origin: center; }
+  .scrim { position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(180deg, rgba(8,15,23,0.8) 0%, rgba(8,15,23,0.2) 14%, transparent 36%, transparent 54%, rgba(8,15,23,0.5) 74%, rgba(8,15,23,0.94) 100%); }
+
+  /* 卡片场景：非 16:9 截图近原生展示，避免放大发虚 */
+  .shot-wrap.card {
+    position: absolute; left: 50%; top: 34px; width: 1600px; height: 1012px;
+    margin-left: -800px; border-radius: 18px; overflow: hidden;
+    border: 1px solid rgba(147, 164, 187, 0.26);
+    box-shadow: 0 50px 140px rgba(0, 0, 0, 0.62), 0 0 0 1px rgba(111, 179, 168, 0.06) inset;
+    background: #0a1017;
+  }
+  .shot-wrap.card img { width: 100%; height: 100%; object-fit: cover; display: block; transform-origin: center; }
+  .shot-wrap.card .scrim { border-radius: 18px; }
+
+  .caption {
+    position: absolute; left: 96px; bottom: 64px; display: flex; align-items: center; gap: 22px;
+    opacity: 0; transform: translateY(18px);
+  }
+  .caption .bar { width: 6px; height: 58px; border-radius: 3px; background: var(--vermilion); }
+  .caption .text { font-size: 44px; font-weight: 600; letter-spacing: 0.02em; line-height: 1.24; }
+  .caption .sub { display: block; font-size: 23px; font-weight: 400; color: #a9b8c9; margin-top: 8px; letter-spacing: 0.04em; }
+  .kicker {
+    position: absolute; left: 98px; bottom: 176px; font-size: 19px; letter-spacing: 0.3em;
+    color: var(--celadon); text-transform: uppercase; opacity: 0;
+  }
+
+  /* 片头 */
+  .title-scene { display: flex; align-items: center; justify-content: center; }
+  .title-inner { position: relative; text-align: center; }
+  .title-main {
+    font-size: 172px; font-weight: 700; letter-spacing: 0.16em; margin-right: -0.16em;
+    background: linear-gradient(180deg, #f6efe0, #d6cbb4);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 18px 50px rgba(0, 0, 0, 0.5));
+  }
+  .title-sub { margin-top: 10px; font-size: 34px; letter-spacing: 0.34em; color: var(--dim); }
+  .title-meta { margin-top: 44px; display: flex; gap: 14px; justify-content: center; }
+  .chip {
+    padding: 10px 20px; border-radius: 999px; font-size: 20px; letter-spacing: 0.08em;
+    border: 1px solid rgba(111, 179, 168, 0.35); color: #b9d8d2; background: rgba(111, 179, 168, 0.08);
+  }
+  .thread { position: absolute; left: 50%; top: 50%; width: 1180px; height: 340px; transform: translate(-50%, -50%); pointer-events: none; }
+  .thread path { fill: none; stroke: url(#silk); stroke-width: 2; stroke-linecap: round; }
+
+  /* 片尾 */
+  .cta { display: flex; align-items: center; justify-content: center; }
+  .cta-inner { text-align: center; }
+  .cta-title { font-size: 84px; font-weight: 700; letter-spacing: 0.1em; }
+  .cta-line { margin-top: 26px; font-size: 30px; color: var(--dim); letter-spacing: 0.12em; }
+  .cmd {
+    margin: 54px auto 0; display: inline-flex; align-items: center; gap: 16px;
+    padding: 22px 34px; border-radius: 14px; font-size: 26px;
+    font-family: "JetBrains Mono", Consolas, monospace;
+    background: rgba(16, 29, 43, 0.9); border: 1px solid rgba(125, 140, 240, 0.35);
+    color: #cfd6ff; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  }
+  .cmd .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--celadon); }
+</style>
+</head>
+<body>
+<div class="stage">
+  <svg width="0" height="0"><defs>
+    <linearGradient id="silk" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#6fb3a8" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#e2705c" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#6fb3a8" stop-opacity="0"/>
+    </linearGradient>
+  </defs></svg>
+
+  <section class="scene title-scene" data-scene="title">
+    <svg class="thread" viewBox="0 0 1180 340">
+      <path id="threadPath" d="M 40 250 C 280 50, 450 320, 600 170 S 940 20, 1140 130" />
+    </svg>
+    <div class="title-inner">
+      <div class="title-main">牵丝</div>
+      <div class="title-sub">QIANSI · 多 AI 协作画布</div>
+      <div class="title-meta">
+        <span class="chip">本地优先</span>
+        <span class="chip">开源</span>
+        <span class="chip">Claude Code / Codex / DSH</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="scene" data-scene="canvas">
+    <div class="shot-wrap full"><img src="shots/canvas-1920.png" alt="" /><div class="scrim"></div></div>
+    <span class="kicker">01 · 画布</span>
+    <div class="caption"><span class="bar"></span>
+      <span class="text">节点是模型，连线是分工<span class="sub">主控派活，多个厂商的模型按图协作</span></span>
+    </div>
+  </section>
+
+  <section class="scene" data-scene="artifacts">
+    <div class="shot-wrap card"><img src="shots/edge-cards.png" alt="" /><div class="scrim"></div></div>
+    <span class="kicker">02 · 产物</span>
+    <div class="caption"><span class="bar"></span>
+      <span class="text">每一级产物挂在连线上<span class="sub">点开就是这一级的验收记录与评分</span></span>
+    </div>
+  </section>
+
+  <section class="scene" data-scene="run">
+    <div class="shot-wrap card"><img src="shots/progress.png" alt="" /><div class="scrim"></div></div>
+    <span class="kicker">03 · 运行</span>
+    <div class="caption"><span class="bar"></span>
+      <span class="text">跑起来：逐任务验收<span class="sub">进度、耗时、花费实时可见；失败只重跑那一段</span></span>
+    </div>
+  </section>
+
+  <section class="scene" data-scene="keys">
+    <div class="shot-wrap full"><img src="shots/keys-1920.png" alt="" /><div class="scrim"></div></div>
+    <span class="kicker">04 · KEY</span>
+    <div class="caption"><span class="bar"></span>
+      <span class="text">一枚 Key 一个模型家族<span class="sub">用量与额度一目了然，用尽自动轮换、无额度自动改派</span></span>
+    </div>
+  </section>
+
+  <section class="scene" data-scene="handoff">
+    <div class="shot-wrap card"><img src="shots/handoff.png" alt="" /><div class="scrim"></div></div>
+    <span class="kicker">05 · 接续</span>
+    <div class="caption"><span class="bar"></span>
+      <span class="text">接续任意 agent 会话<span class="sub">读对话、读项目，一键接着干；可选自动编排</span></span>
+    </div>
+  </section>
+
+  <section class="scene" data-scene="style">
+    <div class="shot-wrap card"><img src="shots/style.png" alt="" /><div class="scrim"></div></div>
+    <span class="kicker">06 · 对话风格</span>
+    <div class="caption"><span class="bar"></span>
+      <span class="text">该争的时候争，该收敛时收敛<span class="sub">辩论、头脑风暴、顾问、共情……每个节点一种说法</span></span>
+    </div>
+  </section>
+
+  <section class="scene cta" data-scene="cta">
+    <div class="cta-inner">
+      <div class="cta-title">把重活，画出来再跑</div>
+      <div class="cta-line">本地优先 · 开源 · 数据不出机器</div>
+      <div class="cmd"><span class="dot"></span>claude plugin marketplace add qiansi-app/qiansi</div>
+    </div>
+  </section>
+
+  <div class="vignette"></div>
+</div>
+
+<script>
+  const SCENES = [
+    { key: 'title', start: 0, end: 5000 },
+    { key: 'canvas', start: 5000, end: 12500, zoom: { from: 1.0, to: 1.08, ox: 50, oy: 45 } },
+    { key: 'artifacts', start: 12500, end: 20000, zoom: { from: 1.12, to: 1.0, ox: 60, oy: 46 } },
+    { key: 'run', start: 20000, end: 27500, zoom: { from: 1.52, to: 1.64, ox: 50, oy: 7 } },
+    { key: 'keys', start: 27500, end: 35000, zoom: { from: 1.07, to: 1.0, ox: 50, oy: 46 } },
+    { key: 'handoff', start: 35000, end: 42500, zoom: { from: 1.0, to: 1.08, ox: 44, oy: 30 } },
+    { key: 'style', start: 42500, end: 49500, zoom: { from: 1.08, to: 1.0, ox: 76, oy: 40 } },
+    { key: 'cta', start: 49500, end: 54000 },
+  ];
+
+  const els = {};
+  document.querySelectorAll('[data-scene]').forEach((el) => { els[el.dataset.scene] = el; });
+  const parts = {};
+  document.querySelectorAll('[data-scene]').forEach((el) => {
+    parts[el.dataset.scene] = {
+      caption: el.querySelector('.caption'),
+      kicker: el.querySelector('.kicker'),
+      img: el.querySelector('img'),
+    };
+  });
+
+  const clamp01 = (v) => Math.max(0, Math.min(1, v));
+  const ease = (t) => 1 - Math.pow(1 - t, 3);
+  const fade = (t, start, end, ms = 520) =>
+    Math.min(ease(clamp01((t - start) / ms)), ease(clamp01((end - t) / ms)));
+
+  const thread = document.getElementById('threadPath');
+  const threadLen = thread.getTotalLength();
+  thread.style.strokeDasharray = String(threadLen);
+  thread.style.strokeDashoffset = String(threadLen);
+
+  window.seek = (t) => {
+    for (const scene of SCENES) {
+      const el = els[scene.key];
+      if (!el) continue;
+      el.style.opacity = String(fade(t, scene.start, scene.end));
+      const p = parts[scene.key];
+      if (p?.img && scene.zoom) {
+        const k = ease(clamp01((t - scene.start) / (scene.end - scene.start)));
+        const scale = scene.zoom.from + (scene.zoom.to - scene.zoom.from) * k;
+        p.img.style.transform = `scale(${scale.toFixed(4)})`;
+        p.img.style.transformOrigin = `${scene.zoom.ox}% ${scene.zoom.oy}%`;
+      }
+      if (p?.caption) {
+        const c = fade(t, scene.start + 520, scene.end, 420);
+        p.caption.style.opacity = String(c);
+        p.caption.style.transform = `translateY(${(1 - c) * 18}px)`;
+      }
+      if (p?.kicker) {
+        p.kicker.style.opacity = String(fade(t, scene.start + 260, scene.end, 380) * 0.92);
+      }
+    }
+    const titleFade = fade(t, 0, 5000, 700);
+    thread.style.strokeDashoffset = String(threadLen * (1 - ease(clamp01((t - 300) / 2200))));
+    const titleInner = els.title?.querySelector('.title-inner');
+    if (titleInner) {
+      titleInner.style.transform = `translateY(${(1 - titleFade) * 14}px)`;
+      titleInner.style.opacity = String(titleFade);
+    }
+  };
+  window.seek(0);
+</script>
+</body>
+</html>

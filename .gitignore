@@ -34,3 +34,10 @@ promo/qiansi-promo.mp4
 # DSH bundle generated artifacts
 dsh/qiansi/mcp/
 dsh/qiansi/cordis.patch.yml
+
+# 宣传片预览帧（可重新生成）
+promo2/preview/
+
+# 成片与验收帧（体积大，按需重新渲染）
+promo2/*.mp4
+promo2/verify/
