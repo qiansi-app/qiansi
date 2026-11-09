@@ -2871,6 +2871,7 @@ export function App() {
               node.type === 'artifact' && node.data.output
                 ? () => openArtifactFromNode(node)
                 : node.data.onOpen,
+            onOpenArtifact: node.data.output ? () => openArtifactFromNode(node) : undefined,
             onOpenSession:
               node.type === 'external'
                 ? openSession

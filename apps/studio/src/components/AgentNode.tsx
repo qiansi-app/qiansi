@@ -110,7 +110,21 @@ export function AgentNode({ data, selected }: NodeProps) {
       </div>
 
       <div className="node-task">{node.task ?? node.role}</div>
-      <div className="node-artifact">{node.artifact ?? '暂无产物'}</div>
+      {node.output && typeof node.onOpenArtifact === 'function' ? (
+        <button
+          className="node-artifact openable"
+          title="查看这一阶段的完整产物与验收"
+          onClick={(event) => {
+            event.stopPropagation();
+            (node.onOpenArtifact as () => void)();
+          }}
+        >
+          {node.artifact ?? node.output.slice(0, 120)}
+          <span className="node-artifact-more">查看全文 ›</span>
+        </button>
+      ) : (
+        <div className="node-artifact">{node.artifact ?? '暂无产物'}</div>
+      )}
 
       <div className="node-metrics">
         <span>{node.metrics ?? '—'}</span>
