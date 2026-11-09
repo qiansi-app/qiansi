@@ -125,6 +125,8 @@ export function App() {
   /** True while a run started elsewhere (an agent over MCP) is in flight. */
   const [externalRun, setExternalRun] = useState(false);
   const externalRunRef = useRef(false);
+  /** 已经补过完成态的运行 id，避免每秒重复提示。 */
+  const recentShownRef = useRef<string | null>(null);
   const [choice, setChoice] = useState<Choice | null>(null);
   const [models, setModels] = useState<ModelDraft[]>(initialModels);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -481,63 +483,121 @@ export function App() {
   }, [applyRemoteCanvas, saveCanvas]);
 
   /**
-   * A run started by an agent (through MCP) never reaches this window's own SSE
-   * subscription, so the progress strip would stay empty. Poll the server's
-   * active-run snapshot instead and mirror it into the same task map.
+   * A run started by an agent (through MCP, handoff or the workflow endpoint)
+   * never reaches this window's own SSE subscription, so the progress strip
+   * would stay empty. Poll the server's active-run snapshot instead and mirror
+   * it into the same task map.
+   *
+   * Hidden pages throttle timers to about once a minute — which is why the
+   * strip used to show up late (or not at all for short runs) after switching
+   * back to the canvas. Polling immediately on visibility/focus fixes that, and
+   * the interval is short enough that a 3-second run still gets a frame.
    */
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (runningRef.current || document.hidden) return;
-      void (async () => {
-        try {
-          const response = await fetch('/api/runs/active');
-          if (!response.ok) return;
-          const data = (await response.json()) as {
-            run?: {
-              runId: string;
-              status: string;
-              startedAt: number;
-              tokens: number;
-              tasks: Array<{
-                taskId: string;
-                nodeId: string | null;
-                title: string;
-                effort?: string;
-                status: 'pending' | 'running' | 'done' | 'failed';
-              }>;
-            } | null;
-          };
-          const active = data.run && data.run.status === 'running';
-          if (active && data.run) {
-            const tasks: Record<string, RunTaskView> = {};
-            for (const task of data.run.tasks) {
-              tasks[task.taskId] = {
-                taskId: task.taskId,
-                nodeId: task.nodeId ?? '',
-                title: task.title,
-                effort: task.effort,
-                status: task.status,
-              };
-            }
-            runTasksRef.current = tasks;
-            setRunTasks(tasks);
-            setRunTokens(data.run.tokens);
-            runStartedAt.current = data.run.startedAt;
-            if (!externalRunRef.current) {
-              externalRunRef.current = true;
-              setExternalRun(true);
-              setToast('外部 Agent 正在画布上运行');
-            }
-          } else if (externalRunRef.current) {
-            externalRunRef.current = false;
-            setExternalRun(false);
+    let stopped = false;
+
+    const checkActive = async () => {
+      if (runningRef.current || document.hidden || stopped) return;
+      try {
+        const response = await fetch('/api/runs/active');
+        if (!response.ok) return;
+        const data = (await response.json()) as {
+          run?: {
+            runId: string;
+            status: string;
+            startedAt: number;
+            tokens: number;
+            tasks: Array<{
+              taskId: string;
+              nodeId: string | null;
+              title: string;
+              effort?: string;
+              status: 'pending' | 'running' | 'done' | 'failed';
+            }>;
+          } | null;
+          recent?: {
+            runId: string;
+            status: string;
+            goal: string;
+            startedAt: number;
+            finishedAt: number;
+            tokens: number;
+            tasks: Array<{
+              taskId: string;
+              nodeId: string | null;
+              title: string;
+              effort?: string;
+              status: 'pending' | 'running' | 'done' | 'failed';
+            }>;
+          } | null;
+        };
+        const active = data.run && data.run.status === 'running';
+        if (active && data.run) {
+          const tasks: Record<string, RunTaskView> = {};
+          for (const task of data.run.tasks) {
+            tasks[task.taskId] = {
+              taskId: task.taskId,
+              nodeId: task.nodeId ?? '',
+              title: task.title,
+              effort: task.effort,
+              status: task.status,
+            };
           }
-        } catch {
-          // server restarting: try again next tick
+          runTasksRef.current = tasks;
+          setRunTasks(tasks);
+          setRunTokens(data.run.tokens);
+          runStartedAt.current = data.run.startedAt;
+          if (!externalRunRef.current) {
+            externalRunRef.current = true;
+            setExternalRun(true);
+            setToast('外部 Agent 正在画布上运行');
+          }
+        } else if (externalRunRef.current) {
+          externalRunRef.current = false;
+          setExternalRun(false);
+        } else if (data.recent && recentShownRef.current !== data.recent.runId) {
+          // 运行在页面切走时结束了：补一个完成态，而不是什么都不显示。
+          recentShownRef.current = data.recent.runId;
+          const tasks: Record<string, RunTaskView> = {};
+          for (const task of data.recent.tasks) {
+            tasks[task.taskId] = {
+              taskId: task.taskId,
+              nodeId: task.nodeId ?? '',
+              title: task.title,
+              effort: task.effort,
+              status: task.status,
+            };
+          }
+          runTasksRef.current = tasks;
+          setRunTasks(tasks);
+          setRunTokens(data.recent.tokens);
+          runStartedAt.current = data.recent.startedAt;
+          setExternalRun(false);
+          setToast(
+            data.recent.status === 'done'
+              ? '上一轮运行刚刚完成'
+              : '上一轮运行刚刚结束（未全部成功）'
+          );
         }
-      })();
-    }, 2000);
-    return () => window.clearInterval(timer);
+      } catch {
+        // server restarting: try again next tick
+      }
+    };
+
+    const timer = window.setInterval(() => void checkActive(), 1000);
+    const onVisible = () => {
+      if (!document.hidden) void checkActive();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    void checkActive();
+
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
   }, []);
 
   useEffect(() => {

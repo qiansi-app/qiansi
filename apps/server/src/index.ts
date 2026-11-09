@@ -2580,26 +2580,49 @@ app.get('/api/runs', (context) => context.json({ items: store.list() }));
  * every subtask at `pending`.
  */
 app.get('/api/runs/active', (context) => {
-  if (!activeLiveRunId) return context.json({ ok: true, run: null });
-  const record = store.get(activeLiveRunId);
-  if (!record) return context.json({ ok: true, run: null });
+  // 任何来源的运行都算：画布发起、agent 触发、演示模式、接续会话的自动运行。
+  // 只看 activeLiveRunId 会漏掉 demo 运行，界面就完全没有进度。
+  const record = store.running()[0] ?? (activeLiveRunId ? store.get(activeLiveRunId) : undefined);
 
-  const statuses = new Map<string, 'pending' | 'running' | 'done' | 'failed'>();
-  for (const envelope of record.events) {
-    const event = envelope.event as { type: string; taskId?: string };
-    if (!event.taskId) continue;
-    if (event.type === 'task.started') statuses.set(event.taskId, 'running');
-    else if (event.type === 'task.completed') statuses.set(event.taskId, 'done');
-    else if (event.type === 'task.failed') statuses.set(event.taskId, 'failed');
+  const fold = (run: NonNullable<ReturnType<typeof store.get>>) => {
+    const statuses = new Map<string, 'pending' | 'running' | 'done' | 'failed'>();
+    for (const envelope of run.events) {
+      const event = envelope.event as { type: string; taskId?: string };
+      if (!event.taskId) continue;
+      if (event.type === 'task.started') statuses.set(event.taskId, 'running');
+      else if (event.type === 'task.completed') statuses.set(event.taskId, 'done');
+      else if (event.type === 'task.failed') statuses.set(event.taskId, 'failed');
+    }
+    return (run.plan?.subtasks ?? []).map((task) => ({
+      taskId: task.id,
+      nodeId: task.assignedNodeId ?? null,
+      title: task.title,
+      effort: task.effort,
+      status: statuses.get(task.id) ?? 'pending',
+    }));
+  };
+
+  if (!record) {
+    // 运行的最后一秒可能刚好在页面切走时结束：给出 30 秒内最近完成的一轮，
+    // 客户端据此显示「刚刚完成」而不是一片空白。
+    const finished = store.recentFinished(30_000);
+    if (!finished) return context.json({ ok: true, run: null, recent: null });
+    return context.json({
+      ok: true,
+      run: null,
+      recent: {
+        runId: finished.runId,
+        status: finished.status,
+        goal: finished.goal,
+        startedAt: finished.startedAt,
+        finishedAt: finished.finishedAt ?? Date.now(),
+        tokens: finished.usage?.total ?? 0,
+        tasks: fold(finished),
+      },
+    });
   }
 
-  const tasks = (record.plan?.subtasks ?? []).map((task) => ({
-    taskId: task.id,
-    nodeId: task.assignedNodeId ?? null,
-    title: task.title,
-    effort: task.effort,
-    status: statuses.get(task.id) ?? 'pending',
-  }));
+  const tasks = fold(record);
 
   return context.json({
     ok: true,

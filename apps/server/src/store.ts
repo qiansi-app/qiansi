@@ -78,6 +78,21 @@ export class RunStore {
     return record;
   }
 
+  /** 正在跑的运行（内存里 status 仍是 running 的），最新的在前。 */
+  running(): RunRecord[] {
+    return [...this.runs.values()]
+      .filter((record) => record.status === 'running')
+      .sort((a, b) => b.startedAt - a.startedAt);
+  }
+
+  /** 最近一段时间内刚结束的运行（含失败），用于页面切回时补一个完成态。 */
+  recentFinished(withinMs: number): RunRecord | undefined {
+    const now = Date.now();
+    return [...this.runs.values()]
+      .filter((record) => record.status !== 'running' && record.finishedAt && now - record.finishedAt <= withinMs)
+      .sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0))[0];
+  }
+
   get(runId: string): RunRecord | undefined {
     const existing = this.runs.get(runId);
     if (existing) return existing;
