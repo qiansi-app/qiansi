@@ -21,6 +21,7 @@ import {
   AnthropicMessagesAdapter,
   OpenAIChatAdapter,
   Orchestrator,
+  SearchToolAdapter,
   buildChatRequest,
   discussionPrompt,
   isConversationStyle,
@@ -57,7 +58,7 @@ import {
   type KeySlot,
 } from './model-catalog.js';
 import { PolicyStore, scopeForRequest, type Mandate } from './policy.js';
-import { WorkspaceStore } from './workspaces.js';
+import { checkWorkspaceName, WorkspaceStore } from './workspaces.js';
 import { QuotaStore } from './quota.js';
 import { substituteExhausted } from './quota-plan.js';
 import { orderByStrategy, performanceOf } from './routing.js';
@@ -66,6 +67,7 @@ import { part, summarize, type HealthPart, type StatusReport } from './status.js
 import { RunStore, type RunEnvelope } from './store.js';
 import { ensureStateDir } from './state-dir.js';
 import { DpapiVault } from './vault.js';
+import { WebSearchService } from './web-search.js';
 import { APP_VERSION } from './version.js';
 
 const app = new Hono();
@@ -353,6 +355,14 @@ async function slotCredential(
   const legacy = (await vault.get(family.vaultRef)) || envSecret;
   return legacy ? { keyId: 'default', secret: legacy } : null;
 }
+
+/**
+ * 服务端搜索：模型只发 query，真正的联网由这里完成。Key 走配额感知的
+ * slotCredential（订阅优先），因此智谱订阅的搜索额度会被优先使用。
+ */
+const webSearch = new WebSearchService(vault, {
+  keyFor: async (slot) => (await slotCredential(slot))?.secret,
+});
 /** The port the listener actually bound, which can differ from QIANSI_PORT. */
 let boundPort: number | null = null;
 const serverStartedAt = Date.now();
@@ -975,6 +985,41 @@ async function fetchProviderModels(
   return { ok: false, error: `provider returned ${lastStatus || 'no catalog'}` };
 }
 
+/** 搜索工具当前用哪家 provider、哪些已配置；不返回任何 Key。 */
+app.get('/api/search/status', async (context) =>
+  context.json({ ok: true, ...(await webSearch.status()) })
+);
+
+/**
+ * 直接执行一次联网搜索。画布节点和外部 agent 都可以先在这里取回结果，
+ * 再把结果当上下文交给不支持工具调用的模型。
+ */
+app.post('/api/search', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, unknown> | null;
+  const query = String(body?.query ?? '').trim().slice(0, 300);
+  if (!query) return context.json({ ok: false, error: 'query_required' }, 400);
+  const maxResults = Math.min(Math.max(Number(body?.maxResults ?? 6) || 6, 1), 10);
+  try {
+    const startedAt = Date.now();
+    const hits = await webSearch.search({ query, maxResults });
+    audit.record({
+      actor: actorOf(context),
+      action: 'search.query',
+      target: query,
+      detail: { hits: hits.length, ms: Date.now() - startedAt },
+    });
+    return context.json({ ok: true, query, hits, provider: (await webSearch.status()).provider });
+  } catch (error) {
+    return context.json(
+      {
+        ok: false,
+        error: redactSecrets(error instanceof Error ? error.message : String(error), []),
+      },
+      502
+    );
+  }
+});
+
 app.get('/api/models/catalog', (context) =>
   context.json({ ok: true, catalogs: readCatalogCache() })
 );
@@ -1238,7 +1283,9 @@ app.post('/api/chat', async (context) => {
       })),
       {
         maxTokens: Math.min(Math.max(Number(body?.maxTokens ?? 800) || 800, 16), 4096),
-        timeoutMs: 45000,
+        // 联网时最多 2 轮搜索 + 1 轮作答，给足时间；纯对话保持原来的 45 秒。
+        timeoutMs: body?.webSearch === true ? 90000 : 45000,
+        search: body?.webSearch === true ? webSearch.search : undefined,
       }
     );
     return context.json({ ok: true, ...result });
@@ -1308,7 +1355,7 @@ app.post('/api/delegate', async (context) => {
         ...(system ? [{ role: 'system' as const, content: system }] : []),
         { role: 'user' as const, content: prompt },
       ],
-      { maxTokens, timeoutMs: 90000 }
+      { maxTokens, timeoutMs: 90000, search: body?.webSearch === true ? webSearch.search : undefined }
     );
     quota.record({
       slot: slot ?? 'relay',
@@ -1944,16 +1991,45 @@ app.get('/api/workspaces', (context) =>
   })
 );
 
+const NAME_ENCODING_HINT =
+  '名字里有无法解码的字节（U+FFFD）。通常是调用方用了非 UTF-8 编码发送请求——Windows 控制台默认 GBK，请改用 UTF-8 或直接用界面/Node 的 fetch。';
+
 app.post('/api/workspaces', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
-  const meta = workspaces.create(typeof body?.name === 'string' ? body.name : undefined);
+  const raw = typeof body?.name === 'string' ? body.name : '';
+  if (raw.trim()) {
+    const checked = checkWorkspaceName(raw);
+    if (!checked.ok) {
+      return context.json(
+        {
+          ok: false,
+          error: checked.reason === 'encoding' ? 'name_encoding' : 'name_empty',
+          hint: NAME_ENCODING_HINT,
+        },
+        400
+      );
+    }
+  }
+  const meta = workspaces.create(raw.trim() || undefined);
   audit.record({ actor: actorOf(context), action: 'workspace.create', target: meta.id, detail: { name: meta.name } });
   return context.json({ ok: true, workspace: meta });
 });
 
 app.patch('/api/workspaces/:id', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
-  const meta = workspaces.rename(context.req.param('id'), String(body?.name ?? ''));
+  const raw = String(body?.name ?? '');
+  const checked = checkWorkspaceName(raw);
+  if (!checked.ok) {
+    return context.json(
+      {
+        ok: false,
+        error: checked.reason === 'encoding' ? 'name_encoding' : 'name_empty',
+        hint: NAME_ENCODING_HINT,
+      },
+      400
+    );
+  }
+  const meta = workspaces.rename(context.req.param('id'), checked.name);
   if (!meta) return context.json({ ok: false, error: 'workspace_not_found' }, 404);
   audit.record({ actor: actorOf(context), action: 'workspace.rename', target: meta.id });
   return context.json({ ok: true, workspace: meta });
@@ -2106,6 +2182,23 @@ app.post('/api/canvas/ops', async (context) => {
   const ops = Array.isArray(body?.ops) ? (body.ops as CanvasOp[]) : [];
   if (!ops.length) return context.json({ ok: false, error: 'ops_required' }, 400);
   if (ops.length > 200) return context.json({ ok: false, error: 'too_many_ops' }, 400);
+  // A name decoded from non-UTF-8 bytes arrives as U+FFFD and would be stored
+  // verbatim — the same mojibake bug that once hit workspace names.
+  const garbled = ops.some((op) => {
+    if (op.op === 'update_node') return JSON.stringify(op.patch ?? {}).includes('�');
+    if (op.op === 'add_node') return JSON.stringify(op.node?.data ?? {}).includes('�');
+    return false;
+  });
+  if (garbled) {
+    return context.json(
+      {
+        ok: false,
+        error: 'name_encoding',
+        hint: '节点名里有无法解码的字节（U+FFFD）。请用 UTF-8 发送请求，不要从 GBK 控制台粘贴中文。',
+      },
+      400
+    );
+  }
   try {
     const result = canvasFor(workspaceOf(context)).apply(ops);
     if (result.applied > 0) {
@@ -2537,6 +2630,7 @@ app.post('/api/commands', async (context) => {
         models: profilesToRun.map((profile) => profile.model).slice(0, 8),
         files: fileSummary(canvasFiles) || undefined,
         strategy: runStrategy,
+        searchNodes: profilesToRun.filter((profile) => profile.webSearch).length || undefined,
         substitutions: substitutions.length
           ? substitutions.map((item) => `${item.taskId}:${item.fromSlot}->${item.toSlot}`)
           : undefined,
@@ -2603,6 +2697,8 @@ app.post('/api/commands', async (context) => {
       teamContext,
       signal: controller.signal,
       runId,
+      // 只有 profile.webSearch === true 的节点才会被 ToolAdapter 包一层。
+      search: webSearch.search,
       accept: createRoutedJudge({
         router: routerPick
           ? {
@@ -2990,6 +3086,12 @@ app.post('/v1/chat/completions', async (context) => {
     apiKey: resolution.apiKey,
     maxTokens,
   });
+  // OpenAI-compatible clients can opt in with `"web_search": true` (or the
+  // namespaced form). Off by default: search is a network action.
+  const wantsSearch = body?.web_search === true || body?.qiansi_web_search === true;
+  const adapter = wantsSearch
+    ? new SearchToolAdapter(resolution.adapter, { search: webSearch.search })
+    : resolution.adapter;
 
   const id = `chatcmpl-${randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
@@ -3011,7 +3113,7 @@ app.post('/v1/chat/completions', async (context) => {
     let text = '';
     let input = 0;
     let output = 0;
-    for await (const event of resolution.adapter.stream(request)) {
+    for await (const event of adapter.stream(request)) {
       if (event.type === 'text-delta') text += event.text;
       else if (event.type === 'usage') {
         input += event.input;
@@ -3060,7 +3162,7 @@ app.post('/v1/chat/completions', async (context) => {
     let text = '';
     let input = 0;
     let output = 0;
-    for await (const event of resolution.adapter.stream(request)) {
+    for await (const event of adapter.stream(request)) {
       if (event.type === 'text-delta') {
         text += event.text;
         await stream.writeSSE({

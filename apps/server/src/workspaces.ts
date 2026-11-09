@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -28,16 +28,60 @@ interface WorkspaceFile {
 
 const DEFAULT_ID = 'main';
 
+/** U+FFFD is what a non-UTF-8 request body turns into; it can never be a typo. */
+const REPLACEMENT_CHAR = '�';
+
+/**
+ * A name containing replacement characters was decoded from bytes that were not
+ * UTF-8 (a GBK console sending JSON, for example). Storing it would enshrine
+ * mojibake, so the caller refuses it instead of saving garbage.
+ */
+export function checkWorkspaceName(
+  raw: string
+): { ok: true; name: string } | { ok: false; reason: 'empty' | 'encoding' } {
+  const name = String(raw ?? '').trim().slice(0, 40);
+  if (!name) return { ok: false, reason: 'empty' };
+  if (name.includes(REPLACEMENT_CHAR)) return { ok: false, reason: 'encoding' };
+  return { ok: true, name };
+}
+
 export class WorkspaceStore {
   private readonly stateDir: string;
   private readonly indexFile: string;
   private data: WorkspaceFile;
+  /** File mtime of the loaded index, so another process's write is noticed. */
+  private mtimeMs = 0;
 
   constructor(stateDir: string) {
     this.stateDir = stateDir;
     this.indexFile = join(stateDir, 'workspaces.json');
     mkdirSync(stateDir, { recursive: true });
     this.data = this.loadOrMigrate();
+  }
+
+  /**
+   * Several processes (desktop app, VS Code extension, a dev server) can share
+   * one state directory. Each reloads the index when the file changed on disk;
+   * otherwise their in-memory views drift apart and a workspace created by one
+   * is invisible to the others — which users read as "my canvas disappeared".
+   */
+  private refreshIfChanged(): void {
+    try {
+      const stat = statSync(this.indexFile);
+      if (stat.mtimeMs === this.mtimeMs) return;
+      const parsed = JSON.parse(readFileSync(this.indexFile, 'utf8')) as Partial<WorkspaceFile>;
+      const items = (parsed.items ?? []).filter(
+        (item): item is WorkspaceMeta => Boolean(item?.id)
+      );
+      if (!items.length) return;
+      const current = items.some((item) => item.id === parsed.current)
+        ? String(parsed.current)
+        : items[0]!.id;
+      this.data = { version: 1, current, items };
+      this.mtimeMs = stat.mtimeMs;
+    } catch {
+      // a half-written file keeps the previous view for one more tick
+    }
   }
 
   /**
@@ -100,6 +144,11 @@ export class WorkspaceStore {
     const tmp = `${this.indexFile}.tmp`;
     writeFileSync(tmp, JSON.stringify(this.data, null, 1), { encoding: 'utf8', mode: 0o600 });
     renameSync(tmp, this.indexFile);
+    try {
+      this.mtimeMs = statSync(this.indexFile).mtimeMs;
+    } catch {
+      // the next read will notice the change anyway
+    }
   }
 
   dirOf(id: string): string {
@@ -107,14 +156,17 @@ export class WorkspaceStore {
   }
 
   list(): WorkspaceMeta[] {
+    this.refreshIfChanged();
     return [...this.data.items].sort((a, b) => a.createdAt - b.createdAt);
   }
 
   current(): string {
+    this.refreshIfChanged();
     return this.data.current;
   }
 
   setCurrent(id: string): boolean {
+    this.refreshIfChanged();
     if (!this.data.items.some((item) => item.id === id)) return false;
     this.data.current = id;
     this.persist();
@@ -122,6 +174,7 @@ export class WorkspaceStore {
   }
 
   get(id: string): WorkspaceMeta | undefined {
+    this.refreshIfChanged();
     return this.data.items.find((item) => item.id === id);
   }
 
@@ -136,11 +189,13 @@ export class WorkspaceStore {
   }
 
   create(name?: string): WorkspaceMeta {
+    this.refreshIfChanged();
     const now = Date.now();
     const id = `ws-${now.toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const checked = name ? checkWorkspaceName(name) : { ok: false as const, reason: 'empty' as const };
     const meta: WorkspaceMeta = {
       id,
-      name: (name ?? '').trim().slice(0, 40) || `画布 ${this.data.items.length + 1}`,
+      name: checked.ok ? checked.name : `画布 ${this.data.items.length + 1}`,
       createdAt: now,
       updatedAt: now,
     };
@@ -151,10 +206,11 @@ export class WorkspaceStore {
   }
 
   rename(id: string, name: string): WorkspaceMeta | undefined {
+    this.refreshIfChanged();
     const meta = this.get(id);
-    const value = name.trim().slice(0, 40);
-    if (!meta || !value) return undefined;
-    meta.name = value;
+    const checked = checkWorkspaceName(name);
+    if (!meta || !checked.ok) return undefined;
+    meta.name = checked.name;
     meta.updatedAt = Date.now();
     this.persist();
     return meta;
@@ -162,6 +218,7 @@ export class WorkspaceStore {
 
   /** 至少留一个工作区；删除当前工作区时把当前切到剩下的第一个。 */
   remove(id: string): { ok: true } | { ok: false; reason: string } {
+    this.refreshIfChanged();
     if (this.data.items.length <= 1) return { ok: false, reason: 'last_workspace' };
     const index = this.data.items.findIndex((item) => item.id === id);
     if (index < 0) return { ok: false, reason: 'not_found' };
