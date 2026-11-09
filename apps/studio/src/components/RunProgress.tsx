@@ -56,7 +56,10 @@ export function RunProgress({ tasks, running, startedAt, tokens, onOpenReport }:
       : '规划中…'
     : failed
       ? `${done}/${total} 完成，${failed} 个失败`
-      : `${done}/${total} 全部完成`;
+      : // An interrupted run leaves tasks pending; calling that "全部完成" lied.
+        list.some((task) => task.status === 'pending' || task.status === 'running')
+        ? `${done}/${total} · 运行已中断`
+        : `${done}/${total} 全部完成`;
 
   return (
     <div className={`run-progress ${running ? 'running' : 'settled'}`}>

@@ -102,6 +102,13 @@ function loadLocalEnv(): void {
 loadLocalEnv();
 
 const store = new RunStore();
+// A run left as `running` by a previous process would make the progress strip
+// silently disappear after a restart; mark it interrupted so the canvas can say
+// what happened instead of showing nothing.
+const interruptedRuns = store.interruptStale();
+if (interruptedRuns.length) {
+  console.log(`[qiansi] interrupted ${interruptedRuns.length} stale run(s): ${interruptedRuns.join(', ')}`);
+}
 const idempotency = new Map<string, unknown>();
 const runAborts = new Map<string, AbortController>();
 /** A second live run would write its artifacts over the first one's. */

@@ -79,6 +79,13 @@ export class RunStore {
       subscribers: new Set(),
     };
     this.runs.set(runId, record);
+    // Persist at creation: a run that dies with the process must still be
+    // discoverable, otherwise the progress strip and the history both vanish.
+    try {
+      this.persist(record);
+    } catch {
+      // a read-only state dir should not prevent the run itself
+    }
     return record;
   }
 
@@ -138,9 +145,73 @@ export class RunStore {
       record.status = event.status;
       record.finishedAt = Date.now();
       this.persist(record);
+    } else if (
+      // Persist the milestones a recovering UI needs, but never the token
+      // streams: a checkpoint per task transition is cheap, per delta is not.
+      event.type === 'plan.created' ||
+      event.type === 'task.queued' ||
+      event.type === 'task.started' ||
+      event.type === 'task.completed' ||
+      event.type === 'task.failed' ||
+      event.type === 'task.acceptance'
+    ) {
+      try {
+        this.persist(record);
+      } catch {
+        // persistence is best effort; the in-memory run continues
+      }
     }
 
     for (const subscriber of record.subscribers) subscriber(envelope);
+  }
+
+  /**
+   * A run persists as `running` until it finishes. If the process dies first,
+   * that record is a lie the next launch inherits — the UI polls /api/runs/
+   * active and gets nothing, so the user sees their progress silently vanish.
+   * Called once at startup: mark them interrupted so the canvas can say so.
+   */
+  interruptStale(reason = '服务重启，运行被中断'): string[] {
+    const interrupted: string[] = [];
+    let files: string[] = [];
+    try {
+      files = readdirSync(this.runsDir).filter((name) => name.endsWith('.json'));
+    } catch {
+      return interrupted;
+    }
+    for (const name of files) {
+      const runId = name.slice(0, -'.json'.length);
+      if (this.runs.has(runId)) continue; // live in memory: not stale
+      const persisted = this.readPersisted(runId);
+      const snapshot = persisted?.snapshot as { status?: string } | undefined;
+      if (!snapshot || snapshot.status !== 'running') continue;
+      const record = this.get(runId);
+      if (!record) continue;
+      const envelope: RunEnvelope = {
+        seq: record.seq + 1,
+        ts: Date.now(),
+        event: { type: 'budget.exceeded', scope: 'run', detail: reason, runTotal: record.usage.total },
+      };
+      // A structured note lands in the event log so the reason survives.
+      record.seq = envelope.seq;
+      record.events.push(envelope);
+      const finished: RunEnvelope = {
+        seq: record.seq + 1,
+        ts: Date.now(),
+        event: { type: 'run.finished', runId, status: 'aborted' },
+      };
+      record.seq = finished.seq;
+      record.events.push(finished);
+      record.status = 'aborted';
+      record.finishedAt = Date.now();
+      try {
+        this.persist(record);
+      } catch {
+        // nothing else we can do; the next boot retries
+      }
+      interrupted.push(runId);
+    }
+    return interrupted;
   }
 
   /**
