@@ -58,3 +58,14 @@ curl -X PATCH /api/keys/zhipu/default -d '{"billing":"subscription"}'
 - **性能档是粗排序**，写死在 `routing.ts` 的 `FAMILY_PERFORMANCE` 里，一个家族一个数。刻意保持可解释——换模型只改一个数，而不是引入一套评分。
 - **订阅不等于免费**：订阅 Key 也有额度，用尽后自动轮换到下一个 Key 或按策略改派，逻辑与按量一致。
 - **预估单价**沿用 `quota.ts` 的价目表（可覆盖），只用于排序与估算，不参与计费。
+
+## 额度分摊：delegate
+
+把可以独立完成的事（起草、摘要、改写、抽取）交给便宜模型，不消耗当前会话的额度：
+
+```json
+{ "prompt": "…完整、自包含的指令与材料…", "maxTokens": 1200 }
+```
+
+不指定 model 时按当前路由策略挑（订阅优先 → 通常是 MiniMax/GLM），返回 ，用量照常记到对应 Key。
+MCP 工具名 `delegate`；HTTP 为 `POST /api/delegate`。实测：策略 subscription → 落到 MiniMax-M3.1-Flash，110 token。

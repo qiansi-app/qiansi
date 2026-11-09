@@ -146,6 +146,11 @@ export class CanvasStore {
     }
   }
 
+  /** 这个工作区是否保存过画布（空画布与「从未保存」要区分）。 */
+  exists(): boolean {
+    return existsSync(this.file);
+  }
+
   read(): CanvasDocument {
     if (!existsSync(this.file)) return emptyDocument();
     let document: CanvasDocument;

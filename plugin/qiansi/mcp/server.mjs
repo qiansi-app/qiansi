@@ -82,6 +82,8 @@ function serverVersion() {
   }
 }
 
+let currentWorkspace = '';
+
 function headers(extra = {}) {
   // Read per request: the app rewrites server-token on every launch, so a token
   // cached at MCP startup goes stale the first time the user restarts Qiansi.
@@ -94,6 +96,7 @@ function headers(extra = {}) {
     'x-agentweave-session': sessionId,
     'x-qiansi-agent': agent,
     'x-agentweave-agent': agent,
+    ...(currentWorkspace ? { 'x-qiansi-workspace': currentWorkspace } : {}),
     'content-type': 'application/json',
     ...extra,
   };
@@ -426,6 +429,40 @@ const tools = [
     },
   },
   {
+    name: 'delegate',
+    description:
+      'Hand a self-contained task (drafting, summarizing, rewriting, extracting) to a cheaper model so the current session does not spend its own quota. Defaults to the family picked by the routing strategy (subscription-first). Returns the finished text plus which model served it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'The complete, self-contained instruction and material' },
+        system: { type: 'string', description: 'Optional system prompt / role' },
+        model: { type: 'string', description: 'Optional explicit model id; omit to let routing pick' },
+        maxTokens: { type: 'number', description: 'Output budget, default 1200' },
+      },
+      required: ['prompt'],
+    },
+  },
+  {
+    name: 'list_workspaces',
+    description:
+      'List canvas workspaces (one canvas per session/project) and show which one the MCP tools currently target. Canvas ops, runs and handoff all follow this selection.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'use_workspace',
+    description:
+      'Point subsequent MCP tools at a workspace (a separate canvas with its own runs). Pass id to switch; pass create:true with a name to make a new blank canvas first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Workspace id from list_workspaces' },
+        create: { type: 'boolean', description: 'Create a new blank workspace instead of switching' },
+        name: { type: 'string', description: 'Name for the new workspace (with create: true)' },
+      },
+    },
+  },
+  {
     name: 'get_quota',
     description:
       'Every model family\'s keys and remaining quota: per-key limits, spend in the current period, and which key is active. Call this before run_canvas to avoid starting a run a family cannot finish, and after a run to explain its cost.',
@@ -493,6 +530,42 @@ async function callTool(name, args = {}) {
         autoRun: args.autoRun === true,
       }),
     });
+  }
+
+  if (name === 'delegate') {
+    return request('/api/delegate', {
+      method: 'POST',
+      body: JSON.stringify({
+        prompt: args.prompt,
+        system: args.system,
+        model: args.model,
+        maxTokens: args.maxTokens,
+      }),
+    });
+  }
+
+  if (name === 'list_workspaces') {
+    return request('/api/workspaces');
+  }
+
+  if (name === 'use_workspace') {
+    if (args.create) {
+      const created = await request('/api/workspaces', {
+        method: 'POST',
+        body: JSON.stringify({ name: args.name }),
+      });
+      currentWorkspace = created.workspace?.id ?? currentWorkspace;
+      return { ok: true, created: created.workspace, note: '后续画布与运行工具都作用于这个新画布。' };
+    }
+    const data = await request('/api/workspaces');
+    const known = (data.items ?? []).map((item) => ({ id: item.id, name: item.name }));
+    const target = known.find((item) => item.id === args.id);
+    if (!target) {
+      return { ok: false, error: `找不到工作区 ${args.id}`, known: known.map((item) => item.id) };
+    }
+    currentWorkspace = target.id;
+    await request('/api/workspaces/' + target.id + '/activate', { method: 'POST', body: '{}' });
+    return { ok: true, workspace: target, note: '后续画布与运行工具都作用于这张画布。' };
   }
 
   if (name === 'get_quota') {

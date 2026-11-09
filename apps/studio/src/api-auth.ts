@@ -11,6 +11,8 @@
  * on every same-origin /api and /v1 request. Header auth has no SameSite rules,
  * so the embedded panel behaves exactly like the Electron app or a browser tab.
  */
+import { workspaceHeader } from './workspace';
+
 export function installApiAuth(): void {
   const rawFetch = window.fetch.bind(window);
 
@@ -35,6 +37,10 @@ export function installApiAuth(): void {
       if (token) {
         const headers = new Headers(init?.headers);
         if (!headers.has('x-qiansi-token')) headers.set('x-qiansi-token', token);
+        const workspace = workspaceHeader();
+        if (workspace && !headers.has('x-qiansi-workspace')) {
+          headers.set('x-qiansi-workspace', workspace);
+        }
         init = { ...(init ?? {}), headers };
       }
     }

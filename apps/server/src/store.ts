@@ -15,6 +15,8 @@ export type RunStatus = 'running' | 'done' | 'failed' | 'aborted';
 export interface RunRecord {
   runId: string;
   goal: string;
+  /** 这次运行属于哪个工作区；回写产物时写回同一张画布。 */
+  workspaceId?: string;
   status: RunStatus;
   plan?: Plan;
   outputs: Record<string, string>;
@@ -62,10 +64,12 @@ export class RunStore {
     );
   }
 
-  create(runId: string, goal: string): RunRecord {
+  create(runId: string, goal: string, workspaceId?: string): RunRecord {
     const record: RunRecord = {
       runId,
       goal,
+      workspaceId,
+
       status: 'running',
       outputs: {},
       usage: { total: 0, byModel: {} },
@@ -170,6 +174,7 @@ export class RunStore {
       runId: record.runId,
       status: record.status,
       goal: record.goal,
+      workspaceId: record.workspaceId,
       plan: record.plan,
       outputs: record.outputs,
       usage: record.usage,
@@ -189,6 +194,7 @@ export class RunStore {
       events: number;
       startedAt: number;
       finishedAt?: number;
+      workspaceId?: string;
     }> = [];
 
     for (const file of readdirSync(this.runsDir)) {
@@ -203,6 +209,7 @@ export class RunStore {
           runId: data.snapshot.runId,
           status: data.snapshot.status,
           goal: data.snapshot.goal,
+          workspaceId: data.snapshot.workspaceId,
           tokens: data.snapshot.usage?.total ?? 0,
           events: data.events?.length ?? 0,
           startedAt: data.snapshot.startedAt,

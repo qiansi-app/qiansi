@@ -57,6 +57,7 @@ import {
   type KeySlot,
 } from './model-catalog.js';
 import { PolicyStore, scopeForRequest, type Mandate } from './policy.js';
+import { WorkspaceStore } from './workspaces.js';
 import { QuotaStore } from './quota.js';
 import { substituteExhausted } from './quota-plan.js';
 import { orderByStrategy, performanceOf } from './routing.js';
@@ -287,7 +288,24 @@ function recordExternalCall(input: {
 }
 
 const stateDir = ensureStateDir();
-const canvasStore = new CanvasStore(stateDir);
+const workspaces = new WorkspaceStore(stateDir);
+/** 每个工作区一份 CanvasStore（惰性创建并缓存）。 */
+const canvasStores = new Map<string, CanvasStore>();
+function canvasFor(workspaceId?: string): CanvasStore {
+  const meta = workspaces.resolve(workspaceId);
+  let store = canvasStores.get(meta.id);
+  if (!store) {
+    store = new CanvasStore(workspaces.dirOf(meta.id));
+    canvasStores.set(meta.id, store);
+  }
+  return store;
+}
+/** 请求属于哪个工作区：优先 x-qiansi-workspace 头，其次 ?ws=，最后当前工作区。 */
+function workspaceOf(context: Context): string {
+  const fromHeader = context.req.header('x-qiansi-workspace');
+  const fromQuery = context.req.query('ws');
+  return workspaces.resolve(fromHeader ?? fromQuery).id;
+}
 const audit = new AuditLog(stateDir);
 const policy = new PolicyStore(stateDir);
 const quota = new QuotaStore(stateDir);
@@ -557,7 +575,7 @@ async function buildStatus(): Promise<StatusReport> {
   }
 
   try {
-    const document = canvasStore.read();
+    const document = canvasFor(workspaces.current()).read();
     const diagnosis = diagnoseCanvas(document);
     parts.canvas = part('ready', `revision ${document.revision}`);
     if (!diagnosis.runnable) {
@@ -1232,6 +1250,95 @@ app.post('/api/chat', async (context) => {
   }
 });
 
+/**
+ * 把一件可以独立完成的事交给便宜模型（默认按当前路由策略挑，通常是订阅家族），
+ * 结果直接返回给调用方——外部会话不必花自己的额度去写这些内容。
+ */
+app.post('/api/delegate', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const prompt = String(body?.prompt ?? '').trim().slice(0, 20000);
+  if (!prompt) return context.json({ ok: false, error: 'prompt_required' }, 400);
+  const system = String(body?.system ?? '').slice(0, 4000);
+  const maxTokens = Math.min(Math.max(Number(body?.maxTokens ?? 1200) || 1200, 64), 8192);
+  const requestedModel = String(body?.model ?? '').trim();
+  const strategy = quota.strategy();
+
+  await ensureQuotaSeeded();
+
+  // 选模型：显式指定 > 按策略挑一个还有余额的家族。
+  let slot: KeySlot | null = null;
+  let model = requestedModel;
+  if (model) {
+    slot = familyOf(model)?.slot ?? 'relay';
+  } else {
+    const scores = modelFamilies()
+      .filter((family) => Boolean(quota.slot(family.slot)?.keys.length))
+      .map((family) => {
+        const price = quota.prices()[family.slot];
+        return {
+          slot: family.slot,
+          billing: quota.billingOf(family.slot),
+          priceCnyPerM: (price.in + price.out) / 2,
+          performance: performanceOf(family.slot),
+          headroom: quota.headroom(family.slot),
+        };
+      });
+    const best = orderByStrategy(scores, strategy)[0];
+    if (!best) return context.json({ ok: false, error: 'no_usable_key' }, 503);
+    slot = best.slot;
+    const family = modelFamilies().find((item) => item.slot === best.slot)!;
+    model = preferredModel(family.models);
+  }
+
+  const credential = slot ? await slotCredential(slot) : null;
+  if (!credential) return context.json({ ok: false, error: 'no_usable_key', slot }, 503);
+  // 每个家族有自己的协议与端点：只给模型名会让请求打到默认的 DeepSeek。
+  const family = modelFamilies().find((item) => item.slot === slot);
+
+  try {
+    const result = await completeChat(
+      vault,
+      {
+        model,
+        apiKey: credential.secret,
+        protocol: family?.protocol,
+        baseUrl: family?.baseUrl,
+      },
+      [
+        ...(system ? [{ role: 'system' as const, content: system }] : []),
+        { role: 'user' as const, content: prompt },
+      ],
+      { maxTokens, timeoutMs: 90000 }
+    );
+    quota.record({
+      slot: slot ?? 'relay',
+      keyId: credential.keyId,
+      model,
+      tokens: result.usage.total,
+      source: 'chat',
+    });
+    audit.record({
+      actor: actorOf(context),
+      action: 'delegate',
+      target: model,
+      detail: { slot, strategy, tokens: result.usage.total },
+    });
+    return context.json({
+      ok: true,
+      text: result.text,
+      model,
+      slot,
+      strategy,
+      tokens: result.usage.total,
+    });
+  } catch (error) {
+    return context.json(
+      { ok: false, error: redactSecrets(error instanceof Error ? error.message : String(error), []) },
+      502
+    );
+  }
+});
+
 app.post('/api/discuss', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
   const topic = String(body?.topic ?? '').trim().slice(0, 2000);
@@ -1427,7 +1534,7 @@ app.post('/api/handoff', async (context) => {
     );
   }
 
-  const document = canvasStore.read();
+  const document = canvasFor(workspaceOf(context)).read();
   const ops: CanvasOp[] = [];
   const library = document.nodes.find((node) => node.data?.name === '接续上下文');
   const metric = `${pack.session?.source ?? 'project'} · ${pack.session?.messageCount ?? 0} 条`;
@@ -1460,7 +1567,7 @@ app.post('/api/handoff', async (context) => {
       },
     });
   }
-  canvasStore.apply(ops);
+  canvasFor(workspaceOf(context)).apply(ops);
 
   const arranged: { nodes: number; edges: number } = { nodes: 0, edges: 0 };
   if (autoArrange && pack.session) {
@@ -1511,7 +1618,7 @@ app.post('/api/handoff', async (context) => {
     const goal = (goalParts.join('\n') || `接续 ${pack.session.source} 会话的工作`).slice(0, 1200);
     console.log(`[handoff] available models: ${available.length}`, available.map((m) => m.connectionId).join(','));
     if (available.length > 0) {
-      const current = canvasStore.read();
+      const current = canvasFor(workspaceOf(context)).read();
       const orchestratorNode = current.nodes.find((node) => node.id === current.orchestratorId);
       const orchestrator = orchestratorNode
         ? {
@@ -1557,7 +1664,7 @@ app.post('/api/handoff', async (context) => {
           pack.notes.push(`自动编排失败：/api/workflow 返回 HTTP ${response.status}`);
         }
         if (response.ok && generated?.nodes?.length) {
-          const doc = canvasStore.read();
+          const doc = canvasFor(workspaceOf(context)).read();
           const placed: CanvasOp[] = [];
           const libId =
             doc.nodes.find((node) => node.data?.name === '接续上下文')?.id ??
@@ -1598,7 +1705,7 @@ app.post('/api/handoff', async (context) => {
               },
             });
           }
-          const applied = canvasStore.apply(placed);
+          const applied = canvasFor(workspaceOf(context)).apply(placed);
           arranged.nodes = generated.nodes.length;
           arranged.edges = (generated.edges ?? []).length + generated.nodes.length;
           audit.record({
@@ -1825,9 +1932,55 @@ app.post('/api/files', async (context) => {
   });
 });
 
+/** 工作区：一张画布 + 一份运行历史。 */
+app.get('/api/workspaces', (context) =>
+  context.json({
+    ok: true,
+    current: workspaces.current(),
+    items: workspaces.list().map((meta) => ({
+      ...meta,
+      canvasExists: canvasFor(meta.id).exists(),
+    })),
+  })
+);
+
+app.post('/api/workspaces', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const meta = workspaces.create(typeof body?.name === 'string' ? body.name : undefined);
+  audit.record({ actor: actorOf(context), action: 'workspace.create', target: meta.id, detail: { name: meta.name } });
+  return context.json({ ok: true, workspace: meta });
+});
+
+app.patch('/api/workspaces/:id', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const meta = workspaces.rename(context.req.param('id'), String(body?.name ?? ''));
+  if (!meta) return context.json({ ok: false, error: 'workspace_not_found' }, 404);
+  audit.record({ actor: actorOf(context), action: 'workspace.rename', target: meta.id });
+  return context.json({ ok: true, workspace: meta });
+});
+
+app.delete('/api/workspaces/:id', (context) => {
+  const id = context.req.param('id');
+  const result = workspaces.remove(id);
+  if (!result.ok) {
+    return context.json({ ok: false, error: result.reason }, result.reason === 'last_workspace' ? 409 : 404);
+  }
+  canvasStores.delete(id);
+  audit.record({ actor: actorOf(context), action: 'workspace.remove', target: id });
+  return context.json({ ok: true, current: workspaces.current() });
+});
+
+app.post('/api/workspaces/:id/activate', (context) => {
+  const id = context.req.param('id');
+  if (!workspaces.setCurrent(id)) return context.json({ ok: false, error: 'workspace_not_found' }, 404);
+  audit.record({ actor: actorOf(context), action: 'workspace.activate', target: id });
+  return context.json({ ok: true, current: id });
+});
+
 app.get('/api/canvas', (context) => {
-  const document = canvasStore.read();
-  const exists = existsSync(join(stateDir, 'canvas.json'));
+  const store = canvasFor(workspaceOf(context));
+  const document = store.read();
+  const exists = store.exists();
   return context.json({
     ok: true,
     canvas: exists ? document : null,
@@ -1841,7 +1994,7 @@ app.put('/api/canvas', async (context) => {
     return context.json({ error: 'nodes_and_edges_required' }, 400);
   }
   try {
-    const document = canvasStore.write({
+    const document = canvasFor(workspaceOf(context)).write({
       orchestratorId: String(body.orchestratorId ?? ''),
       nodes: body.nodes,
       edges: body.edges,
@@ -1872,7 +2025,7 @@ app.put('/api/canvas', async (context) => {
 });
 
 app.get('/api/canvas/summary', (context) => {
-  const summary = canvasSummary(canvasStore.read());
+  const summary = canvasSummary(canvasFor(workspaceOf(context)).read());
   return context.body(summary, 200, {
     'content-type': 'text/plain; charset=utf-8',
     'cache-control': 'no-store',
@@ -1880,7 +2033,7 @@ app.get('/api/canvas/summary', (context) => {
 });
 
 app.get('/api/canvas/svg', (context) => {
-  const svg = canvasSvg(canvasStore.read());
+  const svg = canvasSvg(canvasFor(workspaceOf(context)).read());
   return context.body(svg, 200, {
     'content-type': 'image/svg+xml; charset=utf-8',
     'cache-control': 'no-store',
@@ -1893,7 +2046,7 @@ app.get('/api/canvas/svg', (context) => {
  * attached to a PR, a doc, or a chat without the app running.
  */
 app.get('/api/canvas/export', (context) => {
-  const document = canvasStore.read();
+  const document = canvasFor(workspaceOf(context)).read();
   const format = context.req.query('format');
   if (format === 'md') {
     const markdown =
@@ -1954,7 +2107,7 @@ app.post('/api/canvas/ops', async (context) => {
   if (!ops.length) return context.json({ ok: false, error: 'ops_required' }, 400);
   if (ops.length > 200) return context.json({ ok: false, error: 'too_many_ops' }, 400);
   try {
-    const result = canvasStore.apply(ops);
+    const result = canvasFor(workspaceOf(context)).apply(ops);
     if (result.applied > 0) {
       audit.record({
         actor: actorOf(context),
@@ -2249,7 +2402,9 @@ app.post('/api/commands', async (context) => {
      * run is refused outright — falling back to a built-in demo would look
      * like it worked.
      */
-    const canvasDocument = canvasStore.read();
+    // 运行归属于发起它的工作区；产物必须写回同一张画布。
+    const runWorkspace = workspaceOf(context);
+    const canvasDocument = canvasFor(runWorkspace).read();
     const canvasFiles = collectCanvasFiles(canvasDocument, stateDir);
     const allowDemoFallback = body?.payload?.allowDemoFallback === true;
     const canvasPlan = buildPlanFromCanvas(canvasDocument, requestedGoal, {
@@ -2389,7 +2544,7 @@ app.post('/api/commands', async (context) => {
       },
     });
 
-    store.create(runId, planToRun.goal);
+    store.create(runId, planToRun.goal, runWorkspace);
     const mandate: Mandate = {
       runId,
       actor: runActor,
@@ -2518,7 +2673,7 @@ app.post('/api/commands', async (context) => {
       // server is the one that puts the artifacts back on the board.
       const snapshot = store.snapshot(runId);
       const applied = writeRunArtifacts(
-        canvasStore,
+        canvasFor(runWorkspace),
         planToRun,
         snapshot?.outputs ?? {},
         event.status !== 'done'
@@ -2541,7 +2696,7 @@ app.post('/api/commands', async (context) => {
     const requestedGoal =
       typeof body?.payload?.goal === 'string' ? String(body.payload.goal).trim().slice(0, 500) : '';
     const plan = requestedGoal ? { ...requestedPlan, goal: requestedGoal } : requestedPlan;
-    store.create(runId, String(plan.goal ?? 'demo'));
+    store.create(runId, String(plan.goal ?? 'demo'), workspaceOf(context));
     const controller = new AbortController();
     runAborts.set(runId, controller);
 
@@ -2571,7 +2726,15 @@ app.post('/api/commands', async (context) => {
   return context.json(response);
 });
 
-app.get('/api/runs', (context) => context.json({ items: store.list() }));
+app.get('/api/runs', (context) => {
+  const wanted = context.req.header('x-qiansi-workspace') ?? context.req.query('ws');
+  const items = store.list();
+  // 旧记录没有 workspaceId，视为主画布。
+  const filtered = wanted
+    ? items.filter((item) => (item.workspaceId ?? 'main') === workspaces.resolve(wanted).id)
+    : items;
+  return context.json({ items: filtered });
+});
 
 /**
  * Live snapshot of the run currently in flight, for any client that did not
@@ -2582,7 +2745,14 @@ app.get('/api/runs', (context) => context.json({ items: store.list() }));
 app.get('/api/runs/active', (context) => {
   // 任何来源的运行都算：画布发起、agent 触发、演示模式、接续会话的自动运行。
   // 只看 activeLiveRunId 会漏掉 demo 运行，界面就完全没有进度。
-  const record = store.running()[0] ?? (activeLiveRunId ? store.get(activeLiveRunId) : undefined);
+  const wanted = context.req.header('x-qiansi-workspace') ?? context.req.query('ws');
+  const wsId = wanted ? workspaces.resolve(wanted).id : null;
+  const belongs = (run: { workspaceId?: string }): boolean =>
+    !wsId || (run.workspaceId ?? 'main') === wsId;
+
+  const record =
+    store.running().find((run) => belongs(run)) ??
+    (activeLiveRunId && belongs(store.get(activeLiveRunId) ?? {}) ? store.get(activeLiveRunId) : undefined);
 
   const fold = (run: NonNullable<ReturnType<typeof store.get>>) => {
     const statuses = new Map<string, 'pending' | 'running' | 'done' | 'failed'>();
@@ -2605,7 +2775,8 @@ app.get('/api/runs/active', (context) => {
   if (!record) {
     // 运行的最后一秒可能刚好在页面切走时结束：给出 30 秒内最近完成的一轮，
     // 客户端据此显示「刚刚完成」而不是一片空白。
-    const finished = store.recentFinished(30_000);
+    const recentRun = store.recentFinished(600_000);
+    const finished = recentRun && belongs(recentRun) ? recentRun : undefined;
     if (!finished) return context.json({ ok: true, run: null, recent: null });
     return context.json({
       ok: true,

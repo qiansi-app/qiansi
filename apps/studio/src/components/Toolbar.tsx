@@ -26,6 +26,7 @@ import {
   Wand2,
 } from 'lucide-react';
 import type { RegionMode } from '../data/demoGraph';
+import { WorkspaceSwitcher } from './WorkspaceSwitcher';
 
 interface ToolbarProps {
   running: boolean;
@@ -149,6 +150,8 @@ export function Toolbar({
           <div className="brand-sub">Qiansi · 多 AI 协作画布</div>
         </div>
       </div>
+
+      <WorkspaceSwitcher />
 
       <div className="toolbar-stat">
         <strong>{nodeCount}</strong> 节点
