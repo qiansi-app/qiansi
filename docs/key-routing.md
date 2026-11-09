@@ -67,5 +67,5 @@ curl -X PATCH /api/keys/zhipu/default -d '{"billing":"subscription"}'
 { "prompt": "…完整、自包含的指令与材料…", "maxTokens": 1200 }
 ```
 
-不指定 model 时按当前路由策略挑（订阅优先 → 通常是 MiniMax/GLM），返回 ，用量照常记到对应 Key。
+不指定 model 时按当前路由策略挑（订阅优先 → 通常是 MiniMax/GLM），返回 `{ text, model, slot, strategy, tokens }`，用量照常记到对应 Key。
 MCP 工具名 `delegate`；HTTP 为 `POST /api/delegate`。实测：策略 subscription → 落到 MiniMax-M3.1-Flash，110 token。
