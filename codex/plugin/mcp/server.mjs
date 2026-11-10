@@ -480,6 +480,19 @@ const tools = [
     },
   },
   {
+    name: 'resume_project',
+    description:
+      'Continue a run that failed or was interrupted: only the unfinished tasks run again, and the completed tasks\' outputs are injected as upstream context. Use the run_id from get_run_result or get_status (recent/failed runs). auto_resume keeps retrying (max 2 more rounds) even across restarts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        run_id: { type: 'string', description: 'The run to continue (must belong to the current workspace)' },
+        auto_resume: { type: 'boolean', description: 'Keep auto-continuing on further failures (default true)' },
+      },
+      required: ['run_id'],
+    },
+  },
+  {
     name: 'get_quota',
     description:
       'Every model family\'s keys and remaining quota: per-key limits, spend in the current period, and which key is active. Call this before run_canvas to avoid starting a run a family cannot finish, and after a run to explain its cost.',
@@ -583,6 +596,26 @@ async function callTool(name, args = {}) {
     currentWorkspace = target.id;
     await request('/api/workspaces/' + target.id + '/activate', { method: 'POST', body: '{}' });
     return { ok: true, workspace: target, note: '后续画布与运行工具都作用于这张画布。' };
+  }
+
+  if (name === 'resume_project') {
+    const started = await request('/api/commands', {
+      method: 'POST',
+      body: JSON.stringify({
+        commandId: randomUUID(),
+        type: 'run.start',
+        payload: {
+          mode: 'live',
+          resumeOf: String(args.run_id ?? ''),
+          autoResume: args.auto_resume !== false,
+        },
+      }),
+    });
+    return {
+      ok: true,
+      ...started,
+      note: '续跑已启动：只跑未完成的任务，已完成产出作为上游注入。用 get_run_result 跟踪。',
+    };
   }
 
   if (name === 'get_quota') {

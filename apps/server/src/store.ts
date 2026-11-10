@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Plan, RunEvent, UsageSnapshot } from '@qiansi/engine';
+import type { CapabilityProfile, Plan, RunEvent, UsageSnapshot } from '@qiansi/engine';
 import { ensureStateDir } from './state-dir.js';
 import type { Mandate } from './policy.js';
 import type { LeadershipVerdict } from './leadership.js';
@@ -25,6 +25,15 @@ export interface RunRecord {
   workspaceId?: string;
   /** 计划从画布生成还是内置演示；启动补投副作用时据此决定要不要回写。 */
   planSource?: 'canvas' | 'builtin';
+  /** 断点续跑链：上一轮运行的 id 与当前续跑深度（用于自动续跑上限）。 */
+  resumedFrom?: string;
+  resumeDepth?: number;
+  /** 自动续跑意图：跨重启保留，失败/中断后自动排下一次续跑。 */
+  autoResume?: boolean;
+  /** 人为停止：自动续跑必须尊重它（DSH：故意停止暂停自动恢复）。 */
+  manualStop?: boolean;
+  /** 本轮用到的能力档案：断点续跑时按 profileId 恢复模型与路由。 */
+  profiles?: CapabilityProfile[];
   status: RunStatus;
   plan?: Plan;
   outputs: Record<string, string>;
@@ -78,13 +87,23 @@ export class RunStore {
     runId: string,
     goal: string,
     workspaceId?: string,
-    planSource?: 'canvas' | 'builtin'
+    planSource?: 'canvas' | 'builtin',
+    extra?: {
+      resumedFrom?: string;
+      resumeDepth?: number;
+      autoResume?: boolean;
+      profiles?: CapabilityProfile[];
+    }
   ): RunRecord {
     const record: RunRecord = {
       runId,
       goal,
       workspaceId,
       planSource,
+      resumedFrom: extra?.resumedFrom,
+      resumeDepth: extra?.resumeDepth,
+      autoResume: extra?.autoResume,
+      profiles: extra?.profiles,
 
       status: 'running',
       outputs: {},
@@ -258,6 +277,31 @@ export class RunStore {
     }
   }
 
+  /** 人为停止：记录后，自动续跑与启动补排都不再接手这一轮。 */
+  markManualStop(runId: string): void {
+    const record = this.runs.get(runId);
+    if (!record) return;
+    record.manualStop = true;
+    try {
+      this.persist(record);
+    } catch {
+      // 标记丢失最多导致多续跑一轮
+    }
+  }
+
+  /**
+   * 断点续跑的预注入：把上一轮已完成任务的产出放进本轮 outputs，
+   * 这样续跑任务的依赖解析能直接取到上游（orchestrator 按任务 id 找）。
+   */
+  seedOutputs(runId: string, outputs: Record<string, string>): void {
+    const record = this.runs.get(runId);
+    if (!record) return;
+    for (const [taskId, value] of Object.entries(outputs)) {
+      if (typeof value === 'string' && value.trim()) record.outputs[taskId] = value;
+    }
+    this.persist(record);
+  }
+
   getMandate(runId: string): Mandate | undefined {
     return this.get(runId)?.mandate;
   }
@@ -280,6 +324,11 @@ export class RunStore {
       goal: record.goal,
       workspaceId: record.workspaceId,
       planSource: record.planSource,
+      resumedFrom: record.resumedFrom,
+      resumeDepth: record.resumeDepth,
+      autoResume: record.autoResume,
+      manualStop: record.manualStop,
+      profiles: record.profiles,
       plan: record.plan,
       outputs: record.outputs,
       usage: record.usage,

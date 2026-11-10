@@ -29,6 +29,7 @@ import {
   redactSecrets,
   styleById,
   type CapabilityProfile,
+  type Plan,
   type Protocol,
 } from '@qiansi/engine';
 import { AuditLog } from './audit.js';
@@ -61,6 +62,7 @@ import { PolicyStore, scopeForRequest, type Mandate } from './policy.js';
 import { checkWorkspaceName, WorkspaceStore } from './workspaces.js';
 import { saveRunDeliverables } from './deliverables.js';
 import { EffectsLedger } from './effects.js';
+import { buildResumePlan } from './resume.js';
 import {
   buildDiscussionTopic,
   buildReviewPrompt,
@@ -762,6 +764,50 @@ app.post('/api/admin/stop', async (context) => {
 
 process.on('SIGINT', () => void gracefulShutdown('sigint'));
 process.on('SIGTERM', () => void gracefulShutdown('sigterm'));
+
+/**
+ * 自动续跑：带 autoResume 意图的运行在失败/中断后，自己排下一次「断点续跑」。
+ * 走自己的 HTTP 接口而不是内部函数——复用同一套校验与审计，且天然幂等。
+ * 人为停止时不动（看门狗同理）。
+ */
+function scheduleAutoResume(runId: string, delayMs = 5000): void {
+  const timer = setTimeout(() => {
+    if (existsSync(manualStopPath)) return;
+    const port = boundPort ?? Number(process.env.QIANSI_PORT ?? 8787);
+    const requestHeaders: Record<string, string> = {
+      'x-qiansi-token': token,
+      'content-type': 'application/json',
+      'x-qiansi-agent': 'auto-resume',
+    };
+    void fetch(`http://127.0.0.1:${port}/api/commands`, {
+      method: 'POST',
+      headers: requestHeaders,
+      body: JSON.stringify({
+        commandId: `auto-resume-${runId}-${Date.now()}`,
+        type: 'run.start',
+        payload: { mode: 'live', resumeOf: runId, autoResume: true },
+      }),
+    })
+      .then(async (response) => {
+        const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+        audit.record({
+          actor: 'server',
+          action: 'run.auto_resume',
+          target: runId,
+          detail: { ok: response.ok, runId: body?.runId ?? null, error: body?.error ?? null },
+        });
+      })
+      .catch((error: unknown) => {
+        audit.record({
+          actor: 'server',
+          action: 'run.auto_resume_failed',
+          target: runId,
+          detail: { error: error instanceof Error ? error.message : String(error) },
+        });
+      });
+  }, delayMs);
+  timer.unref?.();
+}
 
 app.get('/api/bootstrap', (context) => {
   if (!originAllowed(context)) {
@@ -2612,6 +2658,7 @@ app.post('/api/commands', async (context) => {
     if (!controller) {
       return context.json({ error: 'run_not_found' }, 404);
     }
+    store.markManualStop(runId);
     controller.abort();
     if (activeLiveRunId === runId) activeLiveRunId = null;
     // Every stop is recorded, because stopping is allowed to anyone holding the
@@ -2740,30 +2787,129 @@ app.post('/api/commands', async (context) => {
     const canvasDocument = canvasFor(runWorkspace).read();
     const canvasFiles = collectCanvasFiles(canvasDocument, stateDir);
     const allowDemoFallback = body?.payload?.allowDemoFallback === true;
-    const canvasPlan = buildPlanFromCanvas(canvasDocument, requestedGoal, {
-      files: canvasFiles,
-    });
+    let resumePrepared: {
+      profiles: CapabilityProfile[];
+      plan: Plan;
+      slotByProfile: Map<string, KeySlot>;
+      autoResume: boolean;
+      depth: number;
+      prevOutputs: Record<string, string>;
+    } | null = null;
+    let canvasPrepared: { canvasPlan: ReturnType<typeof buildPlanFromCanvas> } | null = null;
 
-    if (!canvasPlan && !allowDemoFallback) {
-      const diagnosis = diagnoseCanvas(canvasDocument);
+    /**
+     * ── 断点续跑（长期项目的核心）──
+     * resumeOf 指向上一轮运行：只跑没完成的任务，已完成产出通过 seedOutputs
+     * 预注入为本轮的上游。续跑绕过画布重新规划，沿用上一轮的计划与模型。
+     */
+    const resumeOf = typeof body?.payload?.resumeOf === 'string' ? body.payload.resumeOf : '';
+    const autoResumeFlag = body?.payload?.autoResume === true;
+
+    if (resumeOf) {
+      await ensureQuotaSeeded();
+      const prev = store.get(resumeOf);
+      if (!prev) {
+        return context.json({ ok: false, error: 'resume_run_not_found', resumeOf }, 404);
+      }
+      if ((prev.workspaceId ?? 'main') !== runWorkspace) {
+        return context.json(
+          { ok: false, error: 'resume_workspace_mismatch', resumeOf, hint: '续跑必须回到原工作区。' },
+          409
+        );
+      }
+      if (prev.status === 'running') {
+        return context.json({ ok: false, error: 'resume_source_running', resumeOf }, 409);
+      }
+      if (!prev.plan || !prev.plan.subtasks?.length) {
+        return context.json({ ok: false, error: 'resume_no_plan', resumeOf }, 400);
+      }
+
+      const resumeDepth = prev.resumeDepth ?? 0;
+      const built = buildResumePlan({
+        prevPlan: prev.plan,
+        prevOutputs: prev.outputs ?? {},
+        resumeDepth,
+      });
+      if (!built.pending.length) {
+        return context.json({
+          ok: false,
+          error: 'nothing_to_resume',
+          done: built.skippedDone.length,
+          hint: '上一轮所有任务都已有产出；要重跑请直接运行，而不是续跑。',
+        });
+      }
+
+      const pendingProfiles = built.plan.subtasks
+        .map((task) => task.profileId)
+        .filter((id, index, all) => all.indexOf(id) === index)
+        .map((profileId) => {
+          const fromPrev = (prev as unknown as { profiles?: CapabilityProfile[] }).profiles?.find(
+            (profile) => profile.id === profileId
+          );
+          // 档案缺失时按画布节点当前模型兜底（续跑允许用上新换的模型/Key）。
+          // id 必须保持计划里的 canvas-<nodeId>，否则 orchestrator 找不到档案。
+          if (fromPrev) return { ...fromPrev, id: profileId };
+          const nodeId = built.plan.subtasks.find((task) => task.profileId === profileId)?.assignedNodeId;
+          const nodeModel = nodeId
+            ? String(canvasDocument.nodes.find((node) => node.id === nodeId)?.data?.model ?? '')
+            : '';
+          return nodeModel
+            ? { ...profileForModel(nodeModel), id: profileId }
+            : { ...profileForModel('claude-haiku-4-5'), id: profileId };
+        });
+
       audit.record({
         actor: actorOf(context),
-        action: 'run.refused',
-        target: 'canvas_not_runnable',
-        detail: { reasons: diagnosis.reasons },
-      });
-      return context.json(
-        {
-          error: 'canvas_not_runnable',
-          reasons: diagnosis.reasons,
-          hint: '在画布上至少放两个带模型的节点并设好主控再运行；只想看流程可以传 allowDemoFallback: true 跑内置演示。',
+        action: 'run.resume',
+        target: runId,
+        detail: {
+          resumedFrom: resumeOf,
+          depth: resumeDepth + 1,
+          pending: built.pending.length,
+          skipped: built.skippedDone.length,
         },
-        422
-      );
+      });
+
+      resumePrepared = {
+        profiles: pendingProfiles,
+        plan: built.plan,
+        slotByProfile: new Map(
+          pendingProfiles.map((profile) => [profile.id, familyOf(profile.model)?.slot ?? 'relay'])
+        ),
+        autoResume: prev.autoResume ?? autoResumeFlag,
+        depth: resumeDepth + 1,
+        prevOutputs: prev.outputs ?? {},
+      };
+    } else {
+      const canvasPlan = buildPlanFromCanvas(canvasDocument, requestedGoal, {
+        files: canvasFiles,
+      });
+
+      if (!canvasPlan && !allowDemoFallback) {
+        const diagnosis = diagnoseCanvas(canvasDocument);
+        audit.record({
+          actor: actorOf(context),
+          action: 'run.refused',
+          target: 'canvas_not_runnable',
+          detail: { reasons: diagnosis.reasons },
+        });
+        return context.json(
+          {
+            error: 'canvas_not_runnable',
+            reasons: diagnosis.reasons,
+            hint: '在画布上至少放两个带模型的节点并设好主控再运行；只想看流程可以传 allowDemoFallback: true 跑内置演示。',
+          },
+          422
+        );
+      }
+
+      resumePrepared = null;
+      canvasPrepared = { canvasPlan };
     }
 
-    const profilesToRun = canvasPlan?.profiles ?? liveProfiles;
-    const planSource: 'canvas' | 'builtin' = canvasPlan ? 'canvas' : 'builtin';
+    const canvasPlan = resumePrepared ? null : canvasPrepared!.canvasPlan;
+    const profilesToRun = resumePrepared ? resumePrepared.profiles : canvasPlan?.profiles ?? liveProfiles;
+    const planSource: 'canvas' | 'builtin' = resumePrepared ? 'canvas' : canvasPlan ? 'canvas' : 'builtin';
     runPlanSource.set(runId, planSource);
 
     /**
@@ -2777,16 +2923,17 @@ app.post('/api/commands', async (context) => {
         ?.model ?? ''
     );
     const orchestratorSlot = orchestratorModel ? resolveModelRoute(orchestratorModel).slot : null;
-    const routerPick =
-      orchestratorModel &&
-      isCheapModel(orchestratorModel) &&
-      orchestratorSlot &&
-      keyBySlot[orchestratorSlot]
+    const routerPick = resumePrepared
+      ? null
+      : orchestratorModel &&
+          isCheapModel(orchestratorModel) &&
+          orchestratorSlot &&
+          keyBySlot[orchestratorSlot]
         ? { slot: orchestratorSlot, model: orchestratorModel }
         : routerChoice(keyBySlot);
 
-    const basePlan = canvasPlan?.plan ?? liveRunPlan;
-    const baseRationale = routerPick
+    const basePlan = resumePrepared ? resumePrepared.plan : canvasPlan?.plan ?? liveRunPlan;
+    const baseRationale = !resumePrepared && routerPick
       ? `${basePlan.rationale ?? ''} 分派闸门：${routerPick.model}（只判定明显通过，拿不准交给完整评委）。`.trim()
       : basePlan.rationale;
 
@@ -2795,9 +2942,10 @@ app.post('/api/commands', async (context) => {
      * cheapest family that still has some, before the run starts rather than
      * failing halfway with a 429.
      */
-    const slotByProfile =
-      canvasPlan?.slotByProfile ??
-      new Map(profilesToRun.map((profile) => [profile.id, familyOf(profile.model)?.slot ?? 'relay']));
+    const slotByProfile = resumePrepared
+      ? resumePrepared.slotByProfile
+      : canvasPlan?.slotByProfile ??
+        new Map(profilesToRun.map((profile) => [profile.id, familyOf(profile.model)?.slot ?? 'relay']));
     const requestedStrategy = body?.payload?.strategy;
     const runStrategy =
       requestedStrategy === 'performance' || requestedStrategy === 'cost' || requestedStrategy === 'subscription'
@@ -2878,7 +3026,16 @@ app.post('/api/commands', async (context) => {
       },
     });
 
-    store.create(runId, planToRun.goal, runWorkspace, planSource);
+    store.create(runId, planToRun.goal, runWorkspace, planSource, {
+      resumedFrom: resumePrepared ? resumeOf : undefined,
+      resumeDepth: resumePrepared?.depth,
+      autoResume: resumePrepared ? resumePrepared.autoResume : autoResumeFlag,
+      profiles: profilesToRun,
+    });
+    if (resumePrepared) {
+      // 预注入上一轮已完成任务的产出：续跑任务的依赖解析直接取到上游。
+      store.seedOutputs(runId, resumePrepared.prevOutputs);
+    }
     const mandate: Mandate = {
       runId,
       actor: runActor,
@@ -2905,11 +3062,11 @@ app.post('/api/commands', async (context) => {
       'live-opus': keyBySlot.relay,
       'live-haiku': keyBySlot.relay,
     };
-    if (canvasPlan) {
-      for (const profile of canvasPlan.profiles) {
-        const slot = canvasPlan.slotByProfile.get(profile.id);
-        apiKeys[profile.id] = slot ? keyBySlot[slot] : relayKey;
-      }
+    // 两种路径（画布规划 / 断点续跑）都按「档案 → 槽位 → Key」装配，
+    // 续跑没有 canvasPlan 时同样拿得到自己的 Key。
+    for (const profile of profilesToRun) {
+      const slot = slotByProfile.get(profile.id);
+      apiKeys[profile.id] = slot ? keyBySlot[slot] : relayKey;
     }
     const controller = new AbortController();
     runAborts.set(runId, controller);
@@ -2965,6 +3122,8 @@ app.post('/api/commands', async (context) => {
       teamContext,
       signal: controller.signal,
       runId,
+      // 断点续跑：上一轮已完成任务的产出（也用于让调度器视为已完成）。
+      ...(resumePrepared ? { seedOutputs: resumePrepared.prevOutputs } : {}),
       // 只有 profile.webSearch === true 的节点才会被 ToolAdapter 包一层。
       search: webSearch.search,
       accept: createRoutedJudge({
@@ -3231,6 +3390,33 @@ app.post('/api/commands', async (context) => {
           });
         }
       })();
+
+      // 自动续跑（长期项目）：失败或中断且还有没产出的任务 → 排下一次续跑，
+      // 上限 2 轮，避免在注定失败的任务上无限烧钱。跨重启由启动补排负责。
+      const finishedRecord = store.get(runId);
+      if (finishedRecord?.autoResume && !finishedRecord.manualStop && event.status !== 'done') {
+        const outputsNow = snapshot?.outputs ?? {};
+        const pendingTasks = planToRun.subtasks.filter(
+          (task) => !String(outputsNow[task.id] ?? '').trim()
+        );
+        const depth = finishedRecord.resumeDepth ?? 0;
+        if (pendingTasks.length > 0 && depth < 2) {
+          audit.record({
+            actor: 'server',
+            action: 'run.auto_resume_scheduled',
+            target: runId,
+            detail: { depth: depth + 1, pending: pendingTasks.length },
+          });
+          scheduleAutoResume(runId);
+        } else if (pendingTasks.length > 0) {
+          audit.record({
+            actor: 'server',
+            action: 'run.auto_resume_exhausted',
+            target: runId,
+            detail: { depth, pending: pendingTasks.length },
+          });
+        }
+      }
     });
     void orchestrator.run(planToRun).catch(() => {
       if (activeLiveRunId === runId) activeLiveRunId = null;
@@ -3750,6 +3936,20 @@ function repairPendingEffects(): void {
 }
 
 repairPendingEffects();
+
+// 启动补排：被上次进程中断、且带自动续跑意图的运行，开机后自己接着跑。
+for (const runId of interruptedRuns) {
+  const record = store.get(runId);
+  if (record?.autoResume && (record.resumeDepth ?? 0) < 2) {
+    audit.record({
+      actor: 'server',
+      action: 'run.auto_resume_scheduled',
+      target: runId,
+      detail: { depth: (record.resumeDepth ?? 0) + 1, reason: 'boot_recovery' },
+    });
+    scheduleAutoResume(runId, 8000);
+  }
+}
 
 const port = Number(process.env.QIANSI_PORT ?? 8787);
 serve({ fetch: app.fetch, port, hostname: '127.0.0.1' }, (info) => {

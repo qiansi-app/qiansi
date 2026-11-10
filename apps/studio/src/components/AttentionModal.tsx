@@ -39,6 +39,33 @@ const timeAgo = (ts?: number) =>
 export function AttentionModal({ open, onClose }: AttentionModalProps) {
   const [data, setData] = useState<Attention | null>(null);
   const [error, setError] = useState('');
+  const [resuming, setResuming] = useState<string | null>(null);
+
+  const resume = async (runId?: string) => {
+    if (!runId) return;
+    setResuming(runId);
+    try {
+      const response = await fetch('/api/commands', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          commandId: `ui-resume-${runId}-${Date.now()}`,
+          type: 'run.start',
+          payload: { mode: 'live', resumeOf: runId, autoResume: true },
+        }),
+      });
+      const body = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      if (!response.ok || !body?.ok) {
+        setError(body?.error ?? `续跑失败：HTTP ${response.status}`);
+      } else {
+        onClose();
+      }
+    } catch {
+      setError('续跑请求失败');
+    } finally {
+      setResuming(null);
+    }
+  };
 
   const load = async () => {
     try {
@@ -117,6 +144,14 @@ export function AttentionModal({ open, onClose }: AttentionModalProps) {
                 <div key={item.runId} className="attention-item">
                   <b>{item.goal?.slice(0, 40) || item.runId?.slice(0, 8)}</b>
                   <span>{item.tasks?.length ?? 0} 个任务 · {timeAgo(item.at)}</span>
+                  <button
+                    className="keys-mini"
+                    disabled={resuming === item.runId}
+                    onClick={() => void resume(item.runId)}
+                    title="只跑未完成的任务，已完成的产出作为上游"
+                  >
+                    {resuming === item.runId ? '发起中…' : '续跑'}
+                  </button>
                 </div>
               ))}
             </section>
@@ -131,6 +166,14 @@ export function AttentionModal({ open, onClose }: AttentionModalProps) {
                 <div key={item.runId} className="attention-item">
                   <b>{item.goal?.slice(0, 40) || item.runId?.slice(0, 8)}</b>
                   <span>{timeAgo(item.at)} · 服务重启所致</span>
+                  <button
+                    className="keys-mini"
+                    disabled={resuming === item.runId}
+                    onClick={() => void resume(item.runId)}
+                    title="只跑未完成的任务，已完成的产出作为上游"
+                  >
+                    {resuming === item.runId ? '发起中…' : '续跑'}
+                  </button>
                 </div>
               ))}
             </section>

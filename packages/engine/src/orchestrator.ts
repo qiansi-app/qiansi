@@ -42,6 +42,11 @@ export interface OrchestratorOptions {
   accept?: (task: Subtask, output: string) => Promise<AcceptanceResult>;
   /** Return the chosen option id. Omit to auto-abort when a run stalls. */
   onChoice?: (card: ChoiceCard) => Promise<string>;
+  /**
+   * 断点续跑：上一轮已完成任务的产出。既作为本轮的上游上下文注入，
+   * 也让调度器把这些任务视为已完成（计划里不会再有它们）。
+   */
+  seedOutputs?: Record<string, string>;
 }
 
 interface TaskOutcome {
@@ -91,8 +96,8 @@ export class Orchestrator {
     this.budgetExceeded = false;
     const concurrency = Math.max(1, this.options.concurrency ?? 3);
     const maxRetries = Math.max(0, this.options.maxRetries ?? 2);
-    const outputs: Record<string, string> = {};
-    const completed = new Set<string>();
+    const outputs: Record<string, string> = { ...(this.options.seedOutputs ?? {}) };
+    const completed = new Set<string>(Object.keys(outputs));
     const failed = new Set<string>();
 
     const pending = new Map<string, Subtask>();
