@@ -2,6 +2,7 @@ import { useState } from 'react';
 import {
   Boxes,
   Crown,
+  Globe,
   ListChecks,
   MessageSquare,
   RotateCcw,
@@ -37,7 +38,12 @@ interface ChatDrawerProps {
   onEffortChange: (effort: EffortLevel) => void;
   onModelChange: (connectionId: string, model: string) => void;
   onOpenModels: () => void;
-  onIdentityChange?: (patch: { name?: string; role?: string; style?: string }) => void;
+  onIdentityChange?: (patch: {
+    name?: string;
+    role?: string;
+    style?: string;
+    webSearch?: boolean;
+  }) => void;
   onMakeOrchestrator?: () => void;
   onRerun: () => void;
   onDelete?: () => void;
@@ -202,6 +208,15 @@ export function ChatDrawer({
                     </option>
                   ))}
                 </select>
+              )}
+              {node && (
+                <button
+                  className={`mini-btn ${node.webSearch ? 'on' : ''}`}
+                  onClick={() => onIdentityChange?.({ webSearch: !node.webSearch })}
+                  title="服务端联网搜索：模型调用 web_search，结果由 Qiansi 服务端抓取"
+                >
+                  <Globe size={12} /> {node.webSearch ? '联网' : '离线'}
+                </button>
               )}
               {node && (
                 <select
@@ -381,6 +396,25 @@ export function ChatDrawer({
           <div className="log-row">
             <time>provider</time>
             <div>{node.provider}</div>
+          </div>
+          <div className="log-row">
+            <time>联网</time>
+            <div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={node.webSearch === true}
+                  onChange={(event) => onIdentityChange?.({ webSearch: event.target.checked })}
+                />
+                <span>
+                  {node.webSearch ? '已开启' : '已关闭'} · 服务端 web_search 工具
+                </span>
+              </label>
+              <div style={{ marginTop: 4, color: 'var(--muted-2)' }}>
+                开启后，运行和对话时模型可自行发起最多 2 轮搜索；搜索由服务端执行，
+                模型不需要自带联网能力。默认关闭，因为它会访问外部网络。
+              </div>
+            </div>
           </div>
           <div className="log-row">
             <time>effort</time>

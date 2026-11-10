@@ -2480,6 +2480,18 @@ export function App() {
       appendStream(payload.event.nodeId, payload.event.taskId, payload.event.text);
     });
 
+    on('search.used', (event) => {
+      const payload = JSON.parse(event.data) as {
+        event: { nodeId: string; taskId: string; query: string; hits: number };
+      };
+      patchNode(payload.event.nodeId, { metric: `联网检索 · ${payload.event.hits} 条` });
+      push(
+        payload.event.nodeId,
+        'assistant',
+        `联网检索「${payload.event.query}」：${payload.event.hits} 条结果已交给模型。`
+      );
+    });
+
     on('task.acceptance', (event) => {
       const payload = JSON.parse(event.data) as {
         event: {
@@ -2803,11 +2815,20 @@ export function App() {
           model: node?.model,
           messages: history,
           maxTokens: 900,
+          webSearch: node?.webSearch === true,
         }),
       });
-      const data = (await response.json()) as { ok?: boolean; text?: string; error?: string };
+      const data = (await response.json()) as {
+        ok?: boolean;
+        text?: string;
+        error?: string;
+        searches?: Array<{ query: string; hits: number }>;
+      };
       if (!response.ok || !data.ok) throw new Error(data.error ?? 'chat_failed');
-      push(nodeId, 'assistant', data.text?.trim() || '（模型没有返回内容）');
+      const searched = data.searches?.length
+        ? `\n\n（联网检索：${data.searches.map((item) => `${item.query}（${item.hits} 条）`).join('；')}）`
+        : '';
+      push(nodeId, 'assistant', (data.text?.trim() || '（模型没有返回内容）') + searched);
       patchNode(nodeId, { status: 'idle', metric: 'ready' });
     } catch (error) {
       push(

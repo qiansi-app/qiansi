@@ -623,6 +623,12 @@ textarea {
   border-color: #2f3a47;
 }
 
+.mini-btn.on {
+  color: #8ee6c0;
+  border-color: #2e6f57;
+  background: rgba(46, 111, 87, 0.22);
+}
+
 .empty {
   color: var(--muted-2);
   text-align: center;

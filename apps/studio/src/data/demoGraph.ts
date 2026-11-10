@@ -48,6 +48,8 @@ export interface AgentNodeData extends Record<string, unknown> {
   status: NodeStatus;
   kind: NodeKind;
   accent: string;
+  /** 该节点运行/对话时是否挂服务端 web_search 工具。 */
+  webSearch?: boolean;
   metric?: string;
   connectionId?: string;
   protocol?: string;
