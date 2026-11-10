@@ -188,11 +188,37 @@ Live 运行限制：每个任务 240 秒超时、输出上限 12288 token、最�
   "baseUrl": "https://api.deepseek.com/v1",
   "model": "deepseek-chat",
   "messages": [{ "role": "user", "content": "Reply with exactly: ok" }],
-  "maxTokens": 800
+  "maxTokens": 800,
+  "webSearch": false
 }
 ```
 
-Key 解析顺序：请求体（本次不落盘）→ 保险库 `connectionId` → 按 baseUrl/连接推导的环境变量。响应 `{ ok, text, usage }`；失败返回 502 与脱敏后的错误。
+Key 解析顺序：请求体（本次不落盘）→ 保险库 `connectionId` → 按 baseUrl/连接推导的环境变量。响应 `{ ok, text, usage, searches? }`；失败返回 502 与脱敏后的错误。
+
+`webSearch: true` 时给这次对话挂上服务端 `web_search` 工具：模型决定搜什么，服务端执行并把结果作为工具消息交回模型，最多 2 轮搜索，随后强制一轮不带工具的作答。响应里的 `searches` 是实际执行的查询与命中数，供界面展示。搜索 provider 的选择、Key 与限制见 [web-search.md](web-search.md)。
+
+### `GET /api/search/status`
+
+不返回 Key，只说明当前会走哪家 provider：
+
+```json
+{
+  "ok": true,
+  "provider": { "id": "zhipu", "label": "智谱 Web 搜索", "billing": "subscription", "requiresKey": true },
+  "configured": [{ "id": "zhipu", "ready": true }, { "id": "html", "ready": true }],
+  "cachedQueries": 0
+}
+```
+
+### `POST /api/search`
+
+直接执行一次联网搜索，供画布节点或外部 agent 先把结果当上下文：
+
+```json
+{ "query": "CNNIC 第57次 中国互联网络发展状况统计报告", "maxResults": 6 }
+```
+
+返回 `{ ok, query, hits: [{ title, url, snippet, source?, publishedAt? }], provider }`。结果缓存 10 分钟。
 
 ### `POST /api/discuss`
 
@@ -253,6 +279,8 @@ OpenAI 兼容模型列表（需 Bearer token）：`deepseek-chat / minimax / cla
 
 OpenAI 兼容调用，支持 `stream: true`（SSE）与非流式。模型由服务端映射到保险库中的连接，请求里不需要带 Key。
 
+可选 `"web_search": true`（或 `qiansi_web_search`）给这次请求挂服务端搜索工具，行为与 `/api/chat` 的 `webSearch` 相同；默认关闭。
+
 ### `GET /api/runs/:id/snapshot`
 
 返回 `{ runId, status, goal, plan, outputs, lastSeq, startedAt, finishedAt }`。重连时先读它，再接收事件。
@@ -283,6 +311,9 @@ data: {"seq":4,"ts":...,"event":{"type":"task.started","taskId":"T1","nodeId":"r
 | `DEEPSEEK_API_KEY` | DeepSeek |
 | `MINIMAX_API_KEY` | MiniMax |
 | `MOONSHOT_API_KEY` | Kimi |
+| `QIANSI_SEARCH_PROVIDER` | 强制搜索 provider：`zhipu` / `bocha` / `tavily` / `html`（默认订阅优先） |
+| `QIANSI_SEARCH_ENGINE` | 智谱搜索档位，默认 `search_std` |
+| `BOCHA_API_KEY` / `TAVILY_API_KEY` | 可选的按量搜索 provider |
 
 ## 当前限制
 

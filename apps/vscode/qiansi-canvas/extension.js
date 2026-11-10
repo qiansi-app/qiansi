@@ -124,13 +124,28 @@ function startEmbedded() {
  * previous embedded boot); otherwise start our own. The promise is cached so a
  * burst of callers (sidebar + status bar + URI) share one boot.
  */
+let resolvedPort = null;
+
 function ensureServer(fresh = false) {
   if (fresh) ensurePromise = null;
+  const filePort = readPort();
+  // The port file is the source of truth: when it names a different server than
+  // the one we cached (standalone app started after our embedded boot, or the
+  // other way round), drop the cache instead of talking to a stale instance
+  // that may lack newer routes.
+  if (ensurePromise && resolvedPort !== null && filePort !== resolvedPort) {
+    ensurePromise = null;
+  }
   if (!ensurePromise) {
     ensurePromise = (async () => {
       const existing = readPort();
-      if (await probe(existing)) return `http://127.0.0.1:${existing}`;
-      return startEmbedded();
+      if (await probe(existing)) {
+        resolvedPort = existing;
+        return `http://127.0.0.1:${existing}`;
+      }
+      const started = await startEmbedded();
+      resolvedPort = started ? Number(new URL(started).port) : null;
+      return started;
     })();
     ensurePromise.catch(() => {
       ensurePromise = null;

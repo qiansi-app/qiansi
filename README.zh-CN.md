@@ -87,6 +87,7 @@ Codex 用 `codex mcp add qiansi -- node <repo>\packages\mcp\server.mjs`，或把
 - [命名决策 0002](docs/decisions/0002-naming.md) — 已确认的撞名与发布前查重清单
 - [连接、执行与保密](docs/connections-and-security.md) — 模型身份可编辑、Key 探测、沙箱工具、连接稳定性、信息保密
 - [本地服务 API](docs/server-api.md) — 端点、认证、SSE、探测行为
+- [联网搜索工具](docs/web-search.md) — 给任意模型挂服务端 `web_search`，provider 顺序与限制
 - [桌面版](docs/desktop.md) — Electron 壳、便携打包、开机自启与限制
 - [接入主流 Agent](docs/agent-integration.md) — MCP 工具与资源、画布 API、Claude Code 插件、Codex 接入、审批中继
 - [定位与竞品](docs/positioning.md) — 六种用户需求对应的操作模式、竞品对照、我们满足不了的、差距收敛方案

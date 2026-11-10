@@ -57,7 +57,8 @@ claude mcp add qiansi -- node <repo>\packages\mcp\server.mjs
 | 工具 | 作用 |
 |---|---|
 | `list_models` | 列出 `deepseek-chat / minimax / claude-sonnet / claude-opus` |
-| `call_model` | 调用一个下属模型，参数 `{model, prompt, system?, max_tokens?}` |
+| `call_model` | 调用一个下属模型，参数 `{model, prompt, system?, max_tokens?, web_search?}`；`web_search: true` 时给该模型挂服务端搜索工具 |
+| `web_search` | 直接联网搜索，参数 `{query, max_results?}`，返回标题/链接/摘要；provider 订阅优先 |
 | `get_usage` | 返回网关 token 用量与待审批数量 |
 | `request_approval` | 请求人类批准危险动作；阻塞到批准/拒绝/超时 |
 | `describe_canvas` | 画布文本摘要（agent 的首选，省 token） |

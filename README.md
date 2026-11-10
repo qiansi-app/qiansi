@@ -70,6 +70,7 @@ The model manager tests real connections through the local server. The Run butto
 - [ADR 0002: naming](docs/decisions/0002-naming.md) — confirmed collisions; clearance checklist
 - [Connections & security](docs/connections-and-security.md) — editable model identity, key probing, sandboxed tools, connection stability, confidentiality
 - [Local server API](docs/server-api.md) — endpoints, auth, SSE, probe behaviour
+- [Web search tool](docs/web-search.md) — server-side `web_search` for any model, provider order, limits
 - [Desktop app](docs/desktop.md) — Electron shell, portable build, autostart, limits
 - [Agent integration](docs/agent-integration.md) — MCP tools, OpenAI-compatible gateway, approval relay, budgets
 - [ADR 0003: desktop](docs/decisions/0003-desktop.md) — Electron + portable fallback

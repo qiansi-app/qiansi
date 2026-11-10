@@ -210,7 +210,7 @@ const tools = [
   {
     name: 'call_model',
     description:
-      'Call a subordinate model through the Qiansi gateway (OpenAI-compatible). Use this to delegate work to DeepSeek, MiniMax or the Claude relay.',
+      'Call a subordinate model through the Qiansi gateway (OpenAI-compatible). Use this to delegate work to DeepSeek, MiniMax or the Claude relay. Set web_search:true to give that model the server-side web_search tool.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -219,8 +219,25 @@ const tools = [
         system: { type: 'string', description: 'Optional system instruction' },
         purpose: { type: 'string', description: 'Short label for the canvas, e.g. "写初稿"' },
         max_tokens: { type: 'number', description: 'Optional output cap' },
+        web_search: {
+          type: 'boolean',
+          description: 'Give this call the server-side web_search tool (default false)',
+        },
       },
       required: ['model', 'prompt'],
+    },
+  },
+  {
+    name: 'web_search',
+    description:
+      'Search the live web through the Qiansi server and return ranked results (title, URL, snippet). Use when the answer depends on current or externally verifiable facts. Provider is subscription-first (GLM), with a keyless HTML fallback.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Focused search query' },
+        max_results: { type: 'number', description: '1-10, default 6' },
+      },
+      required: ['query'],
     },
   },
   {
@@ -618,6 +635,7 @@ async function callTool(name, args = {}) {
         messages,
         max_tokens: args.max_tokens ? Number(args.max_tokens) : 1024,
         stream: false,
+        web_search: args.web_search === true,
       }),
     });
     return {
@@ -625,6 +643,17 @@ async function callTool(name, args = {}) {
       text: data.choices?.[0]?.message?.content ?? '',
       usage: data.usage,
     };
+  }
+
+  if (name === 'web_search') {
+    const data = await request('/api/search', {
+      method: 'POST',
+      body: JSON.stringify({
+        query: String(args.query ?? ''),
+        maxResults: args.max_results ? Number(args.max_results) : 6,
+      }),
+    });
+    return data;
   }
 
   if (name === 'get_usage') {
