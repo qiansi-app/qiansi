@@ -25,9 +25,9 @@ function readPort() {
   return Number(process.env.QIANSI_PORT ?? 8787);
 }
 
-async function healthy(port) {
+async function probe(port, timeoutMs) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 1500);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
       signal: controller.signal,
@@ -40,20 +40,49 @@ async function healthy(port) {
   }
 }
 
+/**
+ * DSH 启动时事件循环被插件加载挤满，1.5 秒的探测会误判成「服务没起」。
+ * 给一次更宽的重试，仍然失败才下结论。
+ */
+async function healthy(port) {
+  if (await probe(port, 4000)) return true;
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  return probe(port, 6000);
+}
+
 export const name = 'qiansi-dsh';
+
+/**
+ * 日志走 ctx.logger；但宿主没有日志服务时（或换了 API），
+ * 状态插件不能因此变成哑巴——退回 stderr，不污染 headless 的 stdout。
+ */
+function report(ctx, level, message) {
+  // QIANSI_DSH_DEBUG=1 时同时打到 stderr，排查「插件到底有没有起来」用。
+  if (process.env.QIANSI_DSH_DEBUG === '1') console.error(message);
+  const logger = ctx?.logger;
+  if (logger && typeof logger[level] === 'function') {
+    logger[level](message);
+    return;
+  }
+  console.error(message);
+}
 
 export async function apply(ctx, config = {}) {
   const port = readPort();
   const up = await healthy(port);
   if (up) {
-    ctx.logger?.info?.(
+    report(
+      ctx,
+      'info',
       `[qiansi] canvas reachable at http://127.0.0.1:${port} — tools are mcp__${config.serverName ?? 'qiansi'}__*`
     );
   } else {
-    ctx.logger?.warn?.(
-      `[qiansi] canvas not reachable at http://127.0.0.1:${port}. ` +
-        'Start the Qiansi desktop app (or the VS Code canvas panel) first; ' +
-        'the MCP bridge will connect on the next host restart.'
+    report(
+      ctx,
+      'warn',
+      `[qiansi] 画布服务没有应答 http://127.0.0.1:${port}。` +
+        '先启动牵丝（桌面版 / VS Code 画布面板 / npm run server:start），再重启 DSH；' +
+        '服务没起时 mcp__qiansi__* 工具不会注册。'
     );
   }
   // The plugin holds no resources of its own; the MCP child is owned by

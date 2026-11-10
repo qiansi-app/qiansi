@@ -3,7 +3,8 @@
  * Prepares the Qiansi DSH bundle.
  *
  *   node dsh/qiansi/install.mjs                    # generate cordis.patch.yml
- *   node dsh/qiansi/install.mjs --profile qiansi   # ...and install into a DSH profile
+ *   node dsh/qiansi/install.mjs --profile qiansi --template headless
+ *                                                  # create a runnable profile and install into it
  *   node dsh/qiansi/install.mjs --verify qiansi    # compose the profile and show our entries
  *
  * The patch is generated rather than shipped because DSH evaluates `args` at
@@ -42,8 +43,8 @@ writeFileSync(patchPath, patch, 'utf8');
 console.log(`patch → ${patchPath}`);
 console.log(`  entry: ${entry}`);
 
-const dshHome = process.env.DSH_HOME ?? '';
 const profile = flag('profile');
+const templateName = flag('template');
 
 function run(command, commandArgs, options = {}) {
   const result = spawnSync(command, commandArgs, {
@@ -54,24 +55,47 @@ function run(command, commandArgs, options = {}) {
   return result.status ?? 1;
 }
 
-// 3. Optionally install into a profile. `dsh plugin add link:` runs pnpm and
-//    pulls @deepseek-ai/dsh-mcp-client from the registry.
+// 3. Optionally install into a profile.
+//    `dsh plugin add` initializes a base-only profile, which has no app and
+//    therefore cannot boot. `--template <headless|web|tui>` first materializes
+//    the profile from that shipped template so the result is actually runnable.
+if (profile && templateName) {
+  console.log(`\ninitializing profile "${profile}" from template "${templateName}"…`);
+  const init = spawnSync(
+    'dsh',
+    ['--profile', profile, '--from-default-profile', templateName, '--dump-config'],
+    { encoding: 'utf8', shell: process.platform === 'win32', maxBuffer: 32 * 1024 * 1024 }
+  );
+  if (init.status !== 0) {
+    console.error(init.stderr?.trim() || `template "${templateName}" not available`);
+    process.exit(init.status ?? 1);
+  }
+}
+
 if (profile) {
   console.log(`\ninstalling into profile "${profile}"…`);
-  const code = run('dsh', ['plugin', '--profile', profile, 'add', `link:${here}`]);
+  let code = run('dsh', ['plugin', '--profile', profile, 'add', `link:${here}`]);
   if (code !== 0) {
     console.error('install failed; check that `dsh` is on PATH and the registry is reachable');
+    process.exit(code);
+  }
+  // 桥接包没有 dsh.bundle，不会成为 profile 层；必须显式装进 profile，
+  // 否则补丁里引用的 '@deepseek-ai/dsh-mcp-client' 解析不到。
+  code = run('dsh', ['plugin', '--profile', profile, 'add', '@deepseek-ai/dsh-mcp-client@0.2.2-rc.1']);
+  if (code !== 0) {
+    console.error('mcp bridge install failed; the MCP tools will not register without it');
     process.exit(code);
   }
 }
 
 // 4. Optionally verify: dump the composed profile and grep for our entries.
+//    不加 --patch —— 装进 profile 后，bundle 自己的 cordis.patch.yml 就是层。
 const verify = flag('verify') ?? profile;
 if (verify) {
-  console.log(`\ncomposing profile "${verify}" with the patch…`);
+  console.log(`\ncomposing profile "${verify}"…`);
   const result = spawnSync(
     'dsh',
-    ['--profile', verify, '--patch', patchPath, '--dump-config'],
+    ['--profile', verify, '--dump-config'],
     { encoding: 'utf8', shell: process.platform === 'win32', maxBuffer: 32 * 1024 * 1024 }
   );
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
@@ -86,5 +110,5 @@ if (verify) {
 }
 
 console.log(`\nnext:
-  dsh plugin --profile <name> add "link:${here}"
-  dsh --profile <name>${dshHome ? '' : ''}   # boot; tools appear as mcp__qiansi__*`);
+  dsh --profile ${profile ?? '<name>'}            # boot; mcp__qiansi__* appear once the canvas service is up
+  QIANSI_DSH_DEBUG=1 dsh --profile ${profile ?? '<name>'}   # same, with our status line on stderr`);
