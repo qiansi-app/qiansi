@@ -1282,13 +1282,15 @@ export class SelfOptEngine {
       }
 
       // 校验：改了代码就必须还能通过既定检查。
+      // 修错模式最常见的证据就是失败测试，所以 test 必须参与校验——
+      // 之前为了省时间把它过滤掉了，等于改完不验。
       const verifyStage = this.stage(session, 'verify');
       verifyStage.status = 'running';
       verifyStage.startedAt ??= Date.now();
       const checks = survey.checks.length
         ? survey.checks.map((check) => check.cmd)
         : ['npx tsc --noEmit'];
-      for (const cmd of checks.filter((item) => !/npm test/.test(item)).slice(0, 2)) {
+      for (const cmd of checks.slice(0, 3)) {
         const check = await this.runShell(cmd, DEFAULT_TIMEOUT, session.rootDir);
         if (check.code !== 0) {
           verifyStage.status = 'failed';
