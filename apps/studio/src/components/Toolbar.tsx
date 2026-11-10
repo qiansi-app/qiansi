@@ -24,6 +24,7 @@ import {
   Square,
   Target,
   Wand2,
+  Inbox,
 } from 'lucide-react';
 import type { RegionMode } from '../data/demoGraph';
 import { WorkspaceSwitcher } from './WorkspaceSwitcher';
@@ -54,6 +55,8 @@ interface ToolbarProps {
   onUpload: () => void;
   onAddLibrary: () => void;
   onOpenKeys: () => void;
+  attentionCount: number;
+  onOpenAttention: () => void;
   onOpenHandoff: () => void;
   onAutoLayout: () => void;
   layouting: boolean;
@@ -115,6 +118,8 @@ export function Toolbar({
   onUpload,
   onAddLibrary,
   onOpenKeys,
+  attentionCount,
+  onOpenAttention,
   onOpenHandoff,
   onAutoLayout,
   layouting,
@@ -257,7 +262,9 @@ export function Toolbar({
             aria-expanded={menuOpen}
           >
             <MoreHorizontal size={17} />
-            {(approvalCount > 0 || externalCount > 0) && <span className="tool-dot" />}
+            {(approvalCount > 0 || externalCount > 0 || attentionCount > 0) && (
+              <span className="tool-dot" />
+            )}
           </button>
 
           {menuOpen && (
@@ -277,6 +284,13 @@ export function Toolbar({
               />
 
               <div className="toolbar-menu-section">面板</div>
+              <MenuItem
+                icon={Inbox}
+                label="需要人工"
+                hint="审批、需确认、失败与中断"
+                badge={attentionCount}
+                onClick={menuAction(onOpenAttention)}
+              />
               <MenuItem
                 icon={Boxes}
                 label="模型连接"

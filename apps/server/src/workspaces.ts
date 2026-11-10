@@ -18,6 +18,8 @@ export interface WorkspaceMeta {
   name: string;
   createdAt: number;
   updatedAt: number;
+  /** 工作区公共指令：注入本画布每个 worker 的系统提示（借鉴 DSH 的 team sections）。 */
+  instructions?: string;
 }
 
 interface WorkspaceFile {
@@ -211,6 +213,18 @@ export class WorkspaceStore {
     const checked = checkWorkspaceName(name);
     if (!meta || !checked.ok) return undefined;
     meta.name = checked.name;
+    meta.updatedAt = Date.now();
+    this.persist();
+    return meta;
+  }
+
+  setInstructions(id: string, instructions: string): WorkspaceMeta | undefined {
+    this.refreshIfChanged();
+    const meta = this.get(id);
+    if (!meta) return undefined;
+    const value = String(instructions ?? '').trim().slice(0, 2000);
+    if (value.includes('�')) return undefined;
+    meta.instructions = value || undefined;
     meta.updatedAt = Date.now();
     this.persist();
     return meta;

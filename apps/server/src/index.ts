@@ -2128,21 +2128,35 @@ app.post('/api/workspaces', async (context) => {
 
 app.patch('/api/workspaces/:id', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
-  const raw = String(body?.name ?? '');
-  const checked = checkWorkspaceName(raw);
-  if (!checked.ok) {
-    return context.json(
-      {
-        ok: false,
-        error: checked.reason === 'encoding' ? 'name_encoding' : 'name_empty',
-        hint: NAME_ENCODING_HINT,
-      },
-      400
-    );
+  // 只改公共指令时允许不带 name。
+  const wantsName = body && typeof body.name === 'string' && body.name.trim().length > 0;
+  if (wantsName) {
+    const raw = String(body.name);
+    const checked = checkWorkspaceName(raw);
+    if (!checked.ok) {
+      return context.json(
+        {
+          ok: false,
+          error: checked.reason === 'encoding' ? 'name_encoding' : 'name_empty',
+          hint: NAME_ENCODING_HINT,
+        },
+        400
+      );
+    }
+    const renamed = workspaces.rename(context.req.param('id'), checked.name);
+    if (!renamed) return context.json({ ok: false, error: 'workspace_not_found' }, 404);
   }
-  const meta = workspaces.rename(context.req.param('id'), checked.name);
+  if (body && typeof body.instructions === 'string') {
+    const updated = workspaces.setInstructions(context.req.param('id'), body.instructions);
+    if (!updated) return context.json({ ok: false, error: 'workspace_not_found' }, 404);
+  }
+  const meta = workspaces.get(context.req.param('id'));
   if (!meta) return context.json({ ok: false, error: 'workspace_not_found' }, 404);
-  audit.record({ actor: actorOf(context), action: 'workspace.rename', target: meta.id });
+  audit.record({
+    actor: actorOf(context),
+    action: wantsName ? 'workspace.rename' : 'workspace.instructions',
+    target: meta.id,
+  });
   return context.json({ ok: true, workspace: meta });
 });
 
@@ -2380,6 +2394,77 @@ app.get('/api/approvals', (context) =>
   })
 );
 
+/**
+ * 需要人工的统一收件箱（借鉴 DSH 的 notices/面板哲学：面板先列需要人的事）。
+ * 聚合四类信号：待审批、评委标记需人工、失败的任务、被中断的运行。
+ * 健康状态不占空间——没有待处理时就是空列表。
+ */
+app.get('/api/attention', (context) => {
+  const wsId = workspaceOf(context);
+  const pendingApprovals = [...approvals.values()]
+    .filter((item) => item.status === 'pending')
+    .sort((a, b) => b.createdAt - a.createdAt);
+
+  const judgeReviews: Array<{
+    runId: string;
+    goal: string;
+    taskId: string;
+    reasons: string[];
+    at: number;
+  }> = [];
+  const failedRuns: Array<{ runId: string; goal: string; at: number; tasks: string[] }> = [];
+  const interrupted: Array<{ runId: string; goal: string; at: number; tasks: string[] }> = [];
+  const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+
+  for (const item of store.list()) {
+    if (item.startedAt < dayAgo) continue;
+    const record = store.get(item.runId);
+    if (!record) continue;
+    if ((record.workspaceId ?? 'main') !== wsId) continue;
+    const tasks = (record.plan?.subtasks ?? []).map((task) => task.id);
+    if (record.status === 'failed') {
+      failedRuns.push({ runId: record.runId, goal: record.goal, at: record.finishedAt ?? 0, tasks });
+      continue;
+    }
+    if (record.status === 'aborted') {
+      interrupted.push({ runId: record.runId, goal: record.goal, at: record.finishedAt ?? 0, tasks });
+      continue;
+    }
+    for (const envelope of record.events) {
+      const event = envelope.event as {
+        type?: string;
+        taskId?: string;
+        result?: { needsHuman?: boolean; reasons?: string[] };
+      };
+      if (event.type !== 'task.acceptance' || !event.result?.needsHuman) continue;
+      judgeReviews.push({
+        runId: record.runId,
+        goal: record.goal,
+        taskId: String(event.taskId ?? ''),
+        reasons: (event.result.reasons ?? []).slice(0, 2),
+        at: envelope.ts,
+      });
+    }
+  }
+
+  const total =
+    pendingApprovals.length + judgeReviews.length + failedRuns.length + interrupted.length;
+  return context.json({
+    ok: true,
+    total,
+    approvals: pendingApprovals.slice(0, 10).map((item) => ({
+      id: item.id,
+      action: item.action,
+      risk: item.risk,
+      costEstimate: item.costEstimate,
+      createdAt: item.createdAt,
+    })),
+    judgeReviews: judgeReviews.slice(-10).reverse(),
+    failedRuns: failedRuns.slice(-10).reverse(),
+    interrupted: interrupted.slice(-10).reverse(),
+  });
+});
+
 app.get('/api/approvals/:id', (context) => {
   const record = approvals.get(context.req.param('id'));
   if (!record) return context.json({ error: 'not_found' }, 404);
@@ -2546,17 +2631,25 @@ app.post('/api/commands', async (context) => {
   const team = Array.isArray(body?.payload?.team)
     ? (body.payload.team as Array<Record<string, unknown>>).slice(0, 20)
     : [];
-  const teamContext = team
-    .filter((member) => member && member.name)
-    .map(
-      (member) =>
-        `- ${member.id === orchestratorId ? '[主控] ' : ''}${String(member.name)} (${String(
-          member.role ?? ''
-        )}): ${String(member.provider ?? '')}/${String(member.model ?? '')}, effort ${String(
-          member.effort ?? ''
-        )}`
-    )
-    .join('\n');
+  const teamContext = [
+    team
+      .filter((member) => member && member.name)
+      .map(
+        (member) =>
+          `- ${member.id === orchestratorId ? '[主控] ' : ''}${String(member.name)} (${String(
+            member.role ?? ''
+          )}): ${String(member.provider ?? '')}/${String(member.model ?? '')}, effort ${String(
+            member.effort ?? ''
+          )}`
+      )
+      .join('\n'),
+    // 工作区公共指令（借鉴 DSH 的 team sections）：注入每个 worker 的系统提示。
+    workspaces.get(workspaceOf(context))?.instructions
+      ? `工作区公共指令（必须遵守）：\n${workspaces.get(workspaceOf(context))?.instructions}`
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 
   if (mode === 'live') {
     const requestedGoal =

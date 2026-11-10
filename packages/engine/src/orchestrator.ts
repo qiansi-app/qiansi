@@ -49,6 +49,23 @@ interface TaskOutcome {
   output: string;
 }
 
+/**
+ * 上游输出修剪器（借鉴 dsh 的 tool-result-pruner：阈值 8192 / 留头 4096 /
+ * 留尾 1024）。深链条会把前几轮的全文一路灌进第 N 个任务的提示词——token
+ * 翻倍还稀释注意力。超阈值只留头尾，中间以省略标记衔接；结论常在结尾，
+ * 所以尾部保留多于头的四分之一。
+ */
+export function pruneUpstream(
+  text: string,
+  thresholdChars = 8192,
+  headChars = 4096,
+  tailChars = 1024
+): string {
+  if (text.length <= thresholdChars) return text;
+  const omitted = text.length - headChars - tailChars;
+  return `${text.slice(0, headChars)}\n…（中间省略 ${omitted} 字，原文共 ${text.length} 字）…\n${text.slice(-tailChars)}`;
+}
+
 export class Orchestrator {
   private readonly listeners = new Set<(event: RunEvent) => void>();
   private readonly usage: UsageSnapshot = { total: 0, byModel: {} };
@@ -362,7 +379,7 @@ export class Orchestrator {
       const style = styleById(task.style);
       const upstream = Object.entries(dependencyOutputs)
         .filter(([, value]) => value.trim().length > 0)
-        .map(([id, value]) => `### ${id}\n${value}`)
+        .map(([id, value]) => `### ${id}\n${pruneUpstream(value)}`)
         .join('\n\n');
 
       const messages = [

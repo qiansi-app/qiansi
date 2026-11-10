@@ -16,6 +16,7 @@ import { DiscussionModal } from './components/DiscussionModal';
 import { ModelEditor } from './components/ModelEditor';
 import { NodeInspector } from './components/NodeInspector';
 import { ApprovalsModal } from './components/ApprovalsModal';
+import { AttentionModal } from './components/AttentionModal';
 import { KeysModal } from './components/KeysModal';
 import { HandoffModal } from './components/HandoffModal';
 import { ArtifactModal } from './components/ArtifactModal';
@@ -134,6 +135,8 @@ export function App() {
   const [reportOpen, setReportOpen] = useState(false);
   const [approvalsOpen, setApprovalsOpen] = useState(false);
   const [keysOpen, setKeysOpen] = useState(false);
+  const [attentionOpen, setAttentionOpen] = useState(false);
+  const [attentionCount, setAttentionCount] = useState(0);
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState(0);
   const [artifactTaskId, setArtifactTaskId] = useState<string | null>(null);
@@ -248,6 +251,28 @@ export function App() {
   useEffect(() => {
     runningRef.current = running;
   }, [running]);
+
+  /** 需要人工的聚合计数：审批 + 需确认 + 失败 + 中断。轻量端点，15 秒一轮。 */
+  useEffect(() => {
+    let stopped = false;
+    const poll = async () => {
+      if (stopped || document.hidden) return;
+      try {
+        const response = await fetch('/api/attention');
+        if (!response.ok) return;
+        const data = (await response.json()) as { total?: number };
+        setAttentionCount(data.total ?? 0);
+      } catch {
+        // 服务重启中：下一轮再试
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 15000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -3052,6 +3077,8 @@ export function App() {
         onUpload={() => fileInputRef.current?.click()}
         onAddLibrary={addLibrary}
         onOpenKeys={() => setKeysOpen(true)}
+        attentionCount={attentionCount}
+        onOpenAttention={() => setAttentionOpen(true)}
         onOpenHandoff={() => setHandoffOpen(true)}
         onAutoLayout={() => void autoLayout()}
         layouting={layouting}
@@ -3260,6 +3287,7 @@ export function App() {
       />
 
       <ApprovalsModal open={approvalsOpen} onClose={() => setApprovalsOpen(false)} />
+      <AttentionModal open={attentionOpen} onClose={() => setAttentionOpen(false)} />
       <KeysModal open={keysOpen} onClose={() => setKeysOpen(false)} />
       <HandoffModal open={handoffOpen} onClose={() => setHandoffOpen(false)} />
 
