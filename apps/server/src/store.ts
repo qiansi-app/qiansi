@@ -142,6 +142,11 @@ export class RunStore {
       record.usage.total = event.runTotal;
     }
     if (event.type === 'run.finished') {
+      // 第一个终态为准：优雅停机先写 aborted， orchestrator 收尾可能再报一次
+      // failed/aborted——不得覆盖，否则「人为停止」会被误记成失败。
+      if (record.finishedAt) {
+        return;
+      }
       record.status = event.status;
       record.finishedAt = Date.now();
       this.persist(record);

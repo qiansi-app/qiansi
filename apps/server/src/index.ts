@@ -59,6 +59,7 @@ import {
 } from './model-catalog.js';
 import { PolicyStore, scopeForRequest, type Mandate } from './policy.js';
 import { checkWorkspaceName, WorkspaceStore } from './workspaces.js';
+import { saveRunDeliverables } from './deliverables.js';
 import { QuotaStore } from './quota.js';
 import { substituteExhausted } from './quota-plan.js';
 import { orderByStrategy, performanceOf } from './routing.js';
@@ -703,6 +704,27 @@ app.put('/api/policy', async (context) => {
  * told to stop" from "it died", and leaves it stopped instead of resurrecting
  * something a person deliberately turned off.
  */
+/**
+ * Graceful shutdown (DSH 提案 P6): cancel in-flight runs first, flush the
+ * ledgers, then exit. A hard exit mid-run used to orphan a `running` record and
+ * lose the quota bookkeeping for the whole day.
+ */
+async function gracefulShutdown(reason: string): Promise<void> {
+  try {
+    audit.record({ actor: 'server', action: 'server.shutdown', target: reason });
+    for (const [runId, controller] of runAborts) {
+      controller.abort();
+      store.append(runId, { type: 'run.finished', runId, status: 'aborted' });
+      if (activeLiveRunId === runId) activeLiveRunId = null;
+    }
+    runAborts.clear();
+    quota.flush();
+  } catch {
+    // every step above is best effort; the goal is still to exit
+  }
+  process.exit(0);
+}
+
 app.post('/api/admin/stop', async (context) => {
   const actor = actorOf(context);
   const admission = policy.admit(actor, 'policy.write');
@@ -721,9 +743,13 @@ app.post('/api/admin/stop', async (context) => {
     // still stop; only the watchdog hint is lost
   }
   audit.record({ actor, action: 'server.stop', target: 'manual' });
-  setTimeout(() => process.exit(0), 150);
+  // The response flushes first; shutdown runs after the client has an answer.
+  setTimeout(() => void gracefulShutdown('manual'), 150);
   return context.json({ ok: true, stopping: true, manuallyStopped: true });
 });
+
+process.on('SIGINT', () => void gracefulShutdown('sigint'));
+process.on('SIGTERM', () => void gracefulShutdown('sigterm'));
 
 app.get('/api/bootstrap', (context) => {
   if (!originAllowed(context)) {
@@ -2867,6 +2893,27 @@ app.post('/api/commands', async (context) => {
           detail: { nodes: applied, status: event.status },
         });
       }
+      // 每个任务的完整产出落成 .md 文件：弹窗看过就没了，文件才是交付物。
+      try {
+        const saved = saveRunDeliverables({
+          stateDir,
+          workspaceId: runWorkspace,
+          runId,
+          goal: planToRun.goal,
+          plan: planToRun,
+          outputs: snapshot?.outputs ?? {},
+        });
+        if (saved.length > 0) {
+          audit.record({
+            actor: 'server',
+            action: 'deliverables.saved',
+            target: runId,
+            detail: { files: saved.length, dir: join('deliverables', runWorkspace, runId) },
+          });
+        }
+      } catch {
+        // 交付物写不出来不影响运行结果本身
+      }
     });
     void orchestrator.run(planToRun).catch(() => {
       if (activeLiveRunId === runId) activeLiveRunId = null;
@@ -2895,7 +2942,23 @@ app.post('/api/commands', async (context) => {
     });
     orchestrator.on((event) => {
       store.append(runId, redactRunEvent(event));
-      if (event.type === 'run.finished') runAborts.delete(runId);
+      if (event.type === 'run.finished') {
+        runAborts.delete(runId);
+        // 演示运行也落 deliverables：零成本地验收这条路径，且演示图同样有成果可拿。
+        try {
+          const snapshot = store.snapshot(runId);
+          saveRunDeliverables({
+            stateDir,
+            workspaceId: workspaceOf(context),
+            runId,
+            goal: String(plan.goal ?? 'demo'),
+            plan,
+            outputs: snapshot?.outputs ?? {},
+          });
+        } catch {
+          // 交付物失败不影响演示
+        }
+      }
     });
     void orchestrator.run(plan).catch(() => {
       store.append(runId, { type: 'run.finished', runId, status: 'failed' });
