@@ -1524,6 +1524,7 @@ textarea {
   border: 1px solid rgba(147, 164, 187, 0.22); background: rgba(14, 19, 24, 0.7); color: #cfdae6;
 }
 .workspace-switcher select:hover { border-color: rgba(56, 217, 194, 0.45); }
+.workspace-switcher .workspace-delete:hover:not(:disabled) { border-color: rgba(239, 68, 68, 0.55); color: #f87171; }
 .workspace-empty-hint { font-size: 11px; color: #6f8095; }
 
 /* 节点上的阶段产物：可点开全文 */

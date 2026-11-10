@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { FileCog, LayoutGrid, Plus } from 'lucide-react';
-import { currentWorkspace, switchWorkspace } from '../workspace';
+import { FileCog, LayoutGrid, Plus, Trash2 } from 'lucide-react';
+import { ConfirmDialog } from './ConfirmDialog';
+import { currentWorkspace, setCurrentWorkspace, switchWorkspace } from '../workspace';
 
 /**
  * 工作区切换器：一张画布 = 一个会话/项目。
@@ -8,6 +9,10 @@ import { currentWorkspace, switchWorkspace } from '../workspace';
  * 切换是整页重载——画布、运行进度、SSE 订阅一起换，避免半新半旧的状态。
  * 「公共指令」= 注入本工作区每个 worker 系统提示的常驻规范
  * （借鉴 DSH 的 team sections：披露语、评审规范这类要全员遵守的文本）。
+ *
+ * 首次加载时把视图钉在本页自己的工作区上：localStorage 里没有（或指向已删除
+ * 的画布）时采用服务端当前值并落盘。此后本页始终显式带上工作区头——
+ * 服务端的「当前画布」被脚本或 agent 改走时，这个面板不再跟着变。
  */
 
 interface WorkspaceMeta {
@@ -24,14 +29,25 @@ export function WorkspaceSwitcher() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [instructions, setInstructions] = useState('');
   const [saved, setSaved] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const load = async () => {
     try {
       const response = await fetch('/api/workspaces');
       const data = (await response.json()) as { items?: WorkspaceMeta[]; current?: string };
-      setItems(data.items ?? []);
+      const list = data.items ?? [];
+      setItems(list);
       const stored = currentWorkspace();
-      setCurrent(stored || data.current || data.items?.[0]?.id || '');
+      const known = list.some((item) => item.id === stored);
+      // 钉住视图：没有选过、或选的画布已被删掉时，采用服务端当前值并记住。
+      // 之后再有人改服务端的「当前画布」，这个面板也不动——它有自己的头。
+      if ((!stored || !known) && data.current) {
+        setCurrentWorkspace(data.current);
+        setCurrent(data.current);
+        if (stored !== data.current) switchWorkspace(data.current);
+        return;
+      }
+      setCurrent(stored || data.current || list[0]?.id || '');
     } catch {
       // 服务端还没起来：保持空列表，下一次交互再试
     }
@@ -60,6 +76,28 @@ export function WorkspaceSwitcher() {
       });
       const data = (await response.json()) as { workspace?: { id: string } };
       if (data.workspace?.id) switchWorkspace(data.workspace.id);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteCurrent = async () => {
+    if (!current) return;
+    setBusy(true);
+    setConfirmDelete(false);
+    try {
+      const response = await fetch(`/api/workspaces/${current}`, { method: 'DELETE' });
+      const data = (await response.json()) as { ok?: boolean; current?: string; error?: string };
+      if (data.ok) {
+        // 服务端已把「当前」切到剩下的第一个；跟随它。
+        const next = data.current ?? items.find((item) => item.id !== current)?.id ?? '';
+        if (next && next !== current) {
+          setCurrentWorkspace(next);
+        } else {
+          setCurrentWorkspace('');
+        }
+        switchWorkspace(next || '');
+      }
     } finally {
       setBusy(false);
     }
@@ -110,6 +148,18 @@ export function WorkspaceSwitcher() {
         <Plus size={14} />
       </button>
       <button
+        className="icon-tool workspace-delete"
+        onClick={() => setConfirmDelete(true)}
+        disabled={busy || items.length <= 1}
+        title={
+          items.length <= 1
+            ? '至少保留一张画布'
+            : `删除「${active?.name ?? '当前画布'}」及其节点、消息与运行记录`
+        }
+      >
+        <Trash2 size={14} />
+      </button>
+      <button
         className={`icon-tool ${editorOpen ? 'active' : ''}`}
         onClick={() => setEditorOpen((open) => !open)}
         title="工作区公共指令：注入本画布每个 worker 的常驻规范"
@@ -141,6 +191,15 @@ export function WorkspaceSwitcher() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmDelete}
+        title={`删除画布「${active?.name ?? ''}」？`}
+        detail="节点、连线、消息与这个画布上的运行记录会一并删除，模型连接与密钥不受影响。"
+        confirmLabel="删除画布"
+        onConfirm={() => void deleteCurrent()}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </div>
   );
 }

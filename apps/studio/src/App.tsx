@@ -129,6 +129,8 @@ export function App() {
   const externalRunRef = useRef(false);
   /** 已经补过完成态的运行 id，避免每秒重复提示。 */
   const recentShownRef = useRef<string | null>(null);
+  /** 进度条当前显示的是「补显的完成态」：服务端窗口过了就整体撤下。 */
+  const recentOnlyRef = useRef(false);
   const [choice, setChoice] = useState<Choice | null>(null);
   const [models, setModels] = useState<ModelDraft[]>(initialModels);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -151,6 +153,8 @@ export function App() {
   const [runTasks, setRunTasks] = useState<Record<string, RunTaskView>>({});
   const [runSummary, setRunSummary] = useState<RunSummary | null>(null);
   const [runTokens, setRunTokens] = useState(0);
+  /** 补显完成态时用真实结束时间算耗时，而不是定格在 0.0s。 */
+  const [recentEndedAt, setRecentEndedAt] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
   const [orchestratorId, setOrchestratorId] = useState('orchestrator');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -599,12 +603,24 @@ export function App() {
           setRunTasks(tasks);
           setRunTokens(data.recent.tokens);
           runStartedAt.current = data.recent.startedAt;
+          setRecentEndedAt(data.recent.finishedAt);
+          recentOnlyRef.current = true;
           setExternalRun(false);
           setToast(
             data.recent.status === 'done'
               ? '上一轮运行刚刚完成'
               : '上一轮运行刚刚结束（未全部成功）'
           );
+        } else if (!data.run && !data.recent && recentOnlyRef.current) {
+          // 补显的完成态有展示窗口（服务端 10 分钟）；窗口过了就撤下进度条，
+          // 而不是让一条定格的旧进度看起来像还在跑。
+          recentOnlyRef.current = false;
+          runTasksRef.current = {};
+          setRunTasks({});
+          setRunTokens(0);
+          runStartedAt.current = 0;
+          setRecentEndedAt(0);
+          recentShownRef.current = null;
         }
       } catch {
         // server restarting: try again next tick
@@ -2629,6 +2645,8 @@ export function App() {
         event: { status: 'done' | 'failed' | 'aborted' };
       };
       setRunning(false);
+      // 进度条切到完成态：用真实结束时间算总耗时，并且不再走计时器。
+      setRecentEndedAt(Date.now());
       patchNode(orchestratorId, {
         status: payload.event.status === 'done' ? 'done' : 'failed',
         metric: payload.event.status,
@@ -2740,6 +2758,8 @@ export function App() {
     setChoice(null);
     resetRunState();
     runStartedAt.current = Date.now();
+    setRecentEndedAt(0);
+    recentOnlyRef.current = false;
     patchNode(orchestratorId, { status: 'running', metric: '规划中…' });
     push(orchestratorId, 'assistant', '已按当前画布提交运行。');
     const flushed = await flushCanvas();
@@ -3129,6 +3149,7 @@ export function App() {
             tasks={Object.values(runTasks)}
             running={running || externalRun}
             startedAt={runStartedAt.current}
+            endedAt={recentEndedAt}
             tokens={runTokens}
             onOpenReport={running || externalRun ? undefined : () => setReportOpen(true)}
           />

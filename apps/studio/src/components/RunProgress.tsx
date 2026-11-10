@@ -6,6 +6,8 @@ interface RunProgressProps {
   tasks: RunTaskView[];
   running: boolean;
   startedAt: number;
+  /** 补显完成态时的真实结束时间；缺省按当前时刻，避免定格在 0.0s。 */
+  endedAt?: number;
   tokens: number;
   onOpenReport?: () => void;
 }
@@ -30,7 +32,7 @@ const STATUS_LABEL: Record<RunTaskView['status'], string> = {
  * This strip answers that in one glance: 3/6 done, who is working now, how long
  * it has taken and what it has cost.
  */
-export function RunProgress({ tasks, running, startedAt, tokens, onOpenReport }: RunProgressProps) {
+export function RunProgress({ tasks, running, startedAt, endedAt, tokens, onOpenReport }: RunProgressProps) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -39,6 +41,10 @@ export function RunProgress({ tasks, running, startedAt, tokens, onOpenReport }:
     const timer = window.setInterval(() => setElapsed(Date.now() - startedAt), 250);
     return () => window.clearInterval(timer);
   }, [running, startedAt]);
+
+  // 不是在跑：直接用真实耗时（结束时间 − 开始时间），不再走计时器。
+  const settledElapsed = running ? 0 : startedAt ? (endedAt || Date.now()) - startedAt : 0;
+  const shownElapsed = running ? elapsed : settledElapsed;
 
   const list = Object.values(tasks);
   if (!list.length) return null;
@@ -82,7 +88,7 @@ export function RunProgress({ tasks, running, startedAt, tokens, onOpenReport }:
         <span className="run-progress-meta">
           <b>{done}/{total}</b>
           <span className="run-progress-sep">·</span>
-          {formatElapsed(elapsed)}
+          {formatElapsed(shownElapsed)}
           {tokens > 0 && (
             <>
               <span className="run-progress-sep">·</span>
