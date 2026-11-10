@@ -1912,9 +1912,11 @@ app.post('/api/delegate-task', async (context) => {
 
   let runId: string | null = null;
   if (run) {
+    // 运行必须落回委托者所在的工作区：内部请求不带工作区头时会解析成
+    // 「当前激活」的工作区，别人委托的活会跑到别人正在看的画布上。
     const started = await fetch(`${origin}/api/commands`, {
       method: 'POST',
-      headers,
+      headers: { ...headers, 'x-qiansi-workspace': workspaceOf(context) },
       body: JSON.stringify({
         commandId: `delegate-task-${randomUUID()}`,
         type: 'run.start',
