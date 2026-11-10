@@ -57,6 +57,7 @@ interface ToolbarProps {
   onOpenKeys: () => void;
   attentionCount: number;
   onOpenAttention: () => void;
+  onOpenSelfOpt: () => void;
   onOpenHandoff: () => void;
   onAutoLayout: () => void;
   layouting: boolean;
@@ -120,6 +121,7 @@ export function Toolbar({
   onOpenKeys,
   attentionCount,
   onOpenAttention,
+  onOpenSelfOpt,
   onOpenHandoff,
   onAutoLayout,
   layouting,
@@ -281,6 +283,14 @@ export function Toolbar({
                 label="导出画布"
                 hint="独立网页，可直接分享"
                 onClick={menuAction(onExport)}
+              />
+
+              <div className="toolbar-menu-section">自我优化</div>
+              <MenuItem
+                icon={Sparkles}
+                label="让牵丝优化自己"
+                hint="体检 → 对标 → 复盘 → 改代码 → 留版本"
+                onClick={menuAction(onOpenSelfOpt)}
               />
 
               <div className="toolbar-menu-section">面板</div>

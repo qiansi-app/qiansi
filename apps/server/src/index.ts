@@ -15,7 +15,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import {
   AnthropicMessagesAdapter,
@@ -78,6 +78,14 @@ import { orderByStrategy, performanceOf } from './routing.js';
 import { buildHandoffPack } from './handoff.js';
 import { part, summarize, type HealthPart, type StatusReport } from './status.js';
 import { RunStore, type RunEnvelope } from './store.js';
+import {
+  SelfOptEngine,
+  describeSelfOpt,
+  findLevel,
+  findMode,
+  type SelfOptLevel,
+  type SelfOptMode,
+} from './selfopt.js';
 import { ensureStateDir } from './state-dir.js';
 import { DpapiVault } from './vault.js';
 import { WebSearchService } from './web-search.js';
@@ -385,6 +393,73 @@ async function slotCredential(
 const webSearch = new WebSearchService(vault, {
   keyFor: async (slot) => (await slotCredential(slot))?.secret,
 });
+
+/** 自我优化的默认仓库根：从 cwd 往上找第一个带 .git 的目录。 */
+function defaultSelfOptRoot(): string {
+  if (process.env.QIANSI_SELFOPT_ROOT) return process.env.QIANSI_SELFOPT_ROOT;
+  let dir = process.cwd();
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (existsSync(join(dir, '.git'))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return process.cwd();
+}
+
+/**
+ * 自我优化的模型通道：复盘与实现用旗舰模型（默认 deepseek-v4-pro），
+ * 与评委的选择口径一致。可用 QIANSI_SELFOPT_MODEL 覆盖。
+ */
+async function selfOptChat(
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+  options: { maxTokens: number; timeoutMs: number }
+): Promise<{ text: string; usage: { total: number } }> {
+  await ensureQuotaSeeded();
+  const requested = String(process.env.QIANSI_SELFOPT_MODEL ?? '').trim();
+  // 会思考的模型可能把整个预算花在推理上、正文为空；空输出就换下一家。
+  const candidates = [requested, 'deepseek-v4-pro', 'deepseek-flash', 'glm-5.3-flash', 'MiniMax-M3.1-Flash'].filter(
+    Boolean
+  );
+  let lastError = 'no_usable_key';
+  for (const model of candidates) {
+    const family = familyOf(model);
+    const slot = family?.slot ?? 'relay';
+    const credential = await slotCredential(slot);
+    if (!credential) continue;
+    try {
+      const result = await completeChat(
+        vault,
+        { model, apiKey: credential.secret, protocol: family?.protocol, baseUrl: family?.baseUrl },
+        messages,
+        { maxTokens: options.maxTokens, timeoutMs: options.timeoutMs }
+      );
+      if (!result.text.trim()) {
+        lastError = `${model} 返回空正文（推理吃掉了输出预算）`;
+        continue;
+      }
+      quota.record({
+        slot,
+        keyId: credential.keyId,
+        model,
+        tokens: result.usage.total,
+        source: 'chat',
+      });
+      return { text: result.text, usage: { total: result.usage.total } };
+    } catch (error) {
+      lastError = redactSecrets(error instanceof Error ? error.message : String(error), []);
+    }
+  }
+  throw new Error(lastError);
+}
+
+const selfOpt = new SelfOptEngine({
+  stateDir,
+  audit: (entry) => audit.record(entry),
+  chat: selfOptChat,
+  search: (query, maxResults) => webSearch.search({ query, maxResults }),
+});
+
 /** The port the listener actually bound, which can differ from QIANSI_PORT. */
 let boundPort: number | null = null;
 const serverStartedAt = Date.now();
@@ -2481,6 +2556,104 @@ app.get('/api/approvals', (context) =>
  * 聚合四类信号：待审批、评委标记需人工、失败的任务、被中断的运行。
  * 健康状态不占空间——没有待处理时就是空列表。
  */
+// ---------------------------------------------------------------------------
+// 自我优化
+// ---------------------------------------------------------------------------
+
+app.get('/api/selfopt/meta', async (context) => {
+  const rootDir = String(context.req.query('rootDir') ?? '') || defaultSelfOptRoot();
+  return context.json(await selfOpt.meta(rootDir));
+});
+
+app.get('/api/selfopt/forecast', async (context) => {
+  const query = context.req.query();
+  const mode = String(query.mode ?? 'repair') as SelfOptMode;
+  const level = String(query.level ?? 'L1') as SelfOptLevel;
+  if (!findMode(mode) || !findLevel(level)) {
+    return context.json({ ok: false, error: 'unknown_mode_or_level' }, 400);
+  }
+  const budget = Number(query.budget ?? 120_000);
+  const findings = query.findings ? Number(query.findings) : undefined;
+  const rootDir = String(query.rootDir ?? '') || defaultSelfOptRoot();
+  const forecast = await selfOpt.forecast({ rootDir, mode, level, budget, findings });
+  return context.json({ ok: true, forecast });
+});
+
+app.post('/api/selfopt/start', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const mode = String(body?.mode ?? 'repair') as SelfOptMode;
+  const level = String(body?.level ?? 'L1') as SelfOptLevel;
+  if (!findMode(mode) || !findLevel(level)) {
+    return context.json({ ok: false, error: 'unknown_mode_or_level' }, 400);
+  }
+  const rootDir = String(body?.rootDir ?? '') || defaultSelfOptRoot();
+  try {
+    const session = await selfOpt.start({
+      rootDir,
+      mode,
+      level,
+      maxTokens: Number(body?.maxTokens ?? 120_000),
+      maxRounds: Number(body?.maxRounds ?? 3),
+      findings: body?.findings ? Number(body.findings) : undefined,
+      allowDirty: body?.allowDirty === true,
+      actor: actorOf(context),
+    });
+    audit.record({
+      actor: actorOf(context),
+      action: 'selfopt.start',
+      target: session.id,
+      detail: {
+        mode,
+        level,
+        rootDir: session.rootDir,
+        budget: session.budget,
+        forecast: session.forecast?.expected,
+      },
+    });
+    return context.json({ ok: true, session });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const status = message === 'selfopt_in_progress' || message === 'worktree_dirty' ? 409 : 400;
+    return context.json({ ok: false, error: message }, status);
+  }
+});
+
+app.post('/api/selfopt/stop', (context) => {
+  const stopped = selfOpt.stop();
+  audit.record({ actor: actorOf(context), action: 'selfopt.stop', target: selfOpt.current()?.id });
+  return context.json({ ok: true, stopped, session: selfOpt.current() });
+});
+
+app.get('/api/selfopt/status', (context) =>
+  context.json({
+    ok: true,
+    session: selfOpt.current(),
+    meta: { rootDir: defaultSelfOptRoot(), ...describeSelfOpt() },
+  })
+);
+
+app.get('/api/selfopt/versions', async (context) => {
+  const rootDir = String(context.req.query('rootDir') ?? '') || defaultSelfOptRoot();
+  return context.json(await selfOpt.versions(rootDir));
+});
+
+app.get('/api/selfopt/versions/:id/diff', async (context) => {
+  const rootDir = String(context.req.query('rootDir') ?? '') || defaultSelfOptRoot();
+  return context.json(await selfOpt.diffOf(rootDir, context.req.param('id')));
+});
+
+app.post('/api/selfopt/versions/:id/switch', async (context) => {
+  const rootDir = String(context.req.query('rootDir') ?? '') || defaultSelfOptRoot();
+  const result = await selfOpt.switchTo(rootDir, context.req.param('id'));
+  return context.json(result, result.ok ? 200 : 409);
+});
+
+app.post('/api/selfopt/restore', async (context) => {
+  const rootDir = String(context.req.query('rootDir') ?? '') || defaultSelfOptRoot();
+  const result = await selfOpt.restore(rootDir);
+  return context.json(result, result.ok ? 200 : 409);
+});
+
 app.get('/api/attention', (context) => {
   const wsId = workspaceOf(context);
   const pendingApprovals = [...approvals.values()]

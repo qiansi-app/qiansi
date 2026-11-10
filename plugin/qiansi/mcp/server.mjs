@@ -510,6 +510,49 @@ const tools = [
       'Who may start runs and what each agent may do on this machine (acceptMode, human list, agent list with scopes). Read this before telling the user an action is forbidden — the refusal comes from here.',
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'self_optimize',
+    description:
+      'Let the project optimize itself: survey (typecheck/tests/git/TODOs), benchmark against competitors and papers when the mode allows, reflect with the flagship model, then apply, verify and commit each fix with a tag. Modes: repair (bugs only), harden (+security/perf), polish (+ux/docs), value (+competitor gap), evolve (+papers/experiments). Levels: L1 report only, L2 report+patch proposals, L3 apply low-risk fixes, L4 multi-file refactors, L5 loop within budget. Start with L1 to preview cost, then L3. Every applied change is a revertible commit.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mode: {
+          type: 'string',
+          enum: ['repair', 'harden', 'polish', 'value', 'evolve'],
+          description: 'How wide the scope is (default repair)',
+        },
+        level: {
+          type: 'string',
+          enum: ['L1', 'L2', 'L3', 'L4', 'L5'],
+          description: 'How far it goes (default L1: report only)',
+        },
+        max_tokens: { type: 'number', description: 'Hard token budget for the whole session (default 120000)' },
+        max_rounds: { type: 'number', description: 'Round cap for L5 (default 3, max 8)' },
+        root_dir: { type: 'string', description: "Repository root; defaults to the server's own repo" },
+        wait: { type: 'boolean', description: 'Block until the session ends (default false; poll with self_opt_status)' },
+      },
+    },
+  },
+  {
+    name: 'self_opt_status',
+    description:
+      'Progress of the current or last self-optimization session: stages, findings, tokens spent, versions produced.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'self_opt_versions',
+    description:
+      'Versions produced by self-optimization, newest first, with the commit each one is on. Use switch_id to check one out into its own branch, or restore=true to return to the original branch.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        switch_id: { type: 'string', description: 'Check out this version into a qiansi/version-* branch' },
+        restore: { type: 'boolean', description: 'Return to the original branch' },
+        diff_id: { type: 'string', description: 'Show the diff of this version' },
+      },
+    },
+  },
 ];
 
 async function callTool(name, args = {}) {
@@ -646,6 +689,47 @@ async function callTool(name, args = {}) {
 
   if (name === 'get_policy') {
     return request('/api/policy');
+  }
+
+  if (name === 'self_optimize') {
+    const started = await request('/api/selfopt/start', {
+      method: 'POST',
+      body: JSON.stringify({
+        mode: String(args.mode ?? 'repair'),
+        level: String(args.level ?? 'L1'),
+        maxTokens: Number(args.max_tokens ?? 120000),
+        maxRounds: Number(args.max_rounds ?? 3),
+        rootDir: args.root_dir ? String(args.root_dir) : undefined,
+      }),
+    });
+    if (args.wait !== true) {
+      return { ...started, note: '已开始。用 self_opt_status 看进度，用 self_opt_versions 看产出的版本。' };
+    }
+    for (let index = 0; index < 400; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const status = await request('/api/selfopt/status');
+      if (!status?.session || status.session.status !== 'running') return status;
+    }
+    return { ok: false, error: 'selfopt_timeout' };
+  }
+
+  if (name === 'self_opt_status') {
+    return request('/api/selfopt/status');
+  }
+
+  if (name === 'self_opt_versions') {
+    if (args.diff_id) {
+      return request(`/api/selfopt/versions/${encodeURIComponent(String(args.diff_id))}/diff`);
+    }
+    if (args.switch_id) {
+      return request(`/api/selfopt/versions/${encodeURIComponent(String(args.switch_id))}/switch`, {
+        method: 'POST',
+      });
+    }
+    if (args.restore === true) {
+      return request('/api/selfopt/restore', { method: 'POST' });
+    }
+    return request('/api/selfopt/versions');
   }
 
   if (name === 'list_models') {

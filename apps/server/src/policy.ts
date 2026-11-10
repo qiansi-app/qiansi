@@ -20,7 +20,8 @@ export type Scope =
   | 'vault.write'
   | 'model.catalog'
   | 'policy.write'
-  | 'gateway.use';
+  | 'gateway.use'
+  | 'selfopt.write';
 
 export const ALL_SCOPES: Scope[] = [
   'canvas.read',
@@ -31,6 +32,7 @@ export const ALL_SCOPES: Scope[] = [
   'model.catalog',
   'policy.write',
   'gateway.use',
+  'selfopt.write',
 ];
 
 export type AcceptMode = 'off' | 'observe' | 'auto';
@@ -52,7 +54,7 @@ export interface Policy {
 export type Admission = 'explicit' | 'inferred' | 'refused';
 
 /** Scopes that spend money or change something: these are what acceptMode gates. */
-const WORK_SCOPES = new Set<Scope>(['run.start', 'canvas.write', 'gateway.use']);
+const WORK_SCOPES = new Set<Scope>(['run.start', 'canvas.write', 'gateway.use', 'selfopt.write']);
 
 export interface AdmissionResult {
   allowed: boolean;
@@ -85,6 +87,8 @@ const AGENT_DEFAULTS: Scope[] = [
   // Agents reach models through the /v1 gateway; withholding this by default
   // would break the integrations that existed before policies did.
   'gateway.use',
+  // 自我优化会改仓库；它和 run.start 一样受 acceptMode 约束，且有分支/回滚兜底。
+  'selfopt.write',
 ];
 
 export function defaultPolicy(): Policy {
@@ -102,6 +106,28 @@ export function defaultPolicy(): Policy {
   };
 }
 
+/** 旧版本「全权限」的确切集合，用于把新增 scope 迁移给默认人类账户。 */
+const LEGACY_FULL_SCOPES: Scope[] = [
+  'canvas.read',
+  'canvas.write',
+  'run.start',
+  'run.stop',
+  'vault.write',
+  'model.catalog',
+  'policy.write',
+  'gateway.use',
+];
+
+/** 旧版本 agent 通配条目的默认集合，同样用于升级迁移。 */
+const LEGACY_AGENT_SCOPES: Scope[] = [
+  'canvas.read',
+  'canvas.write',
+  'run.start',
+  'run.stop',
+  'model.catalog',
+  'gateway.use',
+];
+
 function normalize(input: unknown): Policy {
   const raw = (input ?? {}) as Partial<Policy>;
   const actors = (list: unknown, kind: PolicyActor['kind']): PolicyActor[] => {
@@ -115,6 +141,25 @@ function normalize(input: unknown): Policy {
               (scope): scope is Scope => typeof scope === 'string' && ALL_SCOPES.includes(scope as Scope)
             ) as Scope[])
           : [];
+        // 升级迁移：老策略文件里本来就有全部权限的人类账户，应当自动获得
+        // 后来新增的 scope，否则升级后本地界面会被一份旧文件锁死在外面。
+        // 只迁移人类；agent 的默认权限保持原样，新能力需显式授权。
+        if (
+          kind === 'human' &&
+          LEGACY_FULL_SCOPES.every((scope) => scopes.includes(scope)) &&
+          !scopes.includes('selfopt.write')
+        ) {
+          scopes.push('selfopt.write');
+        }
+        // 通配 agent 同理：默认集合里的条目拿到新能力；具名 agent 保持原样。
+        if (
+          kind === 'agent' &&
+          String(entry.id ?? '') === '*' &&
+          LEGACY_AGENT_SCOPES.every((scope) => scopes.includes(scope)) &&
+          !scopes.includes('selfopt.write')
+        ) {
+          scopes.push('selfopt.write');
+        }
         return { id: String(entry.id ?? ''), kind, scopes };
       })
       .filter((entry) => entry.id.length > 0);
@@ -304,6 +349,7 @@ export function scopeForRequest(method: string, path: string): Scope | null {
   if (path.startsWith('/api/models/refresh')) return 'model.catalog';
   if (path.startsWith('/api/policy')) return write ? 'policy.write' : 'canvas.read';
   if (path.startsWith('/api/runs') || path.startsWith('/api/audit')) return 'canvas.read';
+  if (path.startsWith('/api/selfopt')) return write ? 'selfopt.write' : 'canvas.read';
   if (path.startsWith('/v1/')) return 'gateway.use';
   return null;
 }

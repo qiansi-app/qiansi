@@ -250,10 +250,151 @@ async function commandWatchdog(argv: string[]): Promise<number> {
   }
 }
 
+function parseFlags(argv: string[]): Record<string, string> {
+  const flags: Record<string, string> = {};
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (!arg.startsWith('--')) continue;
+    const [key, inline] = arg.slice(2).split('=');
+    if (inline !== undefined) {
+      flags[key] = inline;
+    } else if (argv[index + 1] && !argv[index + 1].startsWith('--')) {
+      flags[key] = argv[index + 1];
+      index += 1;
+    } else {
+      flags[key] = 'true';
+    }
+  }
+  return flags;
+}
+
+const stageMark: Record<string, string> = {
+  pending: '·',
+  running: '▶',
+  done: '✓',
+  skipped: '-',
+  failed: '✗',
+};
+
+/**
+ * `qiansi selfopt`：让项目自己复盘并优化自己。
+ * 退出码沿用同一套契约：0 完成，1 失败/预算耗尽，2 参数或服务问题。
+ */
+async function commandSelfOpt(argv: string[]): Promise<number> {
+  const flags = parseFlags(argv);
+  const headers = { 'x-qiansi-token': readToken(), 'content-type': 'application/json' };
+  const call = async (path: string, init?: RequestInit) => {
+    const response = await fetch(`${serverBase()}${path}`, { headers, ...init });
+    const body = (await response.json().catch(() => null)) as Record<string, any> | null;
+    return { ok: response.ok, status: response.status, body };
+  };
+
+  try {
+    if (flags.status === 'true') {
+      const { body } = await call('/api/selfopt/status');
+      const session = body?.session;
+      if (!session) {
+        console.log('没有进行过自我优化。');
+        return 0;
+      }
+      console.log(`${session.id} · ${session.mode}/${session.level} · ${session.status} · ${session.usedTokens} tokens`);
+      for (const stage of session.stages ?? []) {
+        console.log(`  ${stageMark[stage.status] ?? '·'} ${stage.label}${stage.detail ? ` — ${stage.detail}` : ''}`);
+      }
+      for (const finding of session.findings ?? []) {
+        console.log(`  [${finding.status}] ${finding.title}${finding.commit ? ` (${finding.commit})` : ''}`);
+      }
+      return 0;
+    }
+
+    if (flags.versions === 'true') {
+      const { body } = await call('/api/selfopt/versions');
+      console.log(`分支 ${body?.branch ?? '?'} · ${body?.versions?.length ?? 0} 个版本`);
+      for (const version of body?.versions ?? []) {
+        console.log(`  ${version.short}  ${version.mode}/${version.level}  ${version.title}  (${version.files?.length ?? 0} 文件)`);
+      }
+      return 0;
+    }
+
+    const mode = flags.mode ?? 'repair';
+    const level = flags.level ?? 'L1';
+    const budget = Number(flags.budget ?? 120_000);
+    const rounds = Number(flags.rounds ?? 3);
+    const forecast = (await call(`/api/selfopt/forecast?mode=${mode}&level=${level}&budget=${budget}`)).body
+      ?.forecast;
+    if (forecast) {
+      console.log(
+        `预计 ${forecast.low}–${forecast.high} tokens（中位 ${forecast.expected}，${forecast.rounds} 轮）· ${forecast.basis}`
+      );
+    }
+
+    const started = await call('/api/selfopt/start', {
+      method: 'POST',
+      body: JSON.stringify({
+        mode,
+        level,
+        maxTokens: budget,
+        maxRounds: rounds,
+        rootDir: flags.dir,
+      }),
+    });
+    if (!started.ok || !started.body?.ok) {
+      const reason = started.body?.error ?? `HTTP ${started.status}`;
+      console.error(
+        reason === 'worktree_dirty'
+          ? '工作区有未提交改动，先提交或 stash。'
+          : reason === 'not_a_git_repo'
+            ? '当前目录不是 git 仓库。'
+            : reason
+      );
+      return 2;
+    }
+    console.log(`开始 ${started.body.session.id}`);
+    if (flags['no-wait'] === 'true') return 0;
+
+    let lastStage = '';
+    let lastFindings = -1;
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const { body } = await call('/api/selfopt/status');
+      const session = body?.session;
+      if (!session) break;
+      const stageLine = (session.stages ?? []).map((stage: any) => stageMark[stage.status] ?? '·').join('');
+      if (stageLine !== lastStage) {
+        console.log(
+          `${new Date().toISOString().slice(11, 19)} ${stageLine} · 第 ${session.round} 轮 · ${session.usedTokens} tokens`
+        );
+        lastStage = stageLine;
+      }
+      if ((session.findings?.length ?? 0) !== lastFindings) {
+        lastFindings = session.findings?.length ?? 0;
+        for (const finding of session.findings ?? []) {
+          console.log(`  [${finding.status}] ${finding.title}${finding.commit ? ` (${finding.commit})` : ''}`);
+        }
+      }
+      if (session.status !== 'running') {
+        console.log(`结束：${session.status} · ${session.usedTokens} tokens`);
+        if (session.error) console.error(session.error);
+        return session.status === 'done' ? 0 : 1;
+      }
+    }
+    return 1;
+  } catch (error) {
+    console.error('自我优化请求失败：', error instanceof Error ? error.message : String(error));
+    return 2;
+  }
+}
+
 const args = process.argv.slice(2);
 const command = args[0];
 
-if (command === 'status' || command === 'stop' || command === 'start' || command === 'watchdog') {
+if (
+  command === 'status' ||
+  command === 'stop' ||
+  command === 'start' ||
+  command === 'watchdog' ||
+  command === 'selfopt'
+) {
   const run =
     command === 'status'
       ? commandStatus(args.slice(1))
@@ -261,7 +402,9 @@ if (command === 'status' || command === 'stop' || command === 'start' || command
         ? commandStop()
         : command === 'watchdog'
           ? commandWatchdog(args.slice(1))
-          : commandStart();
+          : command === 'selfopt'
+            ? commandSelfOpt(args.slice(1))
+            : commandStart();
   const code = await run;
   process.exit(code);
 }
@@ -272,6 +415,8 @@ if (command !== 'probe' || !args[1]) {
       'Usage:',
       '  qiansi status [--json] [--respect-stop]',
       '  qiansi watchdog [--interval 秒] [--once]',
+      '  qiansi selfopt [--mode repair|harden|polish|value|evolve] [--level L1..L5] [--budget 120000] [--rounds 3] [--dir 仓库] [--no-wait]',
+      '  qiansi selfopt --status | --versions',
       '  qiansi stop',
       '  qiansi start',
       '  qiansi probe <connection.json>',

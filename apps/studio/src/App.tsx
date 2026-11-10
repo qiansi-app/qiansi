@@ -17,6 +17,7 @@ import { ModelEditor } from './components/ModelEditor';
 import { NodeInspector } from './components/NodeInspector';
 import { ApprovalsModal } from './components/ApprovalsModal';
 import { AttentionModal } from './components/AttentionModal';
+import { SelfOptModal } from './components/SelfOptModal';
 import { KeysModal } from './components/KeysModal';
 import { HandoffModal } from './components/HandoffModal';
 import { ArtifactModal } from './components/ArtifactModal';
@@ -136,6 +137,7 @@ export function App() {
   const [approvalsOpen, setApprovalsOpen] = useState(false);
   const [keysOpen, setKeysOpen] = useState(false);
   const [attentionOpen, setAttentionOpen] = useState(false);
+  const [selfOptOpen, setSelfOptOpen] = useState(false);
   const [attentionCount, setAttentionCount] = useState(0);
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState(0);
@@ -3079,6 +3081,7 @@ export function App() {
         onOpenKeys={() => setKeysOpen(true)}
         attentionCount={attentionCount}
         onOpenAttention={() => setAttentionOpen(true)}
+        onOpenSelfOpt={() => setSelfOptOpen(true)}
         onOpenHandoff={() => setHandoffOpen(true)}
         onAutoLayout={() => void autoLayout()}
         layouting={layouting}
@@ -3288,6 +3291,7 @@ export function App() {
 
       <ApprovalsModal open={approvalsOpen} onClose={() => setApprovalsOpen(false)} />
       <AttentionModal open={attentionOpen} onClose={() => setAttentionOpen(false)} />
+      <SelfOptModal open={selfOptOpen} onClose={() => setSelfOptOpen(false)} />
       <KeysModal open={keysOpen} onClose={() => setKeysOpen(false)} />
       <HandoffModal open={handoffOpen} onClose={() => setHandoffOpen(false)} />
 
