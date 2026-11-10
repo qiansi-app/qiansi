@@ -335,6 +335,7 @@ async function commandSelfOpt(argv: string[]): Promise<number> {
         level,
         maxTokens: budget,
         maxRounds: rounds,
+        findings: flags.findings ? Number(flags.findings) : undefined,
         rootDir: flags.dir,
       }),
     });

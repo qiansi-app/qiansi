@@ -401,6 +401,8 @@ export interface SelfOptSession {
   baseCommit?: string;
   baseBranch?: string;
   forecast?: SelfOptForecast;
+  /** 用户要求的每轮问题数上限；缺省按档位。 */
+  requestedFindings?: number;
   error?: string;
   log: string[];
 }
@@ -438,6 +440,7 @@ interface SurveyReport {
   dirty: string[];
   recentCommits: string[];
   recentFiles: string[];
+  recentDiff: string;
   todos: Array<{ file: string; line: number; text: string }>;
   files: Array<{ path: string; loc: number; exports: string[]; hot: number }>;
   scripts: Record<string, string>;
@@ -648,6 +651,7 @@ export class SelfOptEngine {
         findings: options.findings,
         history: this.history(rootDir),
       }),
+      requestedFindings: options.findings ? Math.max(1, Math.min(12, Math.round(options.findings))) : undefined,
       log: [],
     };
     this.session = session;
@@ -891,8 +895,7 @@ export class SelfOptEngine {
     const recentCommits = (await this.git(['log', '-12', '--pretty=%h %s'], root)).stdout
       .split(/\r?\n/)
       .filter(Boolean);
-    const recentFilesRaw = (await this.git(['log', '-20', '--name-only', '--pretty=format:'], root)).stdout;
-    const hotCount = new Map<string, number>();
+    const recentFilesRaw = (await this.git(['log', '-20', '--name-only', '--pretty=format:'], root)).stdout;    const hotCount = new Map<string, number>();
     for (const line of recentFilesRaw.split(/\r?\n/)) {
       const path = line.trim();
       if (!path || !CODE_EXT.test(path)) continue;
@@ -933,6 +936,16 @@ export class SelfOptEngine {
       }
     }
 
+    // 最近两次提交的差异：加固/安全问题通常藏在刚改过的代码里。
+    let recentDiff = '';
+    for (const base of ['HEAD~2', 'HEAD~1']) {
+      const diffResult = await this.git(['diff', '--unified=3', base, 'HEAD'], root);
+      if (diffResult.code === 0 && diffResult.stdout.trim()) {
+        recentDiff = diffResult.stdout.slice(0, 18_000);
+        break;
+      }
+    }
+
     return {
       at: Date.now(),
       checks: results,
@@ -940,6 +953,7 @@ export class SelfOptEngine {
       dirty,
       recentCommits,
       recentFiles: [...hotCount.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([path]) => path),
+      recentDiff,
       todos,
       files,
       scripts,
@@ -1019,21 +1033,21 @@ export class SelfOptEngine {
       .slice(0, 160)
       .map((file) => `${file.path} · ${file.loc} 行${file.exports.length ? ` · ${file.exports.join(',')}` : ''}`)
       .join('\n')
-      .slice(0, 14_000);
+      .slice(0, 12_000);
     const hot = survey.files
       .filter((file) => file.hot > 0)
-      .slice(0, 4)
+      .slice(0, 5)
       .map((file) => {
         try {
           const text = readFileSync(join(rootDir, file.path.split('/').join(sep)), 'utf8');
-          return `### ${file.path}\n${text.slice(0, 1_800)}`;
+          return `### ${file.path}\n${text.slice(0, 3_000)}`;
         } catch {
           return '';
         }
       })
       .filter(Boolean)
       .join('\n\n')
-      .slice(0, 8_000);
+      .slice(0, 16_000);
     const checks = survey.checks
       .map((check) => `- ${check.name}（${check.cmd}）→ ${check.ok ? '通过' : `失败\n${check.summary}`}`)
       .join('\n')
@@ -1046,6 +1060,8 @@ export class SelfOptEngine {
     return [
       `## 检查结果\n${checks || '（没有配置检查命令）'}`,
       `## 最近提交\n${survey.recentCommits.slice(0, 12).join('\n')}`,
+      // 只看结构看不出加固问题；给复盘官看最近两次改动到底改了什么。
+      `## 最近改动（diff）\n${survey.recentDiff || '（无）'}`,
       `## 热点文件\n${survey.recentFiles.slice(0, 12).join('\n')}`,
       `## TODO\n${todos || '（无）'}`,
       `## 结构\n${structure}`,
@@ -1110,7 +1126,7 @@ export class SelfOptEngine {
     benchmark: string,
     round: number
   ): Promise<SelfOptFinding[]> {
-    const maxFindings = level.writes ? 4 : 6;
+    const maxFindings = Math.min(session.requestedFindings ?? (level.writes ? 4 : 6), 12);
     const system = [
       '你是牵丝的自我优化复盘官。',
       `模式：${mode.label}（${mode.does.join('；')}）。明确不做：${mode.avoids.join('；')}。`,
