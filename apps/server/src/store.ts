@@ -3,6 +3,12 @@ import { join } from 'node:path';
 import type { Plan, RunEvent, UsageSnapshot } from '@qiansi/engine';
 import { ensureStateDir } from './state-dir.js';
 import type { Mandate } from './policy.js';
+import type { LeadershipVerdict } from './leadership.js';
+
+export interface RunReview extends LeadershipVerdict {
+  model: string;
+  at: number;
+}
 
 export interface RunEnvelope {
   seq: number;
@@ -17,12 +23,16 @@ export interface RunRecord {
   goal: string;
   /** 这次运行属于哪个工作区；回写产物时写回同一张画布。 */
   workspaceId?: string;
+  /** 计划从画布生成还是内置演示；启动补投副作用时据此决定要不要回写。 */
+  planSource?: 'canvas' | 'builtin';
   status: RunStatus;
   plan?: Plan;
   outputs: Record<string, string>;
   usage: UsageSnapshot;
   /** What this run was authorised to do, and under which policy version. */
   mandate?: Mandate;
+  /** 领导层复盘结论（旗舰模型对整轮成果的检验与建议）。 */
+  review?: RunReview;
   events: RunEnvelope[];
   seq: number;
   startedAt: number;
@@ -64,11 +74,17 @@ export class RunStore {
     );
   }
 
-  create(runId: string, goal: string, workspaceId?: string): RunRecord {
+  create(
+    runId: string,
+    goal: string,
+    workspaceId?: string,
+    planSource?: 'canvas' | 'builtin'
+  ): RunRecord {
     const record: RunRecord = {
       runId,
       goal,
       workspaceId,
+      planSource,
 
       status: 'running',
       outputs: {},
@@ -230,6 +246,18 @@ export class RunStore {
     this.persist(record);
   }
 
+  /** 领导层复盘可能在运行结束之后才产出；落盘保证重启后仍能看到。 */
+  setReview(runId: string, review: RunReview): void {
+    const record = this.runs.get(runId);
+    if (!record) return;
+    record.review = review;
+    try {
+      this.persist(record);
+    } catch {
+      // 复盘写不进去不影响运行记录本身
+    }
+  }
+
   getMandate(runId: string): Mandate | undefined {
     return this.get(runId)?.mandate;
   }
@@ -251,10 +279,12 @@ export class RunStore {
       status: record.status,
       goal: record.goal,
       workspaceId: record.workspaceId,
+      planSource: record.planSource,
       plan: record.plan,
       outputs: record.outputs,
       usage: record.usage,
       mandate: record.mandate,
+      review: record.review,
       lastSeq: record.seq,
       startedAt: record.startedAt,
       finishedAt: record.finishedAt,

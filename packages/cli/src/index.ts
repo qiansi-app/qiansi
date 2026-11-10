@@ -197,12 +197,71 @@ async function commandStart(): Promise<number> {
   return 1;
 }
 
+/**
+ * 看门狗（借鉴 DSH 部署文档的 hourly check）：把 status 的退出码变成动作。
+ *   服务不可达且非人为停止 → 拉起
+ *   退出码 1 → 拉起
+ *   退出码 2/3 → 重启无效，报给人（同一组问题只报一次）
+ *   人为停止 → 什么都不做
+ * --once 只检查一轮（供 cron / 手动验证）。
+ */
+async function commandWatchdog(argv: string[]): Promise<number> {
+  const once = argv.includes('--once');
+  const index = argv.indexOf('--interval');
+  const seconds = index >= 0 ? Number(argv[index + 1]) : NaN;
+  const interval = (Number.isFinite(seconds) && seconds >= 15 ? seconds : 60) * 1000;
+  let lastProblem = '';
+
+  for (;;) {
+    const report = await fetchStatus();
+    if ('unreachable' in report) {
+      if (existsSync(manualStopMarker)) {
+        if (once) {
+          console.log('服务处于「人为停止」，看门狗不动。');
+          return 0;
+        }
+      } else {
+        console.log(`[watchdog] 服务不可达（${report.unreachable}），拉起…`);
+        const code = await commandStart();
+        console.log(`[watchdog] 拉起结束，退出码 ${code}`);
+        if (once) return code;
+      }
+    } else if (report.code === 0) {
+      lastProblem = '';
+      if (once) {
+        console.log('服务健康（0）。');
+        return 0;
+      }
+    } else if (report.code === 1) {
+      console.log('[watchdog] 服务报告 1（未运行/不响应），拉起…');
+      const code = await commandStart();
+      if (once) return code;
+    } else {
+      const signature = `${report.code}:${(report.errors ?? []).join('|')}:${(report.setup ?? []).join('|')}`;
+      if (signature !== lastProblem) {
+        lastProblem = signature;
+        console.log(`[watchdog] 退出码 ${report.code}：重启无效，需要人工处理。`);
+        for (const item of report.errors ?? []) console.log('  ✗', item);
+        for (const item of report.setup ?? []) console.log('  需要配置：', item);
+      }
+      if (once) return report.code;
+    }
+    await new Promise((resolve) => setTimeout(resolve, interval));
+  }
+}
+
 const args = process.argv.slice(2);
 const command = args[0];
 
-if (command === 'status' || command === 'stop' || command === 'start') {
+if (command === 'status' || command === 'stop' || command === 'start' || command === 'watchdog') {
   const run =
-    command === 'status' ? commandStatus(args.slice(1)) : command === 'stop' ? commandStop() : commandStart();
+    command === 'status'
+      ? commandStatus(args.slice(1))
+      : command === 'stop'
+        ? commandStop()
+        : command === 'watchdog'
+          ? commandWatchdog(args.slice(1))
+          : commandStart();
   const code = await run;
   process.exit(code);
 }
@@ -212,6 +271,7 @@ if (command !== 'probe' || !args[1]) {
     [
       'Usage:',
       '  qiansi status [--json] [--respect-stop]',
+      '  qiansi watchdog [--interval 秒] [--once]',
       '  qiansi stop',
       '  qiansi start',
       '  qiansi probe <connection.json>',

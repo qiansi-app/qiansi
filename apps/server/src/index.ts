@@ -60,6 +60,16 @@ import {
 import { PolicyStore, scopeForRequest, type Mandate } from './policy.js';
 import { checkWorkspaceName, WorkspaceStore } from './workspaces.js';
 import { saveRunDeliverables } from './deliverables.js';
+import { EffectsLedger } from './effects.js';
+import {
+  buildDiscussionTopic,
+  buildReviewPrompt,
+  collectOutcomes,
+  decideAction,
+  normalizeVerdict,
+  summarizeOutcomes,
+  type LeadershipVerdict,
+} from './leadership.js';
 import { QuotaStore } from './quota.js';
 import { substituteExhausted } from './quota-plan.js';
 import { orderByStrategy, performanceOf } from './routing.js';
@@ -103,6 +113,8 @@ function loadLocalEnv(): void {
 loadLocalEnv();
 
 const store = new RunStore();
+// stateDir 在这一行之后才定义；账本自己按同样的规则解析目录。
+const effects = new EffectsLedger(ensureStateDir());
 // A run left as `running` by a previous process would make the progress strip
 // silently disappear after a restart; mark it interrupted so the canvas can say
 // what happened instead of showing nothing.
@@ -1419,14 +1431,82 @@ app.post('/api/delegate', async (context) => {
   }
 });
 
+interface DiscussParticipant {
+  id: string;
+  name: string;
+  model: string;
+  connectionId?: string;
+  protocol?: string;
+  baseUrl?: string;
+}
+
+/** 多模型讨论的可复用内核：界面上的「AI 讨论」与领导层自动触发共用。 */
+async function runDiscussion(input: {
+  topic: string;
+  context?: string;
+  rounds: number;
+  styleId: string;
+  participants: DiscussParticipant[];
+}): Promise<{
+  rounds: Array<{ round: number; messages: Array<{ name: string; model: string; content: string }> }>;
+  effectiveRounds: number;
+  style: { id: string; label: string };
+}> {
+  const style = styleById(isConversationStyle(input.styleId) ? input.styleId : 'peer');
+  const history: Array<{ name: string; model: string; content: string }> = [];
+  const transcript: Array<{ round: number; messages: typeof history }> = [];
+  // Keep one discussion under eight model calls so a bad key or slow provider
+  // cannot pin the request for minutes.
+  const effectiveRounds = Math.min(
+    input.rounds,
+    Math.max(1, Math.floor(8 / Math.max(input.participants.length, 1)))
+  );
+  for (let round = 1; round <= effectiveRounds; round += 1) {
+    const roundMessages: typeof history = [];
+    for (const participant of input.participants) {
+      const prior = history.length
+        ? history.map((item) => `[${item.name} · ${item.model}]\n${item.content}`).join('\n\n')
+        : '（还没有人发言）';
+      let content = '';
+      try {
+        const result = await completeChat(
+          vault,
+          participant,
+          [
+            {
+              role: 'system',
+              content:
+                `你正在参加一场多 AI 讨论。直接给出观点，引用或反驳前面发言者的具体内容；不要复述主题，不要使用客套话。控制在 300 字以内。
+${discussionPrompt(style)}`,
+            },
+            {
+              role: 'user',
+              content: `讨论主题：${input.topic}\n\n${input.context ? `文件上下文：\n${input.context}\n\n` : ''}已有发言：\n${prior}\n\n现在轮到你（${participant.name}，模型 ${participant.model}）发言。`,
+            },
+          ],
+          { maxTokens: 1600, timeoutMs: 60000 }
+        );
+        content = result.text || '（没有返回内容）';
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        content = `（调用失败：${redactSecrets(detail, [])}）`;
+      }
+      const entry = { name: participant.name, model: participant.model, content };
+      history.push(entry);
+      roundMessages.push(entry);
+    }
+    transcript.push({ round, messages: roundMessages });
+  }
+  return { rounds: transcript, effectiveRounds, style: { id: style.id, label: style.label } };
+}
+
 app.post('/api/discuss', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
   const topic = String(body?.topic ?? '').trim().slice(0, 2000);
   const fileContext = String(body?.context ?? '').trim().slice(0, 4000);
   const rounds = Math.min(Math.max(Number(body?.rounds ?? 2) || 2, 1), 3);
-  // 讨论风格决定每个参与者怎么接别人的话；没指定时用「同行讨论式」。
-  const style = styleById(isConversationStyle(body?.style) ? body.style : 'peer');
-  const participants = (Array.isArray(body?.participants) ? body.participants : [])
+  const styleId = String(body?.style ?? 'peer');
+  const participants: DiscussParticipant[] = (Array.isArray(body?.participants) ? body.participants : [])
     .slice(0, 5)
     .map((item: any) => ({
       id: String(item?.id ?? ''),
@@ -1440,59 +1520,15 @@ app.post('/api/discuss', async (context) => {
     return context.json({ error: 'topic_and_two_participants_required' }, 400);
   }
 
-  const history: Array<{ name: string; model: string; content: string }> = [];
-  const transcript: Array<{ round: number; messages: typeof history }> = [];
-  // Keep one discussion under eight model calls so a bad key or slow provider
-  // cannot pin the request for minutes.
-  const effectiveRounds = Math.min(
-    rounds,
-    Math.max(1, Math.floor(8 / Math.max(participants.length, 1)))
-  );
   try {
-    for (let round = 1; round <= effectiveRounds; round += 1) {
-      const roundMessages: typeof history = [];
-      for (const participant of participants) {
-        const prior = history.length
-          ? history.map((item) => `[${item.name} · ${item.model}]\n${item.content}`).join('\n\n')
-          : '（还没有人发言）';
-        let content = '';
-        try {
-          const result = await completeChat(
-            vault,
-            participant,
-            [
-              {
-                role: 'system',
-                content:
-                  `你正在参加一场多 AI 讨论。直接给出观点，引用或反驳前面发言者的具体内容；不要复述主题，不要使用客套话。控制在 300 字以内。
-${discussionPrompt(style)}`,
-              },
-              {
-                role: 'user',
-                content: `讨论主题：${topic}\n\n${fileContext ? `文件上下文：\n${fileContext}\n\n` : ''}已有发言：\n${prior}\n\n现在轮到你（${participant.name}，模型 ${participant.model}）发言。`,
-              },
-            ],
-            { maxTokens: 1600, timeoutMs: 60000 }
-          );
-          content = result.text || '（没有返回内容）';
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          content = `（调用失败：${redactSecrets(detail, [])}）`;
-        }
-        const entry = { name: participant.name, model: participant.model, content };
-        history.push(entry);
-        roundMessages.push(entry);
-      }
-      transcript.push({ round, messages: roundMessages });
-    }
-    return context.json({
-      ok: true,
-      rounds: transcript,
-      requestedRounds: rounds,
-      effectiveRounds,
-      style: style.id,
-      styleLabel: style.label,
+    const result = await runDiscussion({
+      topic,
+      context: fileContext || undefined,
+      rounds,
+      styleId,
+      participants,
     });
+    return context.json({ ok: true, ...result, requestedRounds: rounds });
   } catch (error) {
     return context.json(
       { ok: false, error: redactSecrets(error instanceof Error ? error.message : String(error), []) },
@@ -2842,7 +2878,7 @@ app.post('/api/commands', async (context) => {
       },
     });
 
-    store.create(runId, planToRun.goal, runWorkspace);
+    store.create(runId, planToRun.goal, runWorkspace, planSource);
     const mandate: Mandate = {
       runId,
       actor: runActor,
@@ -2878,6 +2914,34 @@ app.post('/api/commands', async (context) => {
     const controller = new AbortController();
     runAborts.set(runId, controller);
 
+    // 领导层默认用旗舰模型（借鉴「决策层-执行层」分工）：
+    // 显式 judgeModel > 主控节点模型 > deepseek-v4-pro > relay sonnet。
+    // 便宜闸门仍只筛明显通过的，拿不准的才交给旗舰当评委。
+    const requestedJudgeModel = String(body?.payload?.judgeModel ?? '').trim();
+    const judgeCandidates = [requestedJudgeModel, orchestratorModel, 'deepseek-v4-pro'].filter(
+      Boolean
+    ) as string[];
+    let judgeTarget: { profile: CapabilityProfile; apiKey: string } = {
+      profile: liveProfiles.find((profile) => profile.id === 'live-sonnet')!,
+      apiKey: relayKey,
+    };
+    let judgeSlot: KeySlot = 'relay';
+    for (const candidate of judgeCandidates) {
+      const family = familyOf(candidate);
+      if (!family) continue;
+      const key = keyBySlot[family.slot];
+      if (!key) continue;
+      judgeTarget = { profile: profileForModel(candidate), apiKey: key };
+      judgeSlot = family.slot;
+      break;
+    }
+    audit.record({
+      actor: 'server',
+      action: 'run.judge',
+      target: runId,
+      detail: { model: judgeTarget.profile.model, slot: judgeSlot },
+    });
+
     const orchestrator = new Orchestrator({
       profiles: profilesToRun,
       adapters: {
@@ -2910,14 +2974,11 @@ app.post('/api/commands', async (context) => {
               apiKey: keyBySlot[routerPick.slot],
             }
           : undefined,
-        full: {
-          profile: liveProfiles.find((profile) => profile.id === 'live-sonnet')!,
-          apiKey: relayKey,
-        },
+        full: judgeTarget,
         teamContext,
         onUsage: (usage) => {
           const slot =
-            usage.stage === 'full' ? 'relay' : familyOf(usage.model)?.slot ?? 'relay';
+            usage.stage === 'full' ? judgeSlot : familyOf(usage.model)?.slot ?? 'relay';
           quota.record({
             slot,
             keyId: keyIdBySlot[slot] ?? 'default',
@@ -2955,7 +3016,12 @@ app.post('/api/commands', async (context) => {
         target: runId,
         detail: { ...gateCounts, router: routerPick?.model ?? null },
       });
-      if (planSource !== 'canvas') return;
+      if (planSource !== 'canvas') {
+        // 没有画布回写可做：记账为已处理，启动补投时不再考虑它。
+        effects.mark(runId, 'writeback');
+        effects.mark(runId, 'deliverables');
+        return;
+      }
       // A mandate is re-checked before it is used again. If the policy tightened
       // while the run was going, the run still finishes, but it no longer gets
       // to write back what it produced.
@@ -2967,6 +3033,9 @@ app.post('/api/commands', async (context) => {
           target: runId,
           detail: { reason: revalidated.reason },
         });
+        // 授权已撤销：记账为已处理，补投不得绕过策略写回画布。
+        effects.mark(runId, 'writeback');
+        effects.mark(runId, 'deliverables');
         return;
       }
       // No studio window is necessarily open when an agent starts a run, so the
@@ -2978,6 +3047,7 @@ app.post('/api/commands', async (context) => {
         snapshot?.outputs ?? {},
         event.status !== 'done'
       );
+      effects.mark(runId, 'writeback');
       if (applied > 0) {
         audit.record({
           actor: 'server',
@@ -3004,9 +3074,163 @@ app.post('/api/commands', async (context) => {
             detail: { files: saved.length, dir: join('deliverables', runWorkspace, runId) },
           });
         }
+        effects.mark(runId, 'deliverables');
       } catch {
-        // 交付物写不出来不影响运行结果本身
+        // 交付物写不出来不影响运行结果本身；账本没记，下次启动补投
       }
+
+      /**
+       * 领导层复盘（旗舰模型）：检验成果、给建议；成果远远达不到目标时
+       * 自动发起多模型讨论。异步执行，不阻塞运行结束的收尾。
+       */
+      void (async () => {
+        try {
+          const record = store.get(runId);
+          const acceptances = (record?.events ?? [])
+            .map((envelope) => envelope.event)
+            .filter((event) => event.type === 'task.acceptance')
+            .map((event) => event as { taskId?: string; result?: { score?: number; reasons?: string[] } });
+          const outcomes = collectOutcomes(planToRun, snapshot?.outputs ?? {}, acceptances);
+          const summary = summarizeOutcomes(outcomes);
+
+          let verdict: LeadershipVerdict | null = null;
+          try {
+            const review = await completeChat(
+              vault,
+              {
+                model: judgeTarget.profile.model,
+                apiKey: judgeTarget.apiKey,
+                protocol: judgeTarget.profile.protocol,
+                baseUrl: judgeTarget.profile.baseUrl,
+              },
+              [
+                {
+                  role: 'system',
+                  content: '你是多 AI 编排的决策者。只输出一个 JSON 对象，不要解释，不要 Markdown。',
+                },
+                { role: 'user', content: buildReviewPrompt(planToRun.goal, outcomes) },
+              ],
+              { maxTokens: 2400, timeoutMs: 60000 }
+            );
+            quota.record({
+              slot: judgeSlot,
+              keyId: keyIdBySlot[judgeSlot] ?? 'default',
+              model: judgeTarget.profile.model,
+              tokens: review.usage.total,
+              source: 'judge',
+            });
+            verdict = normalizeVerdict(parseModelJson(review.text, 'review_output'), summary);
+          } catch {
+            // 复盘调用失败不影响运行；下面的规则兜底决定是否讨论
+          }
+
+          const action = verdict?.action ?? decideAction(summary);
+          const stored = {
+            verdict: verdict?.verdict ?? (action === 'discuss' ? 'weak' : 'ok'),
+            score: verdict?.score ?? summary.avgScore ?? 0.5,
+            summary: verdict?.summary ?? '',
+            suggestions: verdict?.suggestions ?? [],
+            action,
+            model: judgeTarget.profile.model,
+            at: Date.now(),
+          };
+          store.setReview(runId, stored);
+          audit.record({
+            actor: 'server',
+            action: 'run.review',
+            target: runId,
+            detail: {
+              verdict: stored.verdict,
+              action,
+              model: stored.model,
+              suggestions: stored.suggestions.length,
+            },
+          });
+
+          if (action !== 'discuss') return;
+
+          // 自动讨论：参与者取画布上的 worker 模型（去重，最多 3 个）。
+          const workspaceCanvas = canvasFor(runWorkspace).read();
+          const seenModels = new Set<string>();
+          const participants: DiscussParticipant[] = [];
+          for (const node of workspaceCanvas.nodes) {
+            const data = node.data ?? {};
+            const kind = String(data.kind ?? '');
+            const model = String(data.model ?? '');
+            if (!model || model === 'library') continue;
+            if (kind === 'library' || kind === 'region' || kind === 'artifact' || kind === 'orchestrator') continue;
+            if (seenModels.has(model)) continue;
+            seenModels.add(model);
+            participants.push({
+              id: node.id,
+              name: String(data.name ?? model),
+              model,
+              connectionId: String(data.connectionId ?? '') || undefined,
+              protocol: String(data.protocol ?? '') || undefined,
+              baseUrl: String(data.baseUrl ?? '') || undefined,
+            });
+            if (participants.length >= 3) break;
+          }
+          if (participants.length < 2) {
+            audit.record({
+              actor: 'server',
+              action: 'discussion.skipped',
+              target: runId,
+              detail: { reason: 'less_than_two_models' },
+            });
+            return;
+          }
+
+          const discussion = await runDiscussion({
+            topic: buildDiscussionTopic(planToRun.goal, summary, verdict),
+            rounds: 1,
+            styleId: 'peer',
+            participants,
+          });
+          const transcript = discussion.rounds
+            .flatMap((round) =>
+              round.messages.map((message) => `[第 ${round.round} 轮] ${message.name}（${message.model}）：${message.content}`)
+            )
+            .join('\n\n');
+          canvasFor(runWorkspace).apply([
+            {
+              op: 'add_node',
+              node: {
+                id: `discussion-${runId.slice(0, 8)}`,
+                type: 'artifact',
+                position: { x: 140, y: 620 },
+                data: {
+                  kind: 'artifact',
+                  name: '讨论 · 为什么没达标',
+                  role: '领导层自动发起',
+                  provider: '',
+                  model: '',
+                  effort: 'off',
+                  status: 'idle',
+                  accent: '#e0a458',
+                  taskId: '',
+                  output: transcript.slice(0, 4000),
+                  acceptance: { pass: true, score: 1, reasons: ['AI 讨论'] },
+                  metric: '自动',
+                },
+              },
+            },
+          ]);
+          audit.record({
+            actor: 'server',
+            action: 'discussion.auto',
+            target: runId,
+            detail: { participants: participants.length, rounds: discussion.effectiveRounds },
+          });
+        } catch (error) {
+          audit.record({
+            actor: 'server',
+            action: 'run.review_failed',
+            target: runId,
+            detail: { error: error instanceof Error ? error.message : String(error) },
+          });
+        }
+      })();
     });
     void orchestrator.run(planToRun).catch(() => {
       if (activeLiveRunId === runId) activeLiveRunId = null;
@@ -3017,7 +3241,7 @@ app.post('/api/commands', async (context) => {
     const requestedGoal =
       typeof body?.payload?.goal === 'string' ? String(body.payload.goal).trim().slice(0, 500) : '';
     const plan = requestedGoal ? { ...requestedPlan, goal: requestedGoal } : requestedPlan;
-    store.create(runId, String(plan.goal ?? 'demo'), workspaceOf(context));
+    store.create(runId, String(plan.goal ?? 'demo'), workspaceOf(context), 'builtin');
     const controller = new AbortController();
     runAborts.set(runId, controller);
 
@@ -3048,9 +3272,11 @@ app.post('/api/commands', async (context) => {
             plan,
             outputs: snapshot?.outputs ?? {},
           });
+          effects.mark(runId, 'deliverables');
         } catch {
           // 交付物失败不影响演示
         }
+        effects.mark(runId, 'writeback');
       }
     });
     void orchestrator.run(plan).catch(() => {
@@ -3187,6 +3413,7 @@ app.get('/api/runs/:id/result', (context) => {
     finishedAt: snapshot.finishedAt ?? null,
     usage: snapshot.usage,
     mandate: snapshot.mandate ?? null,
+    review: snapshot.review ?? null,
     tasks,
     canvasUrl: `/api/runs/${runId}/events`,
   });
@@ -3476,6 +3703,53 @@ if (existsSync(join(studioDir, 'index.html'))) {
 }
 
 app.notFound((context) => context.text('not found', 404));
+
+/**
+ * 启动补投（Outbox）：上次进程死在「运行结束、副作用未做」之间时，按账本把
+ * 回写与交付物补一遍。两者皆幂等，重复执行不会产生重复内容。
+ */
+function repairPendingEffects(): void {
+  let repaired = 0;
+  for (const item of store.list().slice(0, 100)) {
+    const record = store.get(item.runId);
+    if (!record || !record.planSource || !record.finishedAt || !record.plan) continue;
+    const kinds: Array<'writeback' | 'deliverables'> =
+      record.planSource === 'canvas' ? ['writeback', 'deliverables'] : ['deliverables'];
+    const missing = effects.missing(record.runId, kinds);
+    if (!missing.length) continue;
+    const workspaceId = record.workspaceId ?? 'main';
+    try {
+      if (missing.includes('writeback')) {
+        writeRunArtifacts(
+          canvasFor(workspaceId),
+          record.plan,
+          record.outputs ?? {},
+          record.status !== 'done'
+        );
+      }
+      if (missing.includes('deliverables')) {
+        saveRunDeliverables({
+          stateDir,
+          workspaceId,
+          runId: record.runId,
+          goal: record.goal,
+          plan: record.plan,
+          outputs: record.outputs ?? {},
+        });
+      }
+      for (const kind of missing) effects.mark(record.runId, kind);
+      repaired += 1;
+    } catch {
+      // 失败的补投下次启动再试（账本仍未记账）
+    }
+  }
+  if (repaired > 0) {
+    audit.record({ actor: 'server', action: 'effects.repair', detail: { runs: repaired } });
+    console.log(`[qiansi] repaired side effects for ${repaired} run(s)`);
+  }
+}
+
+repairPendingEffects();
 
 const port = Number(process.env.QIANSI_PORT ?? 8787);
 serve({ fetch: app.fetch, port, hostname: '127.0.0.1' }, (info) => {
