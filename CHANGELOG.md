@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Auto-arrange now plans tasks, not roles.** Each generated node carries a one-line work order, a named deliverable (form + required contents) and 2–3 acceptance criteria that a third party can check independently; roles are how a task is carried out, not what gets split. The plan is then reviewed by the same orchestrator wearing a critic's hat, which looks only for overlapping responsibilities, uncovered parts of the goal, and criteria nobody can judge — on a revise verdict the corrected plan replaces the draft and the issues are surfaced in the UI. Deterministic guards back it up: duplicate node names get suffixes, missing criteria get concrete fallbacks, and every worker gets an explicit assign edge.
+- The task's own deliverable and acceptance criteria now reach the worker prompt and the orchestrator's acceptance check, instead of one generic standard shared by every task.
+
 - **Self-optimization**: Qiansi can now improve its own repository. Pick one of five modes (`repair` / `harden` / `polish` / `value` / `evolve`) and one of five levels (`L1` report → `L5` loop), and it runs survey → benchmark → reflect → apply → verify → snapshot: runs the repo's own typecheck/tests, reads git state and TODOs, searches the web for competitors and papers when the mode allows, asks a flagship model for evidence-backed findings, then applies each fix as a minimal exact-match edit, re-runs the checks, and commits it with a `selfopt/<hash>` tag. Any failure rolls that one change back.
 - Token forecast for every run (`survey + benchmark + reflect + findings × per-fix`), calibrated against the median predicted/actual ratio of previous sessions of the same mode and level.
 - Version index survives restarts: list versions, view the diff, `git checkout -B qiansi/version-<hash>` to switch, or return to the original branch. The worktree must be clean for anything that writes.

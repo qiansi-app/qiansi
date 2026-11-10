@@ -8,6 +8,12 @@ export interface WorkflowNodePlan {
   id: string;
   name: string;
   role: string;
+  /** 一句话工单：输入是什么、要产出什么。 */
+  task?: string;
+  /** 具名交付物：形式 + 必须包含的要点。 */
+  deliverable?: string;
+  /** 可判定的验收条件，主控会逐条对照。 */
+  acceptance?: string[];
   connectionId: string;
   effort: string;
 }
@@ -24,6 +30,8 @@ export interface WorkflowPlan {
   summary: string;
   nodes: WorkflowNodePlan[];
   edges: WorkflowEdgePlan[];
+  /** 审校者发现的分工重叠、缺口或不可判定的验收条件。 */
+  notes?: string[];
 }
 
 interface WorkflowModalProps {

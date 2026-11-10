@@ -131,11 +131,29 @@ export function buildPlanFromCanvas(
       ),
     ];
 
+    // 编排时给每个节点定了「工单 + 交付物 + 验收条件」；有就原样往下传，
+    // 没有才退回通用标准。验收条件同时进提示词，执行节点才知道要交什么。
+    const acceptanceFromNode = Array.isArray(data.acceptanceCriteria)
+      ? data.acceptanceCriteria.map((item) => String(item).trim()).filter(Boolean)
+      : typeof data.acceptanceCriteria === 'string' && data.acceptanceCriteria.trim()
+        ? [data.acceptanceCriteria.trim()]
+        : [];
+    const acceptanceCriteria =
+      acceptanceFromNode.length > 0
+        ? acceptanceFromNode.join('；')
+        : DEFAULT_ACCEPTANCE;
+    const deliverable = String(data.deliverable ?? '').trim();
+    const workOrder = String(data.task ?? '').trim();
+
     return {
       id: lane,
       title: String(data.name ?? data.role ?? nodeId),
       description: [
-        data.role ? `你的角色：${String(data.role)}` : '',
+        workOrder ? `你的工单：${workOrder}` : data.role ? `你的角色：${String(data.role)}` : '',
+        deliverable ? `交付物：${deliverable}` : '',
+        acceptanceFromNode.length > 0
+          ? `验收标准（主控会逐条对照）：\n${acceptanceFromNode.map((item) => `- ${item}`).join('\n')}`
+          : '',
         `总目标：${runGoal}`,
         filesForTask(options.files ?? [], index, targets.length),
         '只输出最终答案，不要展示思考过程。',
@@ -145,7 +163,7 @@ export function buildPlanFromCanvas(
       assignedNodeId: nodeId,
       profileId: `canvas-${nodeId}`,
       effort: asEffort(data.effort),
-      acceptanceCriteria: DEFAULT_ACCEPTANCE,
+      acceptanceCriteria,
       style: isConversationStyle(data.style)
         ? data.style
         : suggestStyle(`${String(data.name ?? "")} ${String(data.role ?? "")}`),

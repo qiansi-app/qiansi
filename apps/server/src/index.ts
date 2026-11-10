@@ -1915,6 +1915,11 @@ app.post('/api/handoff', async (context) => {
                   kind: 'agent',
                   name: String(item.name ?? `节点 ${index + 1}`),
                   role: String(item.role ?? ''),
+                  // 编排给出的工单/交付物/验收随节点一并落到画布，
+                  // 否则接续会话生成的节点又会退回通用验收。
+                  task: String(item.task ?? ''),
+                  deliverable: String(item.deliverable ?? ''),
+                  acceptanceCriteria: Array.isArray(item.acceptance) ? item.acceptance : [],
                   provider: String(item.provider ?? ''),
                   model: String(item.model ?? ''),
                   effort: String(item.effort ?? 'medium'),
@@ -2063,6 +2068,18 @@ function parseModelJson<T>(text: string, label: string): T {
   );
 }
 
+/**
+ * 自动编排的验收兜底。模型偶尔不给验收条件，或只给一条——
+ * 这里补的是通用但可判定的条目，不是「质量要好」这类空话。
+ */
+function defaultAcceptance(deliverable: string, name: string): string[] {
+  return [
+    `交付物「${deliverable || name}」完整，下游可以直接拿它继续干活`,
+    '每条结论都能在给定材料或来源里找到依据，没有编造的数字、接口与引用',
+    '总目标里与本任务相关的要求全部覆盖，没有遗漏',
+  ];
+}
+
 app.post('/api/workflow', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
   const goal = String(body?.goal ?? '').trim().slice(0, 4000);
@@ -2108,15 +2125,20 @@ app.post('/api/workflow', async (context) => {
 可用模型：${JSON.stringify(models)}
 ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileContext}\n` : ''}
 请设计一个 3–5 个节点的工作流，并只输出：
-{"summary":"一句中文概述","nodes":[{"id":"n1","name":"研究员","role":"要做什么","connectionId":"从上面选择","model":"从上面列表选择具体模型","effort":"low|medium|high"}],"edges":[{"source":"orchestrator","target":"n1","kind":"assign","label":"任务 · 调研"}]}
+{"summary":"一句中文概述","nodes":[{"id":"n1","name":"事实梳理","role":"用研究员视角工作","task":"一句话工单：输入是什么、要产出什么","deliverable":"交付物名称（形式：清单/表格/代码/文稿），必须包含哪几项","acceptance":["可判定的验收条件 1","验收条件 2"],"connectionId":"从上面选择","model":"从上面列表选择具体模型","effort":"low|medium|high"}],"edges":[{"source":"orchestrator","target":"n1","kind":"assign","label":"任务 · 调研"}]}
 
-规则：
-1. 主控节点 id 固定为 "orchestrator"，不需要出现在 nodes 里；
-2. connectionId 必须是上面列表中的值；
-3. 每个工作节点至少有一条来自 orchestrator 的 assign 边；
-4. 有依赖的节点之间加 handoff 边，需要验收的加 review 边；
-5. effort 按任务复杂度选择；
-6. 节点名称、角色用中文，简洁具体。`,
+拆解规则（按任务拆，不按角色拆）：
+1. 先想清楚这次要交付什么，再决定分几步；每一步是一个有明确输入和输出的任务，不是一个「角色」；
+2. 节点名称写任务名（如「事实梳理」「初稿起草」），不要写「研究员」「写手」这类只描述身份的称呼；
+3. deliverable 必须具名且可交接：下游要能直接拿它继续干活。写清形式（清单/表格/文稿/代码）和必须包含的要点；
+4. acceptance 给 2–3 条，每条都要能被第三方独立判断真假：要么可数（至少 N 个、不超过 N 字），要么可观察（必须包含 X、不能出现 Y），要么可对照（与资料包一致）。禁止写「质量好」「表达清晰」这类无法判定的标准；
+5. 主控节点 id 固定为 "orchestrator"，不需要出现在 nodes 里；
+6. connectionId 必须是上面列表中的值；
+7. 每个工作节点至少有一条来自 orchestrator 的 assign 边；
+8. 有依赖的节点之间加 handoff 边，边的 label 写清楚交的是什么（如「事实卡 → 起草」）；
+9. 需要独立验收的加 review 边；
+10. effort 按任务复杂度选择；
+11. 分工不要重叠：两个节点不能产出同一份交付物；也不要留空档——总目标里明确要求的每一块，都要有节点负责。`,
       },
     ];
 
@@ -2131,7 +2153,7 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
         model: String(orchestrator.model),
       },
       messages,
-      { maxTokens: 3200, timeoutMs: 90000 }
+      { maxTokens: 6000, timeoutMs: 120000 }
     );
 
     let text = result.text;
@@ -2158,10 +2180,85 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
           model: String(orchestrator.model),
         },
         messages,
-        { maxTokens: 3200, timeoutMs: 90000 }
+        { maxTokens: 6000, timeoutMs: 120000 }
       );
       text = retry.text;
       parsed = parseModelJson(text, 'workflow_output');
+    }
+
+    // 第二遍：让同一个主控换一顶「审校者」的帽子，专门挑三件事——
+    // 分工重叠、总目标有要求但没人负责的缺口、验收条件不判定。
+    // 只有它明确 verdict=revise 且给出的节点仍然合法时才替换主计划。
+    let planNotes: string[] = [];
+    if (body?.critique !== false) {
+      const critiqueStarted = Date.now();
+      try {
+        const review = await completeChat(
+          vault,
+          {
+            connectionId: orchestrator.connectionId ? String(orchestrator.connectionId) : undefined,
+            protocol: orchestrator.protocol ? String(orchestrator.protocol) : undefined,
+            baseUrl: orchestrator.baseUrl ? String(orchestrator.baseUrl) : undefined,
+            model: String(orchestrator.model),
+          },
+          [
+            {
+              role: 'system',
+              content:
+                '你是工作流计划的审校者。只判断三件事：分工是否重叠、总目标里是否有没人负责的部分、验收条件能否被第三方独立判定。只输出一个 JSON 对象。',
+            },
+            {
+              role: 'user',
+              content: `总目标：${goal}
+
+待审计划：${JSON.stringify({ summary: parsed.summary, nodes: parsed.nodes, edges: parsed.edges }).slice(0, 7000)}
+
+输出格式：
+{"verdict":"ok|revise","issues":["具体问题，一条一句"],"nodes":[],"edges":[]}
+
+规则：
+1. verdict=revise 时，在 nodes/edges 里给出修正后的完整计划，字段与原计划一致；verdict=ok 时两者留空数组；
+2. 只改有问题的部分，没问题的节点原样保留；
+3. issues 写事实，不写建议措辞：例如「n2 与 n3 都产出初稿」「总目标要求的成本对比没人负责」「n1 的验收『表达清晰』无法判定」。`,
+            },
+          ],
+          { maxTokens: 5000, timeoutMs: 120000 }
+        );
+        const reviewed = parseModelJson<{
+          verdict?: string;
+          issues?: unknown[];
+          nodes?: unknown[];
+          edges?: unknown[];
+        }>(review.text, 'workflow_critique');
+        planNotes = (Array.isArray(reviewed.issues) ? reviewed.issues : [])
+          .map((item) => String(item).slice(0, 160))
+          .filter(Boolean)
+          .slice(0, 6);
+        if (
+          reviewed.verdict === 'revise' &&
+          Array.isArray(reviewed.nodes) &&
+          reviewed.nodes.length > 0
+        ) {
+          parsed = {
+            summary: parsed.summary,
+            nodes: reviewed.nodes as Array<Record<string, any>>,
+            edges: (Array.isArray(reviewed.edges) && reviewed.edges.length > 0
+              ? reviewed.edges
+              : parsed.edges) as Array<Record<string, any>>,
+          };
+        }
+        audit.record({
+          actor: actorOf(context),
+          action: 'workflow.critique',
+          detail: {
+            verdict: reviewed.verdict ?? 'unknown',
+            issues: planNotes.length,
+            ms: Date.now() - critiqueStarted,
+          },
+        });
+      } catch {
+        // 审校是增强项：它挂了就用第一遍的计划，不能因此让用户拿不到画布
+      }
     }
 
     const allowedConnections = new Set(models.map((item: any) => item.connectionId));
@@ -2180,16 +2277,45 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
         const model = familyModels.some((m: any) => m.model === requestedModel)
           ? requestedModel
           : fallbackModel;
+        const nodeName = String(item?.name ?? `节点 ${index + 1}`).slice(0, 40);
+        const roleText = String(item?.role ?? '执行子任务').slice(0, 160);
+        const taskText = String(item?.task ?? roleText).trim().slice(0, 240) || roleText;
+        const deliverable = String(item?.deliverable ?? '').trim().slice(0, 120) || `${nodeName}的产出`;
+        const accepted = (Array.isArray(item?.acceptance) ? item.acceptance : [])
+          .map((line: unknown) => String(line).trim().slice(0, 140))
+          .filter(Boolean)
+          .slice(0, 3);
+        // 验收不足两条就补通用条目——宁可多一条可判定的，也不要留空。
+        for (const fallback of defaultAcceptance(deliverable, nodeName)) {
+          if (accepted.length >= 2) break;
+          if (!accepted.includes(fallback)) accepted.push(fallback);
+        }
         return {
           id: String(item?.id ?? `n${index + 1}`).replace(/[^\w-]/g, '').slice(0, 24) || `n${index + 1}`,
-          name: String(item?.name ?? `节点 ${index + 1}`).slice(0, 40),
-          role: String(item?.role ?? '执行子任务').slice(0, 160),
+          name: nodeName,
+          role: roleText,
+          task: taskText,
+          deliverable,
+          acceptance: accepted,
           connectionId,
           model,
           effort: effortValues.has(String(item?.effort)) ? String(item?.effort) : 'medium',
         };
       });
     if (nodes.length === 0) throw new Error('workflow_nodes_missing');
+
+    // 同名节点在画布上无法区分，验收时也对不上号——统一去重。
+    const seenNames = new Set<string>();
+    for (const node of nodes) {
+      let unique = node.name;
+      let suffix = 2;
+      while (seenNames.has(unique)) {
+        unique = `${node.name} ${suffix}`;
+        suffix += 1;
+      }
+      seenNames.add(unique);
+      node.name = unique;
+    }
 
     const ids = new Set(['orchestrator', ...nodes.map((node: any) => node.id)]);
     const kinds = new Set(['assign', 'handoff', 'review', 'context']);
@@ -2204,12 +2330,30 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
         label: String(item?.label ?? '任务').slice(0, 40),
       }));
 
+    // 每个执行节点都必须从主控拿到明确的派活边，否则画布判定它没有任务来源。
+    for (const node of nodes) {
+      const assigned = edges.some(
+        (edge) => edge.target === node.id && edge.source === 'orchestrator' && edge.kind === 'assign'
+      );
+      if (!assigned) {
+        edges.push({
+          id: `wf-e${edges.length + 1}`,
+          source: 'orchestrator',
+          target: node.id,
+          kind: 'assign',
+          label: `任务 · ${node.name}`,
+        });
+      }
+    }
+
     return context.json({
       ok: true,
       workflow: {
         summary: String(parsed.summary ?? goal).slice(0, 200),
         nodes,
         edges,
+        // 审校者提出的问题：界面直接显示，用户不必猜分工为什么不合适。
+        notes: planNotes,
       },
     });
   } catch (error) {

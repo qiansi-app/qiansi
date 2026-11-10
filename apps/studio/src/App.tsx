@@ -1066,6 +1066,12 @@ export function App() {
           kind: 'agent',
           name: planned.name,
           role: planned.role,
+          // 编排给出的工单、交付物与验收条件随节点走，
+          // 生成计划时直接用它们，不再退回同一条通用标准。
+          task: planned.task,
+          deliverable: planned.deliverable,
+          // data.acceptance 已被「运行验收结果」占用，验收条件用 acceptanceCriteria。
+          acceptanceCriteria: planned.acceptance,
           provider: model?.provider ?? '',
           model: model?.model ?? planned.connectionId,
           effort: (planned.effort as EffortLevel) ?? 'medium',
@@ -1129,6 +1135,10 @@ export function App() {
 
     runToken.current += 1;
     setRunning(false);
+    // 审校发现的分工问题直接说出来，别让它只留在接口响应里。
+    if (plan.notes && plan.notes.length > 0) {
+      setToast(`分工审校：${plan.notes.slice(0, 2).join('；')}`);
+    }
     resetRunState();
     streamBuffers.current = {};
     taskNodes.current = {};

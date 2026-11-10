@@ -230,17 +230,34 @@ Key 解析顺序：请求体（本次不落盘）→ 保险库 `connectionId` �
 
 ### `POST /api/workflow`
 
-主控模型生成工作流。请求 `{ goal, orchestrator: { connectionId, protocol, baseUrl, model }, models: [{ connectionId, name, provider, model, effort }], files: [{ name, preview }] }`。
+主控模型生成工作流。请求 `{ goal, orchestrator: { connectionId, protocol, baseUrl, model }, models: [{ connectionId, name, provider, model, effort }], files: [{ name, preview }], critique?: boolean }`。
 
 主控返回并经过服务端校验的结构：
 
 ```json
 {
-  "summary": "三节点流水线：调研 → 写作 → 核对",
-  "nodes": [{ "id": "n1", "name": "调研员", "role": "…", "connectionId": "conn-deepseek", "effort": "high" }],
-  "edges": [{ "source": "orchestrator", "target": "n1", "kind": "assign", "label": "任务 · 调研" }]
+  "summary": "四节点流水线：事实梳理 → 起草 → 核对 → 整合",
+  "nodes": [{
+    "id": "n1",
+    "name": "事实梳理",
+    "role": "用研究员视角工作",
+    "task": "从资料包里收集并核实事实，输出事实卡",
+    "deliverable": "事实卡（要点清单，每条带来源）",
+    "acceptance": ["至少 5 条事实", "每条事实能在资料包里找到出处"],
+    "connectionId": "conn-deepseek",
+    "model": "deepseek-v4-pro",
+    "effort": "high"
+  }],
+  "edges": [{ "source": "orchestrator", "target": "n1", "kind": "assign", "label": "任务 · 梳理" }],
+  "notes": ["n2 与 n3 都产出初稿"]
 }
 ```
+
+拆解按**任务**而不是按角色：节点名写任务名，`task` 说清输入与产出，`deliverable` 是具名、可交接的交付物，`acceptance` 是 2–3 条可被第三方独立判定的条件。
+
+生成后再跑一遍审校（`critique` 默认 `true`）：同一个主控换一顶「审校者」的帽子，只挑三件事——分工重叠、总目标里有没人负责的缺口、无法判定的验收条件。`verdict` 为 `revise` 时返回修正后的完整计划，问题写进 `notes`，界面用 toast 提示。
+
+服务端还会做确定性兜底：同名节点自动加序号；节点验收不足两条时补通用可判定条目；每个执行节点必须有来自主控的 `assign` 边。
 
 `connectionId` 必须来自请求中的模型列表；连线只能是 `assign` / `handoff` / `review` / `context`。解析或校验失败返回 502，Studio 会提示错误，不会改动画布。
 
