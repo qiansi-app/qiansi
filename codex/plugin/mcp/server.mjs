@@ -432,6 +432,19 @@ const tools = [
     },
   },
   {
+    name: 'delegate_task',
+    description:
+      'Hand a task from this conversation to Qiansi: the canvas orchestrator splits it into work orders (named deliverable + checkable acceptance per task), assigns models, rebuilds the worker part of the canvas, and starts a live run. Use it when the user asks Qiansi to do the work — e.g. "让牵丝来做这件事" or when delegating a research/writing/verification job. Returns the run id; poll with get_run_result.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'The task requirement, in the user\'s own words. Pass the actual text, not a summary of the whole conversation.' },
+        run: { type: 'boolean', description: 'Start the run immediately (default true). Set false to only place the workflow on the canvas.' },
+      },
+      required: ['task'],
+    },
+  },
+  {
     name: 'handoff_from_agent',
     description:
       'Continue work that is already in progress in an external agent session. Reads the most recent Claude Code / Codex transcript plus the project facts, writes a 接续上下文 library into Qiansi, and optionally auto-arranges a workflow (autoArrange, default true) and starts it (autoRun, default false). Use it when the user says 接续/继续这个会话, or when the canvas should take over from the current conversation.',
@@ -615,6 +628,20 @@ async function callTool(name, args = {}) {
         maxTokens: args.maxTokens,
       }),
     });
+  }
+
+  if (name === 'delegate_task') {
+    const data = await request('/api/delegate-task', {
+      method: 'POST',
+      body: JSON.stringify({ task: String(args.task ?? ''), run: args.run !== false }),
+    });
+    if (data?.ok && data.runId) {
+      return {
+        ...data,
+        note: `牵丝已接管：${data.tasks} 个任务${data.revised ? '（已按审校意见调整）' : ''}，运行 ${data.runId.slice(0, 8)}。用 get_run_result 跟踪进度。`,
+      };
+    }
+    return data;
   }
 
   if (name === 'list_workspaces') {

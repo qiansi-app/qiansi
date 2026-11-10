@@ -1739,6 +1739,208 @@ app.post('/api/layout', async (context) => {
 });
 
 /**
+ * 会话委托：把当前对话里的任务需求原文交给牵丝。
+ * 牵丝读画布（谁在、谁闲着、谁是主控）、读可用模型，自己拆活、定交付物与验收、
+ * 建节点连线，可选直接开跑。与 handoff 的区别：handoff 接管已有会话的上下文，
+ * 这里只接「接下来要干什么」——需求一句话，其余由牵丝安排。
+ */
+app.post('/api/delegate-task', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const task = String(body?.task ?? '').trim();
+  if (!task) return context.json({ ok: false, error: 'task_required' }, 400);
+  if (task.length > 4000) return context.json({ ok: false, error: 'task_too_long' }, 400);
+  const run = body?.run !== false; // 默认开跑：委托就是为了干活
+  const store = canvasFor(workspaceOf(context));
+
+  const current = store.read();
+  if (current.nodes.length === 0) {
+    return context.json({ ok: false, error: 'canvas_empty', hint: '先在画布上加节点，或先用一键工作流生成团队。' }, 400);
+  }
+
+  const orchestratorNode = current.nodes.find((node) => node.id === current.orchestratorId);
+  if (!orchestratorNode) {
+    return context.json({ ok: false, error: 'no_orchestrator', hint: '右键节点 → 设为主控。' }, 400);
+  }
+
+  // 可用模型：画布上现有执行节点优先（保留用户精心调好的团队），
+  // 不够时按计费策略从目录补齐。
+  const workerNodes = current.nodes.filter(
+    (node) =>
+      node.type === 'agent' &&
+      node.id !== current.orchestratorId &&
+      !['region', 'library', 'file', 'artifact'].includes(String(node.data?.kind ?? ''))
+  );
+  const known = new Set(workerNodes.map((node) => String(node.data?.model ?? '')).filter(Boolean));
+  const extra: Array<{ connectionId: string; name: string; provider: string; model: string; effort: string }> = [];
+  for (const family of modelFamilies()) {
+    const credential = await slotCredential(family.slot);
+    if (!credential) continue;
+    const preferred = preferredModel(family.models);
+    if (known.has(preferred)) continue;
+    extra.push({
+      connectionId: family.vaultRef,
+      name: family.label,
+      provider: family.label,
+      model: preferred,
+      effort: 'low',
+    });
+  }
+  if (workerNodes.length === 0 && extra.length === 0) {
+    return context.json({ ok: false, error: 'no_workers', hint: '画布上没有带模型的执行节点，目录里也没有可用 Key。' }, 400);
+  }
+
+  // 编排主控：画布主控优先，调不通就换目录里第一个可用家族。
+  const orchestrator = {
+    connectionId: String(orchestratorNode.data?.connectionId ?? ''),
+    model: String(orchestratorNode.data?.model ?? ''),
+    protocol: orchestratorNode.data?.protocol,
+    baseUrl: orchestratorNode.data?.baseUrl,
+  };
+  const fallbackOrchestrator = extra[0]
+    ? { connectionId: extra[0].connectionId, model: extra[0].model }
+    : undefined;
+
+  const origin = new URL(context.req.url).origin;
+  const candidates = fallbackOrchestrator ? [orchestrator, fallbackOrchestrator] : [orchestrator];
+  const headers = { 'content-type': 'application/json', 'x-qiansi-token': token };
+  const models = [
+    ...workerNodes.map((node) => ({
+      connectionId: String(node.data?.connectionId ?? ''),
+      name: String(node.data?.name ?? ''),
+      provider: String(node.data?.provider ?? ''),
+      model: String(node.data?.model ?? ''),
+      effort: String(node.data?.effort ?? 'medium'),
+    })),
+    ...extra,
+  ].filter((item) => item.connectionId);
+
+  let response: Response | null = null;
+  for (const candidate of candidates) {
+    if (!candidate.model) continue;
+    response = await fetch(`${origin}/api/workflow`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        goal: task,
+        orchestrator: candidate,
+        models,
+        // 画布上已有的公共资料库直接当上下文喂给编排器。
+        files: current.nodes
+          .filter((node) => String(node.data?.kind ?? '') === 'library' && node.data?.isPublic)
+          .flatMap((node) =>
+            ((node.data?.libraryFiles as Array<{ name: string }> | undefined) ?? [])
+              .slice(0, 5)
+              .map((file) => ({ name: file.name, preview: `来自资料库「${String(node.data?.name)}」` }))
+          )
+          .slice(0, 10),
+      }),
+    });
+    if (response.ok) break;
+  }
+
+  if (!response || !response.ok) {
+    const status = response?.status ?? 0;
+    return context.json({ ok: false, error: 'arrange_failed', status }, 502);
+  }
+  const raw = (await response.json().catch(() => null)) as {
+    workflow?: { summary?: string; nodes?: Array<Record<string, any>>; edges?: Array<Record<string, any>>; notes?: string[]; revised?: boolean };
+  } | null;
+  const workflow = raw?.workflow;
+  if (!workflow?.nodes?.length) {
+    return context.json({ ok: false, error: 'arrange_empty' }, 502);
+  }
+
+  // 只替换执行节点：主控与资料库不动，用户调好的团队结构保留。
+  const ops: CanvasOp[] = [];
+  const keepIds = new Set(
+    current.nodes
+      .filter((node) => node.id === current.orchestratorId || String(node.data?.kind ?? '') !== 'agent')
+      .map((node) => node.id)
+  );
+  for (const node of current.nodes) {
+    if (!keepIds.has(node.id)) ops.push({ op: 'remove_node', id: node.id });
+  }
+  // remove_node 会级联清掉连到被移除节点的边；新计划的连线在下面重建。
+  const idMap = new Map<string, string>();
+  workflow.nodes.slice(0, 10).forEach((item, index) => {
+    const id = `task-${index + 1}`;
+    idMap.set(String(item.id ?? index), id);
+    ops.push({
+      op: 'add_node',
+      node: {
+        id,
+        type: 'agent',
+        position: { x: 420 + (index % 3) * 300, y: 90 + Math.floor(index / 3) * 220 },
+        data: {
+          kind: 'agent',
+          name: String(item.name ?? `任务 ${index + 1}`),
+          role: String(item.role ?? ''),
+          task: String(item.task ?? ''),
+          deliverable: String(item.deliverable ?? ''),
+          acceptanceCriteria: Array.isArray(item.acceptance) ? item.acceptance : [],
+          provider: String(item.provider ?? ''),
+          model: String(item.model ?? ''),
+          effort: String(item.effort ?? 'medium'),
+          status: 'idle',
+          accent: '#4d6bfe',
+          connectionId: String(item.connectionId ?? ''),
+        },
+      },
+    });
+  });
+  for (const [index, edge] of (workflow.edges ?? []).entries()) {
+    const source = idMap.get(String(edge.source));
+    const target = idMap.get(String(edge.target));
+    if (!source || !target) continue;
+    ops.push({
+      op: 'add_edge',
+      edge: {
+        source,
+        target,
+        label: String(edge.label ?? ''),
+        data: { kind: String(edge.kind ?? 'handoff') },
+      },
+    });
+  }
+  const applied = store.apply(ops);
+  audit.record({
+    actor: actorOf(context),
+    action: 'delegate_task.arrange',
+    target: `r${applied.document.revision}`,
+    detail: { tasks: workflow.nodes.length, revised: workflow.revised === true },
+  });
+
+  let runId: string | null = null;
+  if (run) {
+    const started = await fetch(`${origin}/api/commands`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        commandId: `delegate-task-${randomUUID()}`,
+        type: 'run.start',
+        payload: {
+          mode: 'live',
+          goal: task.slice(0, 500),
+          budget: { maxTotalTokens: 160000, maxCallsPerTask: 3 },
+        },
+      }),
+    });
+    const startedBody = (await started.json().catch(() => null)) as { runId?: string; ok?: boolean } | null;
+    if (started.ok && startedBody?.runId) runId = startedBody.runId;
+  }
+
+  return context.json({
+    ok: true,
+    summary: String(workflow.summary ?? '').slice(0, 200),
+    tasks: workflow.nodes.length,
+    notes: workflow.notes ?? [],
+    revised: workflow.revised === true,
+    revision: applied.document.revision,
+    runId,
+  });
+});
+
+/**
  * 接续外部 agent 的会话：读最近一段真实对话 + 项目事实，合成资料包挂到画布上，
  * 可选自动编排（让主控生成工作流）与立即运行。读取全部在本地完成，注入前脱敏。
  */
