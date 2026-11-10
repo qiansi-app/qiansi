@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Long-running projects**: `run.start` accepts `resumeOf` to continue a failed or interrupted run — only tasks without output are re-executed, completed outputs are injected as upstream context, and every resumed task carries a recovery note. Also exposed as the MCP tool `resume_project` and a 续跑 button on failed/interrupted rows of the Needs-attention panel.
+- `autoResume` runs re-queue themselves after a failure or interruption (max 2 more rounds), including after a server restart; intentionally stopped runs are never auto-resumed.
+- Leadership layer: the full judge defaults to a flagship model (`judgeModel` > orchestrator node model > `deepseek-v4-pro` > relay sonnet); each run ends with a flagship review (`verdict` / `score` / `suggestions` / `action`), and a multi-model discussion starts automatically when a task failed or the average acceptance score is below 0.6.
+- Needs-attention inbox (`GET /api/attention`) aggregates pending approvals, judge `needsHuman` verdicts, failed runs and interrupted runs; the toolbar shows a badge.
+- Upstream output pruner (threshold 8192 / head 4096 / tail 1024 chars) keeps deep chains from re-injecting whole earlier outputs; workspace-level standing instructions are injected into every worker prompt.
+- Run records persist from creation; leftovers are marked `aborted` at boot; a side-effect ledger replays missing canvas write-backs and deliverables. `/api/admin/stop` and SIGINT/SIGTERM now shut down gracefully, and `qiansi watchdog [--interval 60] [--once]` supervises the server by exit code.
+
 ## 0.1.6 — 2026-10-23
 
 - Auto layout, AI refinement and one-click workflow generation now re-fit the viewport, so the whole graph is visible instead of leaving the user zoomed into one corner.
