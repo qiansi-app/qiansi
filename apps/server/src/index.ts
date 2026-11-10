@@ -1518,9 +1518,7 @@ app.post('/api/layout', async (context) => {
       ],
       { maxTokens: 600, timeoutMs: 25000 }
     );
-    const match = result.text.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('layout_output_unparseable');
-    const parsed = JSON.parse(match[0]) as { levels?: Record<string, unknown> };
+    const parsed = parseModelJson<{ levels?: Record<string, unknown> }>(result.text, 'layout_output');
     if (!parsed.levels || typeof parsed.levels !== 'object') {
       throw new Error('layout_levels_missing');
     }
@@ -1837,6 +1835,51 @@ app.post('/api/handoff', async (context) => {
   });
 });
 
+/**
+ * First balanced JSON object in the text, honouring string literals and escapes.
+ * Models routinely wrap JSON in prose or code fences; a greedy regex grabs from
+ * the first `{` to the last `}` and fails the moment either side carries extra
+ * braces. This scanner stops at the matching close brace instead.
+ */
+function extractJsonObject(text: string): string | null {
+  const start = text.indexOf('{');
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/** 解析模型输出的 JSON；失败时带上原文开头，方便看出模型到底回了什么。 */
+function parseModelJson<T>(text: string, label: string): T {
+  const raw = extractJsonObject(text);
+  if (raw) {
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      // fall through to the labelled error
+    }
+  }
+  throw new Error(
+    `${label}_unparseable · 模型原文开头：${text.replace(/\s+/g, ' ').slice(0, 160) || '（空）'}`
+  );
+}
+
 app.post('/api/workflow', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
   const goal = String(body?.goal ?? '').trim().slice(0, 4000);
@@ -1869,28 +1912,20 @@ app.post('/api/workflow', async (context) => {
     .slice(0, 5000);
 
   try {
-    const result = await completeChat(
-      vault,
+    const messages: Array<{ role: 'system' | 'assistant' | 'user'; content: string }> = [
       {
-        connectionId: orchestrator.connectionId ? String(orchestrator.connectionId) : undefined,
-        protocol: orchestrator.protocol ? String(orchestrator.protocol) : undefined,
-        baseUrl: orchestrator.baseUrl ? String(orchestrator.baseUrl) : undefined,
-        model: String(orchestrator.model),
+        role: 'system',
+        content:
+          '你是多 AI 工作流的编排器。只输出一个 JSON 对象，不要解释，不要 Markdown 代码块。',
       },
-      [
-        {
-          role: 'system',
-          content:
-            '你是多 AI 工作流的编排器。只输出一个 JSON 对象，不要解释，不要 Markdown 代码块。',
-        },
-        {
-          role: 'user',
-          content: `用户目标：${goal}
+      {
+        role: 'user',
+        content: `用户目标：${goal}
 
 可用模型：${JSON.stringify(models)}
 ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileContext}\n` : ''}
 请设计一个 3–5 个节点的工作流，并只输出：
-{"summary":"一句中文概述","nodes":[{"id":"n1","name":"研究员","role":"要做什么","connectionId":"从上面选择","effort":"low|medium|high"}],"edges":[{"source":"orchestrator","target":"n1","kind":"assign","label":"任务 · 调研"}]}
+{"summary":"一句中文概述","nodes":[{"id":"n1","name":"研究员","role":"要做什么","connectionId":"从上面选择","model":"从上面列表选择具体模型","effort":"low|medium|high"}],"edges":[{"source":"orchestrator","target":"n1","kind":"assign","label":"任务 · 调研"}]}
 
 规则：
 1. 主控节点 id 固定为 "orchestrator"，不需要出现在 nodes 里；
@@ -1899,32 +1934,75 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
 4. 有依赖的节点之间加 handoff 边，需要验收的加 review 边；
 5. effort 按任务复杂度选择；
 6. 节点名称、角色用中文，简洁具体。`,
-        },
-      ],
-      { maxTokens: 1400, timeoutMs: 60000 }
+      },
+    ];
+
+    // 会思考的模型（relay Claude）可能把预算花在推理上；预算放宽 + 失败重试
+    // 一次，重试时把上次的坏输出贴回去让它自己纠正。
+    const result = await completeChat(
+      vault,
+      {
+        connectionId: orchestrator.connectionId ? String(orchestrator.connectionId) : undefined,
+        protocol: orchestrator.protocol ? String(orchestrator.protocol) : undefined,
+        baseUrl: orchestrator.baseUrl ? String(orchestrator.baseUrl) : undefined,
+        model: String(orchestrator.model),
+      },
+      messages,
+      { maxTokens: 3200, timeoutMs: 90000 }
     );
 
-    const match = result.text.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('workflow_output_unparseable');
-    const parsed = JSON.parse(match[0]) as {
+    let text = result.text;
+    let parsed: {
       summary?: string;
       nodes?: Array<Record<string, any>>;
       edges?: Array<Record<string, any>>;
     };
+    try {
+      parsed = parseModelJson(text, 'workflow_output');
+    } catch {
+      messages.push({ role: 'assistant', content: text.slice(0, 2000) });
+      messages.push({
+        role: 'user',
+        content:
+          '你上次的输出无法解析为 JSON（可能被截断或夹带了说明文字）。只输出一个完整的 JSON 对象本身，从 { 开始到 } 结束，不要任何其他文字。',
+      });
+      const retry = await completeChat(
+        vault,
+        {
+          connectionId: orchestrator.connectionId ? String(orchestrator.connectionId) : undefined,
+          protocol: orchestrator.protocol ? String(orchestrator.protocol) : undefined,
+          baseUrl: orchestrator.baseUrl ? String(orchestrator.baseUrl) : undefined,
+          model: String(orchestrator.model),
+        },
+        messages,
+        { maxTokens: 3200, timeoutMs: 90000 }
+      );
+      text = retry.text;
+      parsed = parseModelJson(text, 'workflow_output');
+    }
 
     const allowedConnections = new Set(models.map((item: any) => item.connectionId));
     const effortValues = new Set(['off', 'low', 'medium', 'high', 'max']);
     const nodes = (Array.isArray(parsed.nodes) ? parsed.nodes : [])
       .slice(0, 6)
       .map((item: any, index: number) => {
-        const connectionId = String(item?.connectionId ?? '');
+        const connectionId = allowedConnections.has(String(item?.connectionId ?? ''))
+          ? String(item.connectionId)
+          : models[index % models.length].connectionId;
+        // 编排器会从可用模型列表里挑具体模型；没挑就按 connectionId 兜底，
+        // 否则生成的节点缺 model，画布直接判定不可运行。
+        const familyModels = models.filter((m: any) => m.connectionId === connectionId);
+        const fallbackModel = familyModels[index % Math.max(1, familyModels.length)]?.model ?? models[0].model;
+        const requestedModel = String(item?.model ?? '').trim();
+        const model = familyModels.some((m: any) => m.model === requestedModel)
+          ? requestedModel
+          : fallbackModel;
         return {
           id: String(item?.id ?? `n${index + 1}`).replace(/[^\w-]/g, '').slice(0, 24) || `n${index + 1}`,
           name: String(item?.name ?? `节点 ${index + 1}`).slice(0, 40),
           role: String(item?.role ?? '执行子任务').slice(0, 160),
-          connectionId: allowedConnections.has(connectionId)
-            ? connectionId
-            : models[index % models.length].connectionId,
+          connectionId,
+          model,
           effort: effortValues.has(String(item?.effort)) ? String(item?.effort) : 'medium',
         };
       });
