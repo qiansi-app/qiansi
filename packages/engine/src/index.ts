@@ -7,6 +7,12 @@ export { EFFORT_ORDER, effortRank, nextEffort, defaultEffortFor } from './effort
 export type { TaskKind } from './effort.js';
 export { withConnection, probeConnection, redactSecrets } from './connection.js';
 export type { ProbeOptions } from './connection.js';
-export { OpenAIChatAdapter, AnthropicMessagesAdapter, readSSE } from './providers/index.js';
-export type { SSEMessage } from './providers/index.js';
+export {
+  OpenAIChatAdapter,
+  AnthropicMessagesAdapter,
+  SearchToolAdapter,
+  WEB_SEARCH_TOOL,
+  readSSE,
+} from './providers/index.js';
+export type { SSEMessage, SearchToolOptions } from './providers/index.js';
 export * from './styles.js';

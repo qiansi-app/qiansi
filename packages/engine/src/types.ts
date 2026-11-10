@@ -42,6 +42,8 @@ export interface CapabilityProfile {
   cost?: { inputPerMTok: number; outputPerMTok: number };
   strengths?: Record<string, number>;
   domesticReachable?: boolean;
+  /** Give this profile the server-side web_search tool for its requests. */
+  webSearch?: boolean;
   measured?: {
     latencyP50Ms?: number;
     latencyP95Ms?: number;
@@ -50,11 +52,20 @@ export interface CapabilityProfile {
   };
 }
 
+export interface ToolCall {
+  id: string;
+  name: string;
+  /** Raw JSON string as the provider streamed it. */
+  arguments: string;
+}
+
 export interface NormalizedMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
   toolCallId?: string;
   name?: string;
+  /** Assistant messages that asked for tools carry them for the next round. */
+  toolCalls?: ToolCall[];
 }
 
 export interface ToolSpec {
@@ -62,6 +73,24 @@ export interface ToolSpec {
   description: string;
   parameters: Record<string, unknown>;
 }
+
+/** One ranked result from a web search provider. */
+export interface SearchHit {
+  title: string;
+  url: string;
+  snippet?: string;
+  source?: string;
+  publishedAt?: string;
+}
+
+export interface SearchQuery {
+  query: string;
+  maxResults?: number;
+  signal?: AbortSignal;
+}
+
+/** Server-side search, injected into the tool adapter. Never a model call. */
+export type SearchFn = (query: SearchQuery) => Promise<SearchHit[]>;
 
 export interface NormalizedChatRequest {
   baseUrl: string;
@@ -249,6 +278,13 @@ export type RunEvent =
   | { type: 'task.completed'; taskId: string; output: string; artifacts?: string[] }
   | { type: 'task.revised'; taskId: string; nextEffort: Effort; reason: string }
   | { type: 'task.failed'; taskId: string; error: string }
+  | {
+      type: 'search.used';
+      taskId: string;
+      nodeId: string;
+      query: string;
+      hits: number;
+    }
   | {
       type: 'usage';
       taskId: string;

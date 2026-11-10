@@ -1,9 +1,68 @@
-import type { ChatAdapter, NormalizedChatRequest, NormalizedStreamEvent } from '../types.js';
+import type {
+  ChatAdapter,
+  NormalizedChatRequest,
+  NormalizedMessage,
+  NormalizedStreamEvent,
+} from '../types.js';
 import { readSSE } from './sse.js';
 
 function messagesUrl(baseUrl: string): string {
   const trimmed = baseUrl.replace(/\/+$/, '');
   return trimmed.endsWith('/v1') ? `${trimmed}/messages` : `${trimmed}/v1/messages`;
+}
+
+interface AnthropicOutMessage {
+  role: 'user' | 'assistant';
+  content: unknown;
+}
+
+/**
+ * Anthropic has no role:"tool": a tool result is a user turn containing
+ * tool_result blocks, and the assistant turn carries tool_use blocks. Consecutive
+ * tool results are merged into one user turn, which the API expects for parallel
+ * tool calls.
+ */
+function toAnthropicMessages(messages: NormalizedMessage[]): AnthropicOutMessage[] {
+  const out: AnthropicOutMessage[] = [];
+  for (const message of messages) {
+    if (message.role === 'system') continue;
+    if (message.role === 'tool') {
+      const block = {
+        type: 'tool_result',
+        tool_use_id: message.toolCallId ?? '',
+        content: message.content,
+      };
+      const last = out[out.length - 1];
+      if (
+        last &&
+        last.role === 'user' &&
+        Array.isArray(last.content) &&
+        (last.content as Array<{ type?: string }>).every((item) => item?.type === 'tool_result')
+      ) {
+        (last.content as unknown[]).push(block);
+      } else {
+        out.push({ role: 'user', content: [block] });
+      }
+      continue;
+    }
+    if (message.role === 'assistant' && message.toolCalls?.length) {
+      const blocks: unknown[] = [];
+      if (message.content) blocks.push({ type: 'text', text: message.content });
+      for (const call of message.toolCalls) {
+        let input: unknown = {};
+        try {
+          input = call.arguments ? JSON.parse(call.arguments) : {};
+        } catch {
+          input = { raw: call.arguments };
+        }
+        blocks.push({ type: 'tool_use', id: call.id, name: call.name, input });
+      }
+      out.push({ role: 'assistant', content: blocks });
+      continue;
+    }
+    out.push({ role: message.role === 'assistant' ? 'assistant' : 'user', content: message.content });
+  }
+  return out;
 }
 
 interface AnthropicEvent {
@@ -35,9 +94,7 @@ export class AnthropicMessagesAdapter implements ChatAdapter {
       .map((message) => message.content)
       .join('\n\n');
 
-    const messages = request.messages
-      .filter((message) => message.role !== 'system')
-      .map((message) => ({ role: message.role, content: message.content }));
+    const messages = toAnthropicMessages(request.messages);
 
     const body: Record<string, unknown> = {
       model: request.model,
@@ -45,6 +102,15 @@ export class AnthropicMessagesAdapter implements ChatAdapter {
       messages,
       stream: true,
       ...(system ? { system } : {}),
+      ...(request.tools && request.tools.length > 0
+        ? {
+            tools: request.tools.map((tool) => ({
+              name: tool.name,
+              description: tool.description,
+              input_schema: tool.parameters,
+            })),
+          }
+        : {}),
       ...(request.providerParams ?? {}),
     };
 

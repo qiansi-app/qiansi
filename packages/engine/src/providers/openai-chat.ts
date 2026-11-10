@@ -31,10 +31,34 @@ export class OpenAIChatAdapter implements ChatAdapter {
   async *stream(request: NormalizedChatRequest): AsyncIterable<NormalizedStreamEvent> {
     const body: Record<string, unknown> = {
       model: request.model,
-      messages: request.messages.map((message) => ({
-        role: message.role,
-        content: message.content,
-      })),
+      messages: request.messages.map((message) => {
+        // A tool result is a role:"tool" message; the assistant turn that asked
+        // for it must carry tool_calls, or strict providers (DeepSeek, Qwen)
+        // reject the follow-up request as malformed.
+        if (message.role === 'tool') {
+          return {
+            role: 'tool',
+            content: message.content,
+            ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
+            ...(message.name ? { name: message.name } : {}),
+          };
+        }
+        if (message.role === 'assistant' && message.toolCalls?.length) {
+          return {
+            role: 'assistant',
+            content: message.content || null,
+            tool_calls: message.toolCalls.map((call) => ({
+              id: call.id,
+              type: 'function',
+              function: { name: call.name, arguments: call.arguments || '{}' },
+            })),
+          };
+        }
+        return {
+          role: message.role,
+          content: message.content,
+        };
+      }),
       stream: true,
       ...(request.maxTokens ? { max_tokens: request.maxTokens } : {}),
       ...(request.tools && request.tools.length > 0

@@ -1,5 +1,6 @@
 import { buildChatRequest, profileById } from './capability.js';
 import { nextEffort } from './effort.js';
+import { SearchToolAdapter } from './providers/search-tool.js';
 import { styleById, stylePrompt } from './styles.js';
 import type {
   AcceptanceResult,
@@ -11,6 +12,7 @@ import type {
   Protocol,
   RunEvent,
   RunResult,
+  SearchFn,
   Subtask,
   TaskStatus,
   UsageSnapshot,
@@ -35,6 +37,8 @@ export interface OrchestratorOptions {
   teamContext?: string;
   /** Optional run id so the server can create a snapshot before the run starts. */
   runId?: string;
+  /** Server-side search used by nodes whose profile has webSearch enabled. */
+  search?: SearchFn;
   accept?: (task: Subtask, output: string) => Promise<AcceptanceResult>;
   /** Return the chosen option id. Omit to auto-abort when a run stalls. */
   onChoice?: (card: ChoiceCard) => Promise<string>;
@@ -324,8 +328,25 @@ export class Orchestrator {
     directHint = false
   ): Promise<string> {
     const profile = profileById(this.options.profiles, task.profileId);
-    const adapter = this.options.adapters[profile.protocol];
-    if (!adapter) throw new Error(`No adapter registered for protocol ${profile.protocol}`);
+    const baseAdapter = this.options.adapters[profile.protocol];
+    if (!baseAdapter) throw new Error(`No adapter registered for protocol ${profile.protocol}`);
+    // Search is a server-side tool: the node keeps its own model, and the
+    // adapter loop turns web_search calls into results the model can cite.
+    const adapter =
+      profile.webSearch && this.options.search
+        ? new SearchToolAdapter(baseAdapter, {
+            search: this.options.search,
+            onSearch: ({ query, hits }) => {
+              this.emit({
+                type: 'search.used',
+                taskId: task.id,
+                nodeId: task.assignedNodeId,
+                query,
+                hits,
+              });
+            },
+          })
+        : baseAdapter;
 
     const controller = new AbortController();
     const timeoutMs = this.options.taskTimeoutMs ?? 120000;

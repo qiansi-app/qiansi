@@ -1,10 +1,12 @@
 import {
   AnthropicMessagesAdapter,
   OpenAIChatAdapter,
+  SearchToolAdapter,
   buildChatRequest,
   type ChatAdapter,
   type NormalizedMessage,
   type Protocol,
+  type SearchFn,
 } from '@qiansi/engine';
 import { profileForModel } from './model-catalog.js';
 import type { DpapiVault } from './vault.js';
@@ -21,6 +23,8 @@ export interface ChatConnection {
 export interface ChatResult {
   text: string;
   usage: { input: number; output: number; total: number };
+  /** Queries the server ran for the model, when webSearch was on. */
+  searches?: Array<{ query: string; hits: number }>;
 }
 
 const adapters: Record<Protocol, ChatAdapter> = {
@@ -49,7 +53,12 @@ export async function completeChat(
   vault: DpapiVault,
   connection: ChatConnection,
   messages: NormalizedMessage[],
-  options: { maxTokens?: number; timeoutMs?: number } = {}
+  options: {
+    maxTokens?: number;
+    timeoutMs?: number;
+    /** When provided, the model gets the server-side web_search tool. */
+    search?: SearchFn;
+  } = {}
 ): Promise<ChatResult> {
   const protocol: Protocol =
     connection.protocol === 'anthropic-messages' ? 'anthropic-messages' : 'openai-chat';
@@ -62,7 +71,15 @@ export async function completeChat(
     (connection.connectionId ? await vault.get(connection.connectionId) : null) ||
     envFallback(connection.connectionId, baseUrl);
 
-  const adapter = adapters[protocol];
+  const baseAdapter = adapters[protocol];
+  const searches: Array<{ query: string; hits: number }> = [];
+  const adapter =
+    options.search != null
+      ? new SearchToolAdapter(baseAdapter, {
+          search: options.search,
+          onSearch: ({ query, hits }) => searches.push({ query, hits }),
+        })
+      : baseAdapter;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 45000);
   let text = '';
@@ -90,5 +107,5 @@ export async function completeChat(
   } finally {
     clearTimeout(timer);
   }
-  return { text: text.trim(), usage };
+  return { text: text.trim(), usage, ...(searches.length > 0 ? { searches } : {}) };
 }

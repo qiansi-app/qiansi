@@ -164,6 +164,8 @@ export function buildPlanFromCanvas(
       String(byId.get(nodeId)!.data?.name ?? '')
     ),
     id: `canvas-${nodeId}`,
+    // 节点级开关：打开后这次运行给该节点挂服务端 web_search 工具。
+    webSearch: byId.get(nodeId)!.data?.webSearch === true,
   }));
   const slotByProfile = new Map(
     targets.map((nodeId) => [`canvas-${nodeId}`, routeOf(byId.get(nodeId)!).slot])
