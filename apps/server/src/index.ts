@@ -3360,7 +3360,7 @@ app.post('/api/commands', async (context) => {
                 position: { x: 140, y: 620 },
                 data: {
                   kind: 'artifact',
-                  name: '讨论 · 为什么没达标',
+                  name: `讨论 · 为什么没达标（${runId.slice(0, 6)}）`,
                   role: '领导层自动发起',
                   provider: '',
                   model: '',
