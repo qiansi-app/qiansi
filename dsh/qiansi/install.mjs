@@ -6,6 +6,9 @@
  *   node dsh/qiansi/install.mjs --profile qiansi --template headless
  *                                                  # create a runnable profile and install into it
  *   node dsh/qiansi/install.mjs --verify qiansi    # compose the profile and show our entries
+ *   node dsh/qiansi/install.mjs --desktop --print  # show the desktop-app layer, write nothing
+ *   node dsh/qiansi/install.mjs --desktop          # append it to the desktop profile's user layer
+ *   node dsh/qiansi/install.mjs --desktop --remove # take it back out
  *
  * The patch is generated rather than shipped because DSH evaluates `args` at
  * boot, before the bundle knows its own path; baking the absolute path in at
@@ -13,6 +16,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -107,6 +111,90 @@ if (verify) {
     console.error('  no qiansi entries in the composed config — patch did not apply');
     process.exit(1);
   }
+}
+
+// 5. Desktop app: the CLI refuses to manage its profile ("managed exclusively
+//    by the Electron application"), but cordis.patch.yml is documented as the
+//    user layer and is applied after every bundle. One insert entry is enough:
+//    @deepseek-ai/dsh-mcp-client resolves from the dsh installation, so the
+//    desktop profile needs no pnpm install and no package.json change.
+if (args.includes('--desktop')) {
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh');
+  // --patch-file 指向别处，方便在模板 profile 上演练同一段 YAML。
+  const patchFile =
+    flag('patch-file') ?? join(home, 'profiles', 'desktop', 'cordis.patch.yml');
+  if (!existsSync(patchFile)) {
+    console.error(`找不到桌面版 profile 的用户层：${patchFile}`);
+    console.error('先启动一次 DeepSeek Harness（桌面版），它会生成这个文件。');
+    process.exit(1);
+  }
+
+  const START = '# >>> qiansi-mcp (install.mjs)';
+  const END = '# <<< qiansi-mcp (install.mjs)';
+  const nodePath = process.execPath.replace(/\\/g, '/');
+  const block = [
+    START,
+    '- insert:',
+    '    # 牵丝画布 MCP：工具以 mcp__qiansi__* 注册。',
+    '    # 不需要 pnpm 安装——@deepseek-ai/dsh-mcp-client 随 dsh 安装目录解析。',
+    '    - id: qiansi-mcp',
+    "      name: '@deepseek-ai/dsh-mcp-client'",
+    '      config:',
+    '        serverName: qiansi',
+    '        transport: stdio',
+    `        command: '${nodePath}'`,
+    '        args:',
+    `          - '${entry}'`,
+    '        env:',
+    '          QIANSI_AGENT: dsh',
+    '        toolCallTimeoutMs: 120000',
+    END,
+    '',
+  ].join('\n');
+
+  const current = readFileSync(patchFile, 'utf8');
+  const hasBlock = current.includes(START);
+
+  if (args.includes('--print')) {
+    console.log(block);
+    process.exit(0);
+  }
+
+  const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const backup = `${patchFile}.bak-${Date.now()}`;
+
+  if (args.includes('--remove')) {
+    if (!hasBlock) {
+      console.log('桌面版的用户层里没有牵丝，无需移除。');
+      process.exit(0);
+    }
+    copyFileSync(patchFile, backup);
+    writeFileSync(
+      patchFile,
+      current.replace(new RegExp(`${escapeRe(START)}[\\s\\S]*?${escapeRe(END)}\\n?`), ''),
+      'utf8'
+    );
+    console.log(`已移除。备份：${backup}\n重启 DeepSeek Harness 生效。`);
+    process.exit(0);
+  }
+
+  if (hasBlock) {
+    console.log('桌面版用户层里已经有牵丝了，跳过。要移除用 --desktop --remove。');
+    process.exit(0);
+  }
+
+  // 模板 profile 的用户层是「注释 + []」；直接往后追加会变成两个根节点。
+  // 只有空数组时把 [] 摘掉再写。
+  const withoutComments = current.replace(/^[ \t]*#.*$/gm, '').trim();
+  const base = withoutComments === '[]' ? current.replace(/\[\][ \t]*(\r?\n)?$/, '') : current;
+  const trimmed = base.replace(/\s*$/, '');
+
+  copyFileSync(patchFile, backup);
+  writeFileSync(patchFile, `${trimmed}${trimmed.trim() ? '\n\n' : '\n'}${block}`, 'utf8');
+  console.log(`已写入 ${patchFile}\n备份：${backup}`);
+  console.log('重启 DeepSeek Harness 后，会话里会出现 mcp__qiansi__* 工具。');
+  console.log('（牵丝服务要先跑起来；没起时插件不会注册任何工具。）');
+  process.exit(0);
 }
 
 console.log(`\nnext:
