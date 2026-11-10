@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Auto-arrange sizes itself to the task** instead of always emitting 3–5 nodes: 2–3 for a single deliverable, 4–6 for research→write→verify work, 7–10 when the goal has several independent parts or needs multiple verification rounds. The planner and the critic both apply one test — "delete this node, which deliverable stops being produced?" — and the server caps rise to 10 nodes / 30 edges (12 subtasks per plan). The critic now also flags plans that are split too coarsely or padded to look complete, and the response says whether the plan was revised.
 - **Auto-arrange now plans tasks, not roles.** Each generated node carries a one-line work order, a named deliverable (form + required contents) and 2–3 acceptance criteria that a third party can check independently; roles are how a task is carried out, not what gets split. The plan is then reviewed by the same orchestrator wearing a critic's hat, which looks only for overlapping responsibilities, uncovered parts of the goal, and criteria nobody can judge — on a revise verdict the corrected plan replaces the draft and the issues are surfaced in the UI. Deterministic guards back it up: duplicate node names get suffixes, missing criteria get concrete fallbacks, and every worker gets an explicit assign edge.
 - The task's own deliverable and acceptance criteria now reach the worker prompt and the orchestrator's acceptance check, instead of one generic standard shared by every task.
 

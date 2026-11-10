@@ -1137,7 +1137,8 @@ export function App() {
     setRunning(false);
     // 审校发现的分工问题直接说出来，别让它只留在接口响应里。
     if (plan.notes && plan.notes.length > 0) {
-      setToast(`分工审校：${plan.notes.slice(0, 2).join('；')}`);
+      const head = plan.revised ? '分工已按审校意见调整' : '分工审校';
+      setToast(`${head}：${plan.notes.slice(0, 2).join('；')}`);
     }
     resetRunState();
     streamBuffers.current = {};

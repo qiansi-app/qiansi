@@ -3,7 +3,8 @@ import type { CanvasDocument, CanvasNode } from './canvas.js';
 import { filesForTask, type CanvasFileText } from './canvas-files.js';
 import { profileForModel, resolveModelRoute, type KeySlot } from './model-catalog.js';
 
-const MAX_SUBTASKS = 8;
+// 复杂任务可以拆到十几个节点；低于并发上限的部分会排队，代价只是时间。
+const MAX_SUBTASKS = 12;
 
 const DEFAULT_ACCEPTANCE =
   '紧扣任务目标，给出可直接使用的完整答案；不确定的地方明确标注，不编造来源或数字。';

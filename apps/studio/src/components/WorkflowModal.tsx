@@ -32,6 +32,8 @@ export interface WorkflowPlan {
   edges: WorkflowEdgePlan[];
   /** 审校者发现的分工重叠、缺口或不可判定的验收条件。 */
   notes?: string[];
+  /** notes 里的问题是否已经在返回的计划里改过。 */
+  revised?: boolean;
 }
 
 interface WorkflowModalProps {

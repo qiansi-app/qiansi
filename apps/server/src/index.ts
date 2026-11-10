@@ -1904,7 +1904,7 @@ app.post('/api/handoff', async (context) => {
           const libId =
             doc.nodes.find((node) => node.data?.name === '接续上下文')?.id ??
             `handoff-${fileId.slice(0, 8)}`;
-          generated.nodes.slice(0, 6).forEach((item, index) => {
+          generated.nodes.slice(0, 10).forEach((item, index) => {
             placed.push({
               op: 'add_node',
               node: {
@@ -2124,8 +2124,14 @@ app.post('/api/workflow', async (context) => {
 
 可用模型：${JSON.stringify(models)}
 ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileContext}\n` : ''}
-请设计一个 3–5 个节点的工作流，并只输出：
+请按任务实际需要决定规模（2–10 个节点），并只输出：
 {"summary":"一句中文概述","nodes":[{"id":"n1","name":"事实梳理","role":"用研究员视角工作","task":"一句话工单：输入是什么、要产出什么","deliverable":"交付物名称（形式：清单/表格/代码/文稿），必须包含哪几项","acceptance":["可判定的验收条件 1","验收条件 2"],"connectionId":"从上面选择","model":"从上面列表选择具体模型","effort":"low|medium|high"}],"edges":[{"source":"orchestrator","target":"n1","kind":"assign","label":"任务 · 调研"}]}
+
+规模怎么定：
+- 只有一个交付物、一条路走到底：2–3 个节点；
+- 要调研、要产出、还要核对的中等任务：4–6 个；
+- 要覆盖多个互不依赖的部分、需要多轮验证、或者要产出多种格式的复杂任务：7–10 个；
+- 宁可少一个也不要凑数。每个节点都要能回答「删掉它，哪份交付物就没人产出了」；答不上来就合并掉。反过来，一个节点如果包含两类以上互不依赖的产出，拆成两个。
 
 拆解规则（按任务拆，不按角色拆）：
 1. 先想清楚这次要交付什么，再决定分几步；每一步是一个有明确输入和输出的任务，不是一个「角色」；
@@ -2153,7 +2159,7 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
         model: String(orchestrator.model),
       },
       messages,
-      { maxTokens: 6000, timeoutMs: 120000 }
+      { maxTokens: 8000, timeoutMs: 150000 }
     );
 
     let text = result.text;
@@ -2180,7 +2186,7 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
           model: String(orchestrator.model),
         },
         messages,
-        { maxTokens: 6000, timeoutMs: 120000 }
+        { maxTokens: 8000, timeoutMs: 150000 }
       );
       text = retry.text;
       parsed = parseModelJson(text, 'workflow_output');
@@ -2190,6 +2196,7 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
     // 分工重叠、总目标有要求但没人负责的缺口、验收条件不判定。
     // 只有它明确 verdict=revise 且给出的节点仍然合法时才替换主计划。
     let planNotes: string[] = [];
+    let planRevised = false;
     if (body?.critique !== false) {
       const critiqueStarted = Date.now();
       try {
@@ -2205,7 +2212,7 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
             {
               role: 'system',
               content:
-                '你是工作流计划的审校者。只判断三件事：分工是否重叠、总目标里是否有没人负责的部分、验收条件能否被第三方独立判定。只输出一个 JSON 对象。',
+                '你是工作流计划的审校者。只判断四件事：分工是否重叠、总目标里是否有没人负责的部分、验收条件能否被第三方独立判定、节点数是否与任务规模匹配（该拆没拆，或为了凑数硬加）。只输出一个 JSON 对象。',
             },
             {
               role: 'user',
@@ -2219,10 +2226,11 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
 规则：
 1. verdict=revise 时，在 nodes/edges 里给出修正后的完整计划，字段与原计划一致；verdict=ok 时两者留空数组；
 2. 只改有问题的部分，没问题的节点原样保留；
-3. issues 写事实，不写建议措辞：例如「n2 与 n3 都产出初稿」「总目标要求的成本对比没人负责」「n1 的验收『表达清晰』无法判定」。`,
+3. issues 写事实，不写建议措辞：例如「n2 与 n3 都产出初稿」「总目标要求的成本对比没人负责」「n1 的验收『表达清晰』无法判定」；
+4. 节点数按任务实际需要判断：单一产出 2–3 个，要调研、写作再核对的中等任务 4–6 个，复杂任务 7–10 个。节点数超过所在档位上限时，只有每个多出来的节点都有独立交付物、且能被下游直接使用才算合理；否则判 revise 合并。`,
             },
           ],
-          { maxTokens: 5000, timeoutMs: 120000 }
+          { maxTokens: 7000, timeoutMs: 150000 }
         );
         const reviewed = parseModelJson<{
           verdict?: string;
@@ -2246,6 +2254,7 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
               ? reviewed.edges
               : parsed.edges) as Array<Record<string, any>>,
           };
+          planRevised = true;
         }
         audit.record({
           actor: actorOf(context),
@@ -2264,7 +2273,7 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
     const allowedConnections = new Set(models.map((item: any) => item.connectionId));
     const effortValues = new Set(['off', 'low', 'medium', 'high', 'max']);
     const nodes = (Array.isArray(parsed.nodes) ? parsed.nodes : [])
-      .slice(0, 6)
+      .slice(0, 10)
       .map((item: any, index: number) => {
         const connectionId = allowedConnections.has(String(item?.connectionId ?? ''))
           ? String(item.connectionId)
@@ -2320,7 +2329,7 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
     const ids = new Set(['orchestrator', ...nodes.map((node: any) => node.id)]);
     const kinds = new Set(['assign', 'handoff', 'review', 'context']);
     const edges = (Array.isArray(parsed.edges) ? parsed.edges : [])
-      .slice(0, 14)
+      .slice(0, 30)
       .filter((item: any) => ids.has(String(item?.source)) && ids.has(String(item?.target)))
       .map((item: any, index: number) => ({
         id: `wf-e${index + 1}`,
@@ -2353,7 +2362,9 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
         nodes,
         edges,
         // 审校者提出的问题：界面直接显示，用户不必猜分工为什么不合适。
+        // revised=true 表示这些问题已经在返回的计划里改过了。
         notes: planNotes,
+        revised: planRevised,
       },
     });
   } catch (error) {
