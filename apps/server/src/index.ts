@@ -2329,7 +2329,12 @@ app.post('/api/workflow', async (context) => {
 可用模型：${JSON.stringify(models)}
 ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileContext}\n` : ''}
 请按任务实际需要决定规模（2–10 个节点），并只输出：
-{"summary":"一句中文概述","nodes":[{"id":"n1","name":"事实梳理","role":"用研究员视角工作","task":"一句话工单：输入是什么、要产出什么","deliverable":"交付物名称（形式：清单/表格/代码/文稿），必须包含哪几项","acceptance":["可判定的验收条件 1","验收条件 2"],"connectionId":"从上面选择","model":"从上面列表选择具体模型","effort":"low|medium|high"}],"edges":[{"source":"orchestrator","target":"n1","kind":"assign","label":"任务 · 调研"}]}
+{"summary":"一句中文概述","nodes":[{"id":"n1","name":"事实梳理","role":"该环节用的方法与资料，如：逐条对照官方文档核实","task":"一句话工单：输入是什么、要产出什么","deliverable":"交付物名称（形式：清单/表格/代码/文稿），必须包含哪几项","acceptance":["可判定的验收条件 1","验收条件 2"],"connectionId":"从上面选择","model":"从上面列表选择具体模型","effort":"low|medium|high"}],"edges":[{"source":"orchestrator","target":"n1","kind":"assign","label":"任务 · 调研"}]}
+
+目标怎么定（先读这里）：
+- 对结果负责，不对字面动作负责：「帮我回客户邮件」背后往往是「让这个客户续约」。先判断用户真正要达成的结果，验收标准对着结果写（如「客户看完愿意约下一次通话」），流程围绕结果设计；
+- 但交付形态绝不改变：用户要邮件就交付邮件，要 PPT 就交付 PPT。「做一份PPT」可以升级为「让忙碌的决策者 30 分钟内看懂并拍板」，可最后一步的交付物仍然是那份 PPT——把它换成 Word、文档或口头汇报就是失败；
+- role 不写「扮演资深专家」这类角色扮演（已被行业证明不能提升质量），写这个环节实际用的资料、工具与方法，例如「逐条对照官方文档核实」「按 MECE 拆分」。
 
 规模怎么定：
 - 只有一个交付物、一条路走到底：2–3 个节点；
@@ -2348,7 +2353,9 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
 8. 有依赖的节点之间加 handoff 边，边的 label 写清楚交的是什么（如「事实卡 → 起草」）；
 9. 需要独立验收的加 review 边；
 10. effort 按任务复杂度选择；
-11. 分工不要重叠：两个节点不能产出同一份交付物；也不要留空档——总目标里明确要求的每一块，都要有节点负责。`,
+11. 分工不要重叠：两个节点不能产出同一份交付物；也不要留空档——总目标里明确要求的每一块，都要有节点负责；
+12. 最终交付节点（把成果交给用户的那一步）的 acceptance 里要有一条形态标准：交付物形态与用户要求的形态一致；
+13. 目标保真是红线：允许提升目标层级（对结果负责），不允许更换交付物形态。`,
       },
     ];
 
@@ -2416,7 +2423,7 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
             {
               role: 'system',
               content:
-                '你是工作流计划的审校者。只判断四件事：分工是否重叠、总目标里是否有没人负责的部分、验收条件能否被第三方独立判定、节点数是否与任务规模匹配（该拆没拆，或为了凑数硬加）。只输出一个 JSON 对象。',
+                '你是工作流计划的审校者。只判断五件事：分工是否重叠、总目标里是否有没人负责的部分、验收条件能否被第三方独立判定、节点数是否与任务规模匹配（该拆没拆，或为了凑数硬加）、交付物形态是否与用户要求的形态一致（允许提升目标层级，不允许更换形态）。只输出一个 JSON 对象。',
             },
             {
               role: 'user',
@@ -2430,7 +2437,7 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
 规则：
 1. verdict=revise 时，在 nodes/edges 里给出修正后的完整计划，字段与原计划一致；verdict=ok 时两者留空数组；
 2. 只改有问题的部分，没问题的节点原样保留；
-3. issues 写事实，不写建议措辞：例如「n2 与 n3 都产出初稿」「总目标要求的成本对比没人负责」「n1 的验收『表达清晰』无法判定」；
+3. issues 写事实，不写建议措辞：例如「n2 与 n3 都产出初稿」「总目标要求的成本对比没人负责」「n1 的验收『表达清晰』无法判定」「用户要 PPT，n4 的交付物却是一份文字稿，形态被换了」；
 4. 节点数按任务实际需要判断：单一产出 2–3 个，要调研、写作再核对的中等任务 4–6 个，复杂任务 7–10 个。节点数超过所在档位上限时，只有每个多出来的节点都有独立交付物、且能被下游直接使用才算合理；否则判 revise 合并。`,
             },
           ],
@@ -2556,6 +2563,41 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
           kind: 'assign',
           label: `任务 · ${node.name}`,
         });
+      }
+    }
+
+    // 目标保真的确定性兜底：目标里点名的交付形态（PPT/文档/表格…），必须出现在
+    // 至少一个节点的交付物里。模型忘了就把形态补到交付节点上——提升目标层级
+    // 可以，更换交付形态不行。补了什么会写进 notes，让用户看得见。
+    const FORM_KEYWORDS = ['PPT', '幻灯', 'slides', 'Word', '文档', '表格', '代码', '邮件', '报告', '清单', '视频', '海报', '长图', '备忘录', '指南', '手册', '文案', '脚本'];
+    const formMentions =
+      goal.match(
+        /(做|写|产出|生成|输出|交付|准备|整理|制作)[^。；;]{0,24}(PPT|幻灯|slides|Word|文档|表格|代码|邮件|报告|清单|视频|海报|长图|备忘录|指南|手册|文案|脚本)/gi
+      ) ?? [];
+    const wantedForms = [
+      ...new Set(
+        formMentions.flatMap((mention) =>
+          FORM_KEYWORDS.filter((keyword) => mention.toLowerCase().includes(keyword.toLowerCase()))
+        )
+      ),
+    ];
+    if (wantedForms.length > 0) {
+      const covered = nodes.some((node) =>
+        wantedForms.some((form) => String(node.deliverable).toLowerCase().includes(form.toLowerCase()))
+      );
+      if (!covered) {
+        // 交付节点 = 不再向下游交付任何东西的节点；找不到就取排最后的。
+        const downstream = new Set(
+          edges.filter((edge) => edge.kind === 'handoff' || edge.kind === 'review').map((edge) => edge.source)
+        );
+        const delivery = nodes.find((node) => !downstream.has(node.id)) ?? nodes[nodes.length - 1];
+        const formText = wantedForms.join('/');
+        delivery.deliverable = `${delivery.deliverable}（形态：${formText}）`.slice(0, 140);
+        const formAcceptance = `最终交付物保持${formText}形态，不得替换为其他形式`;
+        if (!delivery.acceptance.includes(formAcceptance)) delivery.acceptance.push(formAcceptance);
+        planNotes.push(
+          `目标点名的交付形态（${formText}）没出现在任何交付物里，已补到「${delivery.name}」并加为验收`
+        );
       }
     }
 

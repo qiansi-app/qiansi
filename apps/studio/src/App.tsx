@@ -29,6 +29,7 @@ import { Toolbar } from './components/Toolbar';
 import { WorkflowModal, type WorkflowPlan } from './components/WorkflowModal';
 import { catalogOf, initialModels, preferredModel, type ModelDraft } from './data/models';
 import { loadSettings, saveSettings, type AppSettings } from './data/settings';
+import { decideTakeover } from './lib/takeover';
 import { layeredLayout } from './data/layout';
 import {
   initialEdges,
@@ -2849,9 +2850,22 @@ export function App() {
     push(nodeId, 'user', text);
     // Talking to the orchestrator is how a session starts: it plans, hands out
     // work and accepts the result — the same order a conversation follows.
-    if (settings.autoOrchestrate && nodeId === orchestratorId && !running) {
+    // 降级必须说出来：运行中发消息会变成普通对话，不说用户就以为接管坏了。
+    const takeover = decideTakeover({
+      autoOrchestrate: settings.autoOrchestrate,
+      isOrchestrator: nodeId === orchestratorId,
+      running,
+    });
+    if (takeover.action === 'run') {
       await run(text);
       return;
+    }
+    if (takeover.action === 'chat-downgraded') {
+      push(
+        nodeId,
+        'assistant',
+        '已开启自动编排，但上一轮运行还在进行中，这条消息先按普通对话回复；等它结束后再发一次，就会触发完整编排。'
+      );
     }
     const node = nodes.find((item) => item.id === nodeId)?.data;
     const model = models.find((item) => item.id === node?.connectionId);
@@ -3242,7 +3256,12 @@ export function App() {
             models={models}
             onClose={() => setSelection(null)}
             onSend={(text) => {
-              if (drawer.mode === 'node' && selectedNode) send(selectedNode.id, text);
+              if (drawer.mode === 'node' && selectedNode) {
+                send(selectedNode.id, text);
+              } else {
+                // 吞掉输入不回话，用户会以为整条链路都坏了。
+                setToast('这是连线会话（只读）。点一个节点再发消息。');
+              }
             }}
             onEffortChange={(effort) => {
               if (selectedNode) changeEffort(selectedNode.id, effort);
