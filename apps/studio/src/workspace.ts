@@ -35,5 +35,8 @@ export function workspaceHeader(): string {
 /** 切换并整页重载：确保没有跨工作区的残留状态。 */
 export function switchWorkspace(id: string): void {
   setCurrentWorkspace(id);
+  // 服务端也有「当前画布」，脚本/MCP/无头请求都以它兜底；不通知的话，
+  // 关标签、新开窗口、无工作区头的请求都会落回旧画布。
+  void fetch(`/api/workspaces/${encodeURIComponent(id)}/activate`, { method: 'POST' }).catch(() => undefined);
   window.location.reload();
 }

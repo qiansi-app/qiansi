@@ -30,6 +30,8 @@ export function ApprovalsModal({ open, onClose }: ApprovalsModalProps) {
     }
   };
 
+  const [error, setError] = useState("");
+
   useEffect(() => {
     if (!open) return;
     void load();
@@ -41,14 +43,20 @@ export function ApprovalsModal({ open, onClose }: ApprovalsModalProps) {
 
   const resolve = async (id: string, decision: 'approved' | 'denied') => {
     try {
-      await fetch(`/api/approvals/${id}/resolve`, {
+      const response = await fetch(`/api/approvals/${id}/resolve`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ decision }),
       });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as { error?: string } | null;
+        setError(body?.error ?? `审批失败：HTTP ${response.status}`);
+        return;
+      }
+      setError('');
       await load();
-    } catch {
-      // keep the list; the next poll retries
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '审批请求失败');
     }
   };
 
@@ -61,6 +69,7 @@ export function ApprovalsModal({ open, onClose }: ApprovalsModalProps) {
         aria-label="待审批"
         onClick={(event) => event.stopPropagation()}
       >
+        {error && <div className="keys-error">{error}</div>}
         <div className="modal-head">
           <div>
             <div className="modal-title">待审批动作</div>

@@ -1527,6 +1527,31 @@ textarea {
 .workspace-switcher .workspace-delete:hover:not(:disabled) { border-color: rgba(239, 68, 68, 0.55); color: #f87171; }
 .workspace-empty-hint { font-size: 11px; color: #6f8095; }
 
+/* 画布标签栏：一个工作流 = 一个标签页 */
+.workspace-tabs { display: inline-flex; align-items: center; gap: 4px; max-width: 52vw; overflow-x: auto; scrollbar-width: none; }
+.workspace-tabs::-webkit-scrollbar { display: none; }
+.workspace-tab {
+  display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px 4px 10px;
+  border: 1px solid rgba(147, 164, 187, 0.2); border-radius: 8px; cursor: pointer;
+  color: #a9b8c9; font-size: 12px; white-space: nowrap; background: rgba(14, 19, 24, 0.55);
+}
+.workspace-tab:hover { border-color: rgba(56, 217, 194, 0.4); }
+.workspace-tab.active { border-color: #38d9c2; background: rgba(56, 217, 194, 0.1); color: #dce6f2; }
+.workspace-tab-name { max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
+.workspace-tab-running { width: 7px; height: 7px; border-radius: 999px; background: #10b981; box-shadow: 0 0 6px rgba(16, 185, 129, 0.8); animation: tab-pulse 1.4s ease-in-out infinite; }
+@keyframes tab-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.workspace-tab-close { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 4px; background: transparent; border: none; color: #7f8fa3; cursor: pointer; }
+.workspace-tab-close:hover { background: rgba(239, 68, 68, 0.18); color: #f87171; }
+.workspace-history-anchor { position: relative; display: inline-flex; }
+.workspace-history { position: absolute; top: calc(100% + 8px); right: 0; z-index: 60; width: 330px; max-height: 46vh; overflow-y: auto; background: #101923; border: 1px solid rgba(147,164,187,0.25); border-radius: 10px; padding: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.45); display: flex; flex-direction: column; gap: 8px; }
+.workspace-history-title { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #e6edf6; }
+.workspace-history-empty { font-size: 11px; color: #6f8095; padding: 6px 0; }
+.workspace-history-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; border: 1px solid rgba(147,164,187,0.14); border-radius: 8px; }
+.workspace-history-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.workspace-history-meta b { font-size: 12px; color: #dce6f2; }
+.workspace-history-meta span { font-size: 10px; color: #7f8fa3; }
+.workspace-history-actions { display: flex; gap: 6px; flex: none; }
+
 /* 节点上的阶段产物：可点开全文 */
 .node-artifact.openable {
   display: block; width: 100%; text-align: left; cursor: pointer;

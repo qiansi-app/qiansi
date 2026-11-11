@@ -39,6 +39,7 @@ import {
   canvasSummary,
   canvasSvg,
   writeRunArtifacts,
+  type CanvasNode,
   type CanvasOp,
 } from './canvas.js';
 import { collectCanvasFiles, fileSummary } from './canvas-files.js';
@@ -1456,6 +1457,7 @@ app.post('/api/chat', async (context) => {
     );
     return context.json({ ok: true, ...result });
   } catch (error) {
+    console.error('[workflow] failed', error);
     return context.json(
       { ok: false, error: redactSecrets(error instanceof Error ? error.message : String(error), []) },
       502
@@ -1744,18 +1746,92 @@ app.post('/api/layout', async (context) => {
  * 建节点连线，可选直接开跑。与 handoff 的区别：handoff 接管已有会话的上下文，
  * 这里只接「接下来要干什么」——需求一句话，其余由牵丝安排。
  */
+/**
+ * 合成主控：当前画布没设主控时，按计费策略挑一个有 Key 的家族顶上——
+ * 委托/接续不该因为「没右键设主控」就整个失败。
+ */
+async function synthesizedOrchestratorNode(): Promise<CanvasNode | null> {
+  const strategy = quota.strategy();
+  const candidates = modelFamilies()
+    .map((family) => ({ family, slot: family.slot }))
+    .filter(({ slot }) => Boolean(quota.slot(slot)?.keys.length));
+  const scores = orderByStrategy(
+    candidates.map(({ slot }) => {
+      const price = quota.prices()[slot];
+      return {
+        slot,
+        billing: quota.billingOf(slot),
+        priceCnyPerM: (price.in + price.out) / 2,
+        performance: performanceOf(slot),
+        headroom: quota.headroom(slot),
+      };
+    }),
+    strategy
+  );
+  for (const score of scores) {
+    const credential = await slotCredential(score.slot);
+    if (!credential) continue;
+    const family = modelFamilies().find((item) => item.slot === score.slot);
+    if (!family) continue;
+    const model = preferredModel(family.models);
+    return {
+      id: 'orchestrator',
+      type: 'agent',
+      position: { x: 60, y: 200 },
+      data: {
+        kind: 'orchestrator',
+        name: '主控',
+        role: '拆解 · 分派 · 验收',
+        provider: family.label,
+        model,
+        effort: 'high',
+        status: 'idle',
+        accent: '#ff7a45',
+        metric: 'ready',
+        connectionId: family.vaultRef,
+        protocol: family.protocol,
+        baseUrl: family.baseUrl,
+      },
+    };
+  }
+  return null;
+}
+
 app.post('/api/delegate-task', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
   const task = String(body?.task ?? '').trim();
   if (!task) return context.json({ ok: false, error: 'task_required' }, 400);
   if (task.length > 4000) return context.json({ ok: false, error: 'task_too_long' }, 400);
   const run = body?.run !== false; // 默认开跑：委托就是为了干活
-  const store = canvasFor(workspaceOf(context));
+  // 一个工作流一张画布：委托新建一张，不覆盖你正在看的这张。
+  const wsName = checkWorkspaceName(task.split(/[。；;\n]/)[0]?.slice(0, 24) || '委托任务');
+  const createdWs = workspaces.create(wsName.ok ? wsName.name : '委托任务');
+  const wsId = createdWs.id;
+  const store = canvasFor(wsId);
 
-  const current = store.read();
-  if (current.nodes.length === 0) {
-    return context.json({ ok: false, error: 'canvas_empty', hint: '先在画布上加节点，或先用一键工作流生成团队。' }, 400);
+  /** 落盘 ops：主控节点与 orchestratorId 必须写进存储，内存副本不算数。 */
+  const initOps: CanvasOp[] = [];
+  if (store.read().nodes.length === 0) {
+    // 新画布天生是空的：优先沿用当前画布的主控；没有就按计费策略合成一个。
+    const sourceCanvas = canvasFor(workspaceOf(context)).read();
+    const orchestratorNode =
+      sourceCanvas.nodes.find((node) => node.id === sourceCanvas.orchestratorId) ??
+      (await synthesizedOrchestratorNode());
+    if (!orchestratorNode) {
+      workspaces.archive(wsId);
+      return context.json(
+        { ok: false, error: 'no_orchestrator', hint: '没有任何可用模型 Key，无法合成主控。先在「密钥与额度」里配一个。' },
+        400
+      );
+    }
+    initOps.push({ op: 'add_node', node: orchestratorNode });
+    initOps.push({ op: 'set_orchestrator', id: orchestratorNode.id });
   }
+  if (initOps.length > 0) {
+    store.apply(initOps);
+  }
+  // 落盘后重读：initOps 之前的内存副本没有 orchestratorId。
+  const current = store.read();
 
   const orchestratorNode = current.nodes.find((node) => node.id === current.orchestratorId);
   if (!orchestratorNode) {
@@ -1911,12 +1987,12 @@ app.post('/api/delegate-task', async (context) => {
   });
 
   let runId: string | null = null;
+  let runError: string | null = null;
   if (run) {
-    // 运行必须落回委托者所在的工作区：内部请求不带工作区头时会解析成
-    // 「当前激活」的工作区，别人委托的活会跑到别人正在看的画布上。
+    // 运行落在委托新建的那张画布上（一个工作流一张画布）。
     const started = await fetch(`${origin}/api/commands`, {
       method: 'POST',
-      headers: { ...headers, 'x-qiansi-workspace': workspaceOf(context) },
+      headers: { ...headers, 'x-qiansi-workspace': wsId },
       body: JSON.stringify({
         commandId: `delegate-task-${randomUUID()}`,
         type: 'run.start',
@@ -1927,18 +2003,33 @@ app.post('/api/delegate-task', async (context) => {
         },
       }),
     });
-    const startedBody = (await started.json().catch(() => null)) as { runId?: string; ok?: boolean } | null;
+    const startedBody = (await started.json().catch(() => null)) as {
+      runId?: string;
+      ok?: boolean;
+      error?: string;
+      hint?: string;
+      reasons?: string[];
+    } | null;
     if (started.ok && startedBody?.runId) runId = startedBody.runId;
+    if (!runId) {
+      // 失败要带着原因回去，画布保留——用户要看得见为什么没跑。
+      runError = startedBody?.error ?? `HTTP ${started.status}`;
+      if (startedBody?.reasons?.length) runError += `：${startedBody.reasons.join('；')}`;
+      if (startedBody?.hint) runError += `（${startedBody.hint}）`;
+    }
   }
 
   return context.json({
     ok: true,
+    workspaceId: wsId,
+    workspaceName: createdWs.name,
     summary: String(workflow.summary ?? '').slice(0, 200),
     tasks: workflow.nodes.length,
     notes: workflow.notes ?? [],
     revised: workflow.revised === true,
     revision: applied.document.revision,
     runId,
+    runError,
   });
 });
 
@@ -1952,9 +2043,19 @@ app.post('/api/handoff', async (context) => {
   const source =
     body?.source === 'codex' || body?.source === 'claude-code' ? body.source : 'auto';
   const autoArrange = body?.autoArrange !== false;
-  const autoRun = body?.autoRun === true;
+  // 默认开跑：接续就是把活交给牵丝，不是只搬资料。
+  const autoRun = body?.autoRun !== false;
+  // 任务原文：用户可以直接在弹窗里写，不写才从会话里取。
+  const taskOverride = String(body?.task ?? '').trim().slice(0, 4000);
 
   const pack = buildHandoffPack({ cwd, source });
+
+  // 一个工作流一张画布：接续新建一张，不碰你正在看的。
+  const goalGuess = (taskOverride || pack.session?.userAsks.at(-1) || '').split(/[。；;\n]/)[0]?.slice(0, 24) ?? '';
+  const wsName = checkWorkspaceName(goalGuess || '接续会话');
+  const createdWs = workspaces.create(wsName.ok ? wsName.name : '接续会话');
+  const handoffWsId = createdWs.id;
+  const handoffStore = canvasFor(handoffWsId);
 
   const fileId = randomUUID();
   const filesDir = join(stateDir, 'files');
@@ -1973,8 +2074,19 @@ app.post('/api/handoff', async (context) => {
     );
   }
 
-  const document = canvasFor(workspaceOf(context)).read();
+  // 接续画布天生是空的：优先沿用当前画布的主控；没有就按计费策略合成一个。
+  const handoffOrchestratorSource = canvasFor(workspaceOf(context)).read();
+  const handoffOrchestratorNode =
+    handoffOrchestratorSource.nodes.find(
+      (node) => node.id === handoffOrchestratorSource.orchestratorId
+    ) ?? (await synthesizedOrchestratorNode());
+  const document = handoffStore.read();
   const ops: CanvasOp[] = [];
+  if (handoffOrchestratorNode) {
+    ops.push({ op: 'add_node', node: handoffOrchestratorNode });
+    // orchestratorId 必须落盘，否则这张画布判定不可运行。
+    ops.push({ op: 'set_orchestrator', id: handoffOrchestratorNode.id });
+  }
   const library = document.nodes.find((node) => node.data?.name === '接续上下文');
   const metric = `${pack.session?.source ?? 'project'} · ${pack.session?.messageCount ?? 0} 条`;
   if (library) {
@@ -2006,7 +2118,7 @@ app.post('/api/handoff', async (context) => {
       },
     });
   }
-  canvasFor(workspaceOf(context)).apply(ops);
+  handoffStore.apply(ops);
 
   const arranged: { nodes: number; edges: number } = { nodes: 0, edges: 0 };
   if (autoArrange && pack.session) {
@@ -2051,13 +2163,13 @@ app.post('/api/handoff', async (context) => {
     );
 
     const goalParts = [
-      pack.session.userAsks.at(-1) ?? '',
-      pack.session.conclusions.at(-1) ?? '',
+      taskOverride || pack.session?.userAsks.at(-1) || '',
+      pack.session?.conclusions.at(-1) ?? '',
     ].filter(Boolean);
-    const goal = (goalParts.join('\n') || `接续 ${pack.session.source} 会话的工作`).slice(0, 1200);
+    const goal = (goalParts.join('\n') || `接续 ${pack.session?.source ?? 'agent'} 会话的工作`).slice(0, 1200);
     console.log(`[handoff] available models: ${available.length}`, available.map((m) => m.connectionId).join(','));
     if (available.length > 0) {
-      const current = canvasFor(workspaceOf(context)).read();
+      const current = handoffStore.read();
       const orchestratorNode = current.nodes.find((node) => node.id === current.orchestratorId);
       const orchestrator = orchestratorNode
         ? {
@@ -2067,14 +2179,25 @@ app.post('/api/handoff', async (context) => {
             baseUrl: orchestratorNode.data?.baseUrl,
           }
         : { connectionId: available[0]!.connectionId, model: available[0]!.model };
-      // 先用画布自己的主控；它调不通（例如中转断了）就退到目录里可用的模型。
-      const orchestrators = [
-        orchestrator,
-        { connectionId: available[0]!.connectionId, model: available[0]!.model },
-      ];
+      // 主控候选：画布主控优先，之后把每个可用模型都试一遍。
+      // 单只 Key 失效时不能让整个接续失败。
+      const seenModels = new Set<string>();
+      const orchestrators = [orchestrator, ...available.map((item) => ({ connectionId: item.connectionId, model: item.model }))]
+        .filter((candidate) => {
+          if (!candidate.model || seenModels.has(candidate.model)) return false;
+          seenModels.add(candidate.model);
+          return true;
+        });
       try {
         let response: Response | null = null;
+        console.log();
+        const deadline = Date.now() + 90_000;
         for (const candidate of orchestrators) {
+          if (Date.now() > deadline) {
+            pack.notes.push('自动编排超时（90 秒），已跳过剩余候选。');
+            break;
+          }
+          try {
           response = await fetch(`${origin}/api/workflow`, {
             method: 'POST',
             headers: { 'content-type': 'application/json', 'x-qiansi-token': token },
@@ -2083,9 +2206,15 @@ app.post('/api/handoff', async (context) => {
               orchestrator: candidate,
               models: available,
               files: [{ name: fileName, preview: pack.markdown.slice(0, 900) }],
+              // 接续要快：跳过第二遍审校。形态兜底与派活边补齐仍是确定性的。
+              critique: false,
             }),
           });
           if (response.ok) break;
+          } catch (candidateError) {
+            pack.notes.push(`候选 ${candidate.model} 失败：${candidateError instanceof Error ? candidateError.message : String(candidateError)}`);
+            response = null;
+          }
         }
         if (!response) throw new Error('workflow_unavailable');
         // /api/workflow 返回 { ok, workflow: { summary, nodes, edges } }
@@ -2100,10 +2229,11 @@ app.post('/api/handoff', async (context) => {
         };
         console.log(`[handoff] workflow status=${response.status} nodes=${generated.nodes.length}`);
         if (!response.ok) {
-          pack.notes.push(`自动编排失败：/api/workflow 返回 HTTP ${response.status}`);
+          const detail = await response.text().catch(() => '');
+          pack.notes.push(`自动编排失败：/api/workflow 返回 HTTP ${response.status} ${detail.slice(0, 200)}`);
         }
         if (response.ok && generated?.nodes?.length) {
-          const doc = canvasFor(workspaceOf(context)).read();
+          const doc = handoffStore.read();
           const placed: CanvasOp[] = [];
           const libId =
             doc.nodes.find((node) => node.data?.name === '接续上下文')?.id ??
@@ -2149,7 +2279,7 @@ app.post('/api/handoff', async (context) => {
               },
             });
           }
-          const applied = canvasFor(workspaceOf(context)).apply(placed);
+          const applied = handoffStore.apply(placed);
           arranged.nodes = generated.nodes.length;
           arranged.edges = (generated.edges ?? []).length + generated.nodes.length;
           audit.record({
@@ -2186,13 +2316,17 @@ app.post('/api/handoff', async (context) => {
   if (autoRun && arranged.nodes > 0) {
     try {
       const origin = new URL(context.req.url).origin;
+      // 运行落在接续新建的那张画布上，goal 用任务原文。
       const started = await fetch(`${origin}/api/commands`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-qiansi-token': token },
+        headers: { 'content-type': 'application/json', 'x-qiansi-token': token, 'x-qiansi-workspace': handoffWsId },
         body: JSON.stringify({
           commandId: `handoff-run-${randomUUID()}`,
           type: 'run.start',
-          payload: { mode: 'live', goal: '接续 agent 会话继续工作' },
+          payload: {
+            mode: 'live',
+            goal: (taskOverride || pack.session?.userAsks.at(-1) || '接续 agent 会话继续工作').slice(0, 500),
+          },
         }),
       });
       const startedBody = (await started.json().catch(() => null)) as {
@@ -2204,9 +2338,16 @@ app.post('/api/handoff', async (context) => {
       // 运行没起也不影响已写入的上下文
     }
   }
+  if (arranged.nodes === 0) {
+    // 编排没产出：新画布只有一张资料库，归档进历史别占标签栏。
+    workspaces.archive(handoffWsId);
+  }
 
   return context.json({
     ok: true,
+    archived: arranged.nodes === 0,
+    workspaceId: handoffWsId,
+    workspaceName: createdWs.name,
     session: pack.session
       ? {
           source: pack.session.source,
@@ -2614,6 +2755,7 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
       },
     });
   } catch (error) {
+    console.error('[workflow] failed', error);
     return context.json(
       { ok: false, error: redactSecrets(error instanceof Error ? error.message : String(error), []) },
       502
@@ -2649,16 +2791,46 @@ app.post('/api/files', async (context) => {
 });
 
 /** 工作区：一张画布 + 一份运行历史。 */
-app.get('/api/workspaces', (context) =>
-  context.json({
+app.get('/api/workspaces', (context) => {
+  const includeArchived = context.req.query('includeArchived') === '1';
+  const runningByWorkspace = new Map<string, number>();
+  for (const run of store.running()) {
+    const key = run.workspaceId ?? 'main';
+    runningByWorkspace.set(key, (runningByWorkspace.get(key) ?? 0) + 1);
+  }
+  const items = (includeArchived ? workspaces.list() : workspaces.listActive()).map((meta) => ({
+    ...meta,
+    canvasExists: canvasFor(meta.id).exists(),
+    running: runningByWorkspace.get(meta.id) ?? 0,
+  }));
+  return context.json({
     ok: true,
     current: workspaces.current(),
-    items: workspaces.list().map((meta) => ({
-      ...meta,
-      canvasExists: canvasFor(meta.id).exists(),
-    })),
-  })
-);
+    items,
+    archived: includeArchived
+      ? undefined
+      : workspaces.listArchived().map((meta) => ({ ...meta, canvasExists: canvasFor(meta.id).exists() })),
+  });
+});
+
+/** 关标签页：软删除进「历史画布」，可从历史恢复或彻底删除。 */
+app.post('/api/workspaces/:id/archive', (context) => {
+  const id = context.req.param('id');
+  const result = workspaces.archive(id);
+  if (!result.ok) {
+    return context.json({ ok: false, error: result.reason }, result.reason === 'not_found' ? 404 : 409);
+  }
+  audit.record({ actor: actorOf(context), action: 'workspace.archive', target: id });
+  return context.json({ ok: true, current: result.current });
+});
+
+app.post('/api/workspaces/:id/restore', (context) => {
+  const id = context.req.param('id');
+  const result = workspaces.restore(id);
+  if (!result.ok) return context.json({ ok: false, error: result.reason }, 404);
+  audit.record({ actor: actorOf(context), action: 'workspace.restore', target: id });
+  return context.json({ ok: true });
+});
 
 const NAME_ENCODING_HINT =
   '名字里有无法解码的字节（U+FFFD）。通常是调用方用了非 UTF-8 编码发送请求——Windows 控制台默认 GBK，请改用 UTF-8 或直接用界面/Node 的 fetch。';
@@ -4049,6 +4221,44 @@ app.post('/api/commands', async (context) => {
   return context.json(response);
 });
 
+/**
+ * 把一个任务的完整产出落成真实文件。画布的「存为文件」按钮直接调这里——
+ * 之前前端调一个不存在的路由，按钮永远是 404。
+ */
+app.post('/api/deliverables/:taskId', async (context) => {
+  const taskId = context.req.param('taskId');
+  const body = (await context.req.json().catch(() => null)) as { runId?: string } | null;
+  const ordered = body?.runId
+    ? [store.get(body.runId)].filter((item): item is NonNullable<typeof item> => Boolean(item))
+    : store.list().slice(0, 30).map((item) => store.get(item.runId)).filter((item): item is NonNullable<typeof item> => Boolean(item));
+  const run = ordered.find((item) => String(item.outputs?.[taskId] ?? '').trim().length > 0);
+  if (!run) return context.json({ error: 'run_or_task_not_found' }, 404);
+  try {
+    const files = saveRunDeliverables({
+      stateDir,
+      workspaceId: run.workspaceId ?? 'main',
+      runId: run.runId,
+      goal: run.goal,
+      plan: run.plan,
+      outputs: run.outputs,
+    });
+    const found = files.find((item) => item.taskId === taskId);
+    if (!found) return context.json({ error: 'task_not_found' }, 404);
+    audit.record({
+      actor: actorOf(context),
+      action: 'deliverable.save',
+      target: run.runId,
+      detail: { taskId, bytes: found.bytes },
+    });
+    return context.json({ ok: true, file: found.file, bytes: found.bytes });
+  } catch (error) {
+    return context.json(
+      { error: redactSecrets(error instanceof Error ? error.message : String(error), []) },
+      500
+    );
+  }
+});
+
 app.get('/api/runs', (context) => {
   const wanted = context.req.header('x-qiansi-workspace') ?? context.req.query('ws');
   const items = store.list();
@@ -4445,8 +4655,14 @@ app.post('/v1/chat/completions', async (context) => {
   });
 });
 
-const studioDir =
-  process.env.QIANSI_STUDIO_DIR ?? join(process.cwd(), '..', 'studio', 'dist');
+// 优先仓库内的构建产物：VS Code 扩展会把 QIANSI_STUDIO_DIR 指到它安装时的副本，
+// 那份副本会越来越旧，用户于是看到几个月前的界面。
+const studioCandidates = [
+  join(process.cwd(), 'apps', 'studio', 'dist'),
+  join(process.cwd(), '..', 'studio', 'dist'),
+  process.env.QIANSI_STUDIO_DIR,
+].filter((item): item is string => Boolean(item));
+const studioDir = studioCandidates.find((item) => existsSync(join(item, 'index.html'))) ?? studioCandidates[0]!;
 
 // Anything under /api or /v1 that no route claimed is a 404 JSON, never the SPA.
 // This must sit before the static catch-all, which would otherwise swallow it.

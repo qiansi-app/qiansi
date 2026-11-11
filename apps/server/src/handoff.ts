@@ -126,6 +126,88 @@ function toolNames(content: unknown): string[] {
     .filter(Boolean);
 }
 
+/**
+ * 真用户消息的判定：Claude Code 的 jsonl 里 tool_result 也挂着 role=user，
+ * 不滤掉的话，「Tool loaded.」这类工具返回会被当成用户需求交给编排器。
+ */
+export function isRealUserText(entry: Record<string, unknown>, text: string): boolean {
+  if (!text) return false;
+  const message = entry.message as { content?: unknown } | undefined;
+  if (Array.isArray(message?.content)) {
+    const blocks = message.content as Array<Record<string, unknown>>;
+    if (blocks.some((block) => block?.type === 'tool_result')) return false;
+    if (!blocks.some((block) => block?.type === 'text')) return false;
+  }
+  const stripped = text.trim();
+  if (stripped.length < 8) return false;
+  // 系统注入与命令回显不是用户的话
+  if (/^<[^>]+>|^Caveat:/.test(stripped)) return false;
+  if (stripped.startsWith('[command-name]')) return false;
+  // 纯 ASCII 短词（Tool loaded. / (no content)）不是需求
+  if (!/[一-龥]|[a-zA-Z]{4,}/.test(stripped)) return false;
+  return true;
+}
+
+/**
+ * 从文件尾分块回扫，直到找到 wantAsks 条「真正的用户文本消息」。
+ * 会话文件可能有上百 MB（工具输出很大），固定窗口会整段错过最新需求。
+ */
+function collectRecentAsks(file: string, wantAsks = 4, maxBytes = 256 * 1024 * 1024): string[] {
+  const info = statSync(file);
+  const chunkSize = 1024 * 1024;
+  const asks: string[] = [];
+  let pos = info.size;
+  let scanned = 0;
+  let carry = "";
+  const parseAsk = (line: string): string | null => {
+    if (!line.includes(USER_ROLE_MARK)) return null;
+    try {
+      const entry = JSON.parse(line) as Record<string, unknown>;
+      const message = entry.message as { content?: unknown } | undefined;
+      const content = message?.content;
+      const blocks = Array.isArray(content) ? (content as Array<Record<string, unknown>>) : [];
+      if (blocks.some((block) => block?.type === "tool_result")) return null;
+      const text = Array.isArray(content)
+        ? blocks.filter((block) => block?.type === "text").map((block) => String(block.text ?? "")).join(NEWLINE)
+        : typeof content === "string"
+          ? content
+          : "";
+      const stripped = text.trim();
+      if (stripped.length < 8 || stripped.startsWith("<")) return null;
+      return stripped;
+    } catch {
+      return null;
+    }
+  };
+  while (pos > 0 && scanned < maxBytes && asks.length < wantAsks) {
+    const len = Math.min(chunkSize, pos);
+    pos -= len;
+    scanned += len;
+    const buffer = Buffer.alloc(len);
+    const fd = openSync(file, "r");
+    try {
+      readSync(fd, buffer, 0, len, pos);
+    } finally {
+      closeSync(fd);
+    }
+    const combined = buffer.toString("utf8") + carry;
+    const parts = combined.split(LINE_BREAK);
+    carry = pos > 0 ? (parts.shift() ?? "") : "";
+    for (let index = parts.length - 1; index >= 0 && asks.length < wantAsks; index -= 1) {
+      const ask = parseAsk(parts[index]);
+      if (ask) asks.unshift(ask);
+    }
+  }
+  if (pos === 0 && carry.trim() && asks.length < wantAsks) {
+    const ask = parseAsk(carry);
+    if (ask) asks.unshift(ask);
+  }
+  return asks;
+}
+const LINE_BREAK = String.fromCharCode(10);
+const NEWLINE = String.fromCharCode(10);
+const USER_ROLE_MARK = String.fromCharCode(34) + "role" + String.fromCharCode(34) + ":" + String.fromCharCode(34) + "user" + String.fromCharCode(34);
+
 export function readClaudeSession(cwd: string): HandoffSession | null {
   const projectDir = join(homedir(), '.claude', 'projects', encodeProjectDir(cwd));
   const file = newestJsonl(projectDir) ?? newestJsonl(join(homedir(), '.claude', 'projects'));
@@ -138,7 +220,8 @@ export function readClaudeSession(cwd: string): HandoffSession | null {
     return null;
   }
 
-  const userAsks: string[] = [];
+  // 用户消息常常被超大的工具输出压在几十 MB 之外：单独回扫到文件头。
+  const userAsks: string[] = collectRecentAsks(file, 4);
   const conclusions: string[] = [];
   const tools = new Set<string>();
   let messageCount = 0;
@@ -162,9 +245,7 @@ export function readClaudeSession(cwd: string): HandoffSession | null {
     for (const name of toolNames(message?.content)) tools.add(name);
     if (typeof entry.type === 'string' && /error/i.test(entry.type)) hasErrors = true;
     if (!text) continue;
-    if (role === 'user') {
-      if (text.length > 8) userAsks.push(text);
-    } else if (role === 'assistant') {
+    if (role === 'assistant') {
       if (text.length > 40) conclusions.push(text);
     }
   }
@@ -215,7 +296,7 @@ export function readCodexSession(): HandoffSession | null {
     if (type.includes('error') || /error/i.test(String(payload.status ?? ''))) hasErrors = true;
     if (/function_call|tool/.test(type) && typeof payload.name === 'string') tools.add(payload.name);
     if (!text) continue;
-    if (role === 'user' && text.length > 8) userAsks.push(text);
+    if (role === 'user' && isRealUserText({ message: payload }, text)) userAsks.push(text);
     if (role === 'assistant' && text.length > 40) conclusions.push(text);
   }
 

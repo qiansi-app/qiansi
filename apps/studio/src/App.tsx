@@ -30,6 +30,7 @@ import { WorkflowModal, type WorkflowPlan } from './components/WorkflowModal';
 import { catalogOf, initialModels, preferredModel, type ModelDraft } from './data/models';
 import { loadSettings, saveSettings, type AppSettings } from './data/settings';
 import { decideTakeover } from './lib/takeover';
+import { currentWorkspace, setCurrentWorkspace, switchWorkspace } from './workspace';
 import { layeredLayout } from './data/layout';
 import {
   initialEdges,
@@ -130,10 +131,25 @@ export function App() {
   const externalRunRef = useRef(false);
   /** 已经补过完成态的运行 id，避免每秒重复提示。 */
   const recentShownRef = useRef<string | null>(null);
+  /** 当前在跑的运行 id：停止要通知服务端。 */
+  const activeRunIdRef = useRef("");
   /** 进度条当前显示的是「补显的完成态」：服务端窗口过了就整体撤下。 */
   const recentOnlyRef = useRef(false);
   const [choice, setChoice] = useState<Choice | null>(null);
-  const [models, setModels] = useState<ModelDraft[]>(initialModels);
+  const [models, setModels] = useState<ModelDraft[]>(() => {
+    // 连接定义（label/baseUrl/模型目录）落 localStorage：以前只存内存，
+    // 刷新后新增或改名的连接全部丢回硬编码的四条。
+    try {
+      const raw = window.localStorage.getItem('qiansi.models.v1');
+      if (raw) {
+        const parsed = JSON.parse(raw) as ModelDraft[];
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {
+      // 隐私模式读不了 localStorage：回退默认值
+    }
+    return initialModels;
+  });
   const [editorOpen, setEditorOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
@@ -1164,12 +1180,39 @@ export function App() {
     setSelection(null);
     setSelectedIds([]);
     const positions = layeredLayout(nodes, edges, 'orchestrator');
-    setNodes(nodes.map((node) => ({ ...node, position: positions[node.id] ?? node.position })));
-    setEdges(edges);
-    setOrchestratorId('orchestrator');
-    fitCanvas();
-    setWorkflowOpen(false);
-    setToast(`工作流已生成：${plan.summary}`);
+    const laidOut = nodes.map((node) => ({ ...node, position: positions[node.id] ?? node.position }));
+    // 一个工作流一张画布：生成的工作流落到新画布，不覆盖你正在看的这张。
+    void (async () => {
+      try {
+        const created = await fetch('/api/workspaces', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: plan.summary.slice(0, 24) || '新工作流' }),
+        });
+        const createdBody = (await created.json().catch(() => null)) as { workspace?: { id: string } } | null;
+        const workspaceId = createdBody?.workspace?.id;
+        if (workspaceId) {
+          const saved = await fetch('/api/canvas', {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json', 'x-qiansi-workspace': workspaceId },
+            body: JSON.stringify({ revision: 0, orchestratorId: 'orchestrator', nodes: laidOut, edges }),
+          });
+          if (saved.ok) {
+            setCurrentWorkspace(workspaceId);
+            switchWorkspace(workspaceId);
+            return;
+          }
+        }
+      } catch {
+        // 新画布建不出来就退回覆盖当前画布，至少工作流不丢
+      }
+      setNodes(laidOut);
+      setEdges(edges);
+      setOrchestratorId('orchestrator');
+      fitCanvas();
+      setWorkflowOpen(false);
+      setToast(`工作流已生成：${plan.summary}`);
+    })();
   };
 
   const autoLayout = async () => {
@@ -2067,6 +2110,15 @@ export function App() {
 
   const handleModelsChange = (next: ModelDraft[]) => {
     setModels(next);
+    try {
+      // 只持久化连接定义；apiKey 留在内存（会话结束即丢），密钥真正的家在 vault。
+      window.localStorage.setItem(
+        'qiansi.models.v1',
+        JSON.stringify(next.map((item) => ({ ...item, apiKey: '' })))
+      );
+    } catch {
+      // 写不进去不影响本次会话
+    }
     setNodes((current) =>
       current.map((node) => {
         const connectionId = node.data.connectionId;
@@ -2343,6 +2395,20 @@ export function App() {
   };
 
   const stop = () => {
+    // 必须通知服务端：只改界面等于让运行在后台继续烧额度。
+    const activeRun = activeRunIdRef.current;
+    if (activeRun) {
+      void fetch('/api/commands', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          commandId: `stop-${Date.now()}`,
+          type: 'run.stop',
+          payload: { runId: activeRun },
+        }),
+      }).catch(() => undefined);
+      activeRunIdRef.current = '';
+    }
     runToken.current += 1;
     setRunning(false);
     setNodes((current) =>
@@ -2463,6 +2529,7 @@ export function App() {
   };
 
   const subscribeToRun = (runId: string) => {
+    activeRunIdRef.current = runId;
     const source = new EventSource(`/api/runs/${runId}/events`);
     const on = (name: string, handler: (event: MessageEvent) => void) =>
       source.addEventListener(name, ((event: MessageEvent) => {
@@ -2846,6 +2913,64 @@ export function App() {
     }
   };
 
+  /**
+   * 刷新或切换画布后从服务端恢复「本轮结果」：runSummary 只活在内存里，
+   * 以前一刷新按钮就永久置灰，明明运行记录还在。
+   */
+  const historyHydratedRef = useRef(false);
+  useEffect(() => {
+    if (historyHydratedRef.current) return;
+    historyHydratedRef.current = true;
+    void (async () => {
+      try {
+        const listResponse = await fetch('/api/runs');
+        if (!listResponse.ok) return;
+        const list = (await listResponse.json()) as {
+          items?: Array<{ runId: string; status: string; workspaceId?: string; startedAt: number }>;
+        };
+        const workspace = currentWorkspace() || 'main';
+        const latest = (list.items ?? []).find((item) => (item.workspaceId ?? 'main') === workspace);
+        if (!latest) return;
+        const resultResponse = await fetch(`/api/runs/${latest.runId}/result`);
+        if (!resultResponse.ok) return;
+        const result = (await resultResponse.json()) as {
+          status?: string;
+          usage?: { total?: number };
+          tasks?: Array<{ taskId?: string; id?: string; nodeId?: string; title?: string; status: string; output?: string }>;
+          events?: number;
+        };
+        if (runningRef.current || runTasksRef.current && Object.keys(runTasksRef.current).length > 0) return;
+        const tasks: Record<string, RunTaskView> = {};
+        for (const task of result.tasks ?? []) {
+          const taskId = task.taskId ?? (task as { id?: string }).id ?? '';
+          if (!taskId) continue;
+          tasks[taskId] = {
+            taskId,
+            nodeId: task.nodeId ?? '',
+            title: task.title,
+            status: (['done', 'failed'].includes(task.status) ? task.status : 'pending') as RunTaskView['status'],
+            output: task.output,
+          };
+        }
+        const values = Object.values(tasks);
+        setRunSummary({
+          runId: latest.runId,
+          status: (latest.status === 'done' ? 'done' : latest.status === 'failed' ? 'failed' : 'aborted') as RunSummary['status'],
+          total: values.length,
+          passed: values.filter((task) => task.status === 'done').length,
+          needsHuman: 0,
+          events: result.events ?? 0,
+          durationMs: 0,
+          tokens: result.usage?.total ?? 0,
+        });
+        runTasksRef.current = tasks;
+        setRunTasks(tasks);
+      } catch {
+        // 历史恢复失败不影响当前界面
+      }
+    })();
+  }, []);
+
   const send = async (nodeId: string, text: string) => {
     push(nodeId, 'user', text);
     // Talking to the orchestrator is how a session starts: it plans, hands out
@@ -3103,7 +3228,7 @@ export function App() {
         onOpenReport={() => setReportOpen(true)}
         onReset={resetAll}
         onClearCanvas={() => setClearConfirmOpen(true)}
-        onExport={() => window.open('/api/canvas/export', '_blank')}
+        onExport={() => window.open(`/api/canvas/export?ws=${encodeURIComponent(currentWorkspace())}`, '_blank')}
         onOpenWorkflow={() => setWorkflowOpen(true)}
         onAdapt={adaptToSession}
         hasReport={Boolean(runSummary)}
@@ -3128,6 +3253,7 @@ export function App() {
         onOpenAttention={() => setAttentionOpen(true)}
         onOpenSelfOpt={() => setSelfOptOpen(true)}
         onOpenHandoff={() => setHandoffOpen(true)}
+        onCanvasStarted={(name) => setToast(`新画布「${name}」已开跑，点标签页看进度`)}
         onAutoLayout={() => void autoLayout()}
         layouting={layouting}
         brushMode={brushMode}
@@ -3344,7 +3470,7 @@ export function App() {
       <AttentionModal open={attentionOpen} onClose={() => setAttentionOpen(false)} />
       <SelfOptModal open={selfOptOpen} onClose={() => setSelfOptOpen(false)} />
       <KeysModal open={keysOpen} onClose={() => setKeysOpen(false)} />
-      <HandoffModal open={handoffOpen} onClose={() => setHandoffOpen(false)} />
+      <HandoffModal open={handoffOpen} onClose={() => setHandoffOpen(false)} defaultSource={settings.agent} />
 
       <ArtifactModal
         open={Boolean(artifactOverride || artifactTaskId)}

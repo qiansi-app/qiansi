@@ -1,18 +1,15 @@
-import { useEffect, useState } from 'react';
-import { FileCog, LayoutGrid, Plus, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Clock, FileCog, History, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
 import { currentWorkspace, setCurrentWorkspace, switchWorkspace } from '../workspace';
 
 /**
- * 工作区切换器：一张画布 = 一个会话/项目。
+ * 画布标签栏：一个工作流 = 一张画布 = 一个标签页。
  *
- * 切换是整页重载——画布、运行进度、SSE 订阅一起换，避免半新半旧的状态。
- * 「公共指令」= 注入本工作区每个 worker 系统提示的常驻规范
- * （借鉴 DSH 的 team sections：披露语、评审规范这类要全员遵守的文本）。
- *
- * 首次加载时把视图钉在本页自己的工作区上：localStorage 里没有（或指向已删除
- * 的画布）时采用服务端当前值并落盘。此后本页始终显式带上工作区头——
- * 服务端的「当前画布」被脚本或 agent 改走时，这个面板不再跟着变。
+ * - 运行中的画布带绿点标记，随时点过去看进度；
+ * - 关标签页是软删除：进「历史画布」，可恢复或彻底删除；
+ * - 首次加载时把视图钉在本页自己的工作区上（localStorage 没有或已失效时
+ *   采用服务端当前值并落盘），之后服务端的「当前画布」被改走也不影响本页。
  */
 
 interface WorkspaceMeta {
@@ -20,27 +17,54 @@ interface WorkspaceMeta {
   name: string;
   instructions?: string;
   canvasExists: boolean;
+  archivedAt?: number;
+  running?: number;
 }
 
-export function WorkspaceSwitcher() {
+interface ArchivedMeta {
+  id: string;
+  name: string;
+  archivedAt?: number;
+}
+
+const timeLabel = (ts?: number) => {
+  if (!ts) return '';
+  const date = new Date(ts);
+  return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(
+    date.getHours()
+  ).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+};
+
+export function WorkspaceSwitcher({ onCanvasStarted }: { onCanvasStarted?: (name: string) => void }) {
   const [items, setItems] = useState<WorkspaceMeta[]>([]);
+  const [archived, setArchived] = useState<ArchivedMeta[]>([]);
   const [current, setCurrent] = useState<string>('');
   const [busy, setBusy] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [instructions, setInstructions] = useState('');
   const [saved, setSaved] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
+  /** 待关闭的标签：确认/取消都用它，绝不改正在看的 current。 */
+  const [pendingClose, setPendingClose] = useState<string | null>(null);
+  const [confirmPurge, setConfirmPurge] = useState<string | null>(null);
+  const [purging, setPurging] = useState<string | null>(null);
+  const [archiveError, setArchiveError] = useState("");
+  const knownIds = useRef<Set<string> | null>(null);
 
-  const load = async () => {
+  const load = async (announce = false) => {
     try {
       const response = await fetch('/api/workspaces');
-      const data = (await response.json()) as { items?: WorkspaceMeta[]; current?: string };
+      const data = (await response.json()) as {
+        items?: WorkspaceMeta[];
+        archived?: ArchivedMeta[];
+        current?: string;
+      };
       const list = data.items ?? [];
       setItems(list);
+      setArchived(data.archived ?? []);
       const stored = currentWorkspace();
       const known = list.some((item) => item.id === stored);
-      // 钉住视图：没有选过、或选的画布已被删掉时，采用服务端当前值并记住。
-      // 之后再有人改服务端的「当前画布」，这个面板也不动——它有自己的头。
       if ((!stored || !known) && data.current) {
         setCurrentWorkspace(data.current);
         setCurrent(data.current);
@@ -48,13 +72,23 @@ export function WorkspaceSwitcher() {
         return;
       }
       setCurrent(stored || data.current || list[0]?.id || '');
+      if (announce) {
+        const fresh = list.filter((item) => !knownIds.current?.has(item.id));
+        const started = fresh.filter((item) => (item.running ?? 0) > 0);
+        if (started.length > 0 && onCanvasStarted) {
+          onCanvasStarted(started[0].name);
+        }
+      }
+      knownIds.current = new Set(list.map((item) => item.id));
     } catch {
-      // 服务端还没起来：保持空列表，下一次交互再试
+      // 服务端还没起来：保持空列表，下一次轮询再试
     }
   };
 
   useEffect(() => {
     void load();
+    const timer = window.setInterval(() => void load(true), 4000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -81,22 +115,57 @@ export function WorkspaceSwitcher() {
     }
   };
 
-  const deleteCurrent = async () => {
-    if (!current) return;
+  const archiveCurrent = async () => {
+    const target = pendingClose ?? current;
+    if (!target) return;
     setBusy(true);
-    setConfirmDelete(false);
+    setConfirmArchive(false);
     try {
-      const response = await fetch(`/api/workspaces/${current}`, { method: 'DELETE' });
+      const response = await fetch(`/api/workspaces/${target}/archive`, { method: 'POST' });
       const data = (await response.json()) as { ok?: boolean; current?: string; error?: string };
+      if (!data.ok) {
+        setArchiveError(
+          data.error === 'last_active' ? '至少保留一个画布：关掉它之前先新建一张。' : data.error ?? '关闭失败'
+        );
+        return;
+      }
+      setArchiveError('');
+      // 关掉正在看的画布才需要跳走；关后台标签原地不动。
+      if (target === currentWorkspace()) {
+        const next = data.current ?? items.find((item) => item.id !== target)?.id ?? '';
+        setCurrentWorkspace(next);
+        switchWorkspace(next);
+      } else {
+        void load();
+      }
+    } finally {
+      setBusy(false);
+      setPendingClose(null);
+    }
+  };
+
+  const restoreOne = async (id: string) => {
+    setBusy(true);
+    try {
+      const response = await fetch(`/api/workspaces/${id}/restore`, { method: 'POST' });
+      const data = (await response.json()) as { ok?: boolean };
       if (data.ok) {
-        // 服务端已把「当前」切到剩下的第一个；跟随它。
-        const next = data.current ?? items.find((item) => item.id !== current)?.id ?? '';
-        if (next && next !== current) {
-          setCurrentWorkspace(next);
-        } else {
-          setCurrentWorkspace('');
-        }
-        switchWorkspace(next || '');
+        setHistoryOpen(false);
+        switchWorkspace(id);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const purgeOne = async (id: string) => {
+    setBusy(true);
+    setPurging(null);
+    try {
+      const response = await fetch(`/api/workspaces/${id}`, { method: 'DELETE' });
+      const data = (await response.json()) as { ok?: boolean };
+      if (data.ok) {
+        setArchived((list) => list.filter((item) => item.id !== id));
       }
     } finally {
       setBusy(false);
@@ -120,52 +189,97 @@ export function WorkspaceSwitcher() {
     }
   };
 
-  if (items.length === 0) return null;
+  const closeDisabled = items.length <= 1;
+
+  if (items.length === 0 && archived.length === 0) {
+    return (
+      <div className="workspace-switcher">
+        <div className="workspace-tabs">
+          <button className="icon-tool workspace-new" onClick={() => void createAndSwitch()} disabled={busy} title="新建空白画布">
+            <Plus size={14} />
+          </button>
+          <span className="workspace-empty-hint">没有活跃画布</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="workspace-switcher">
-      <LayoutGrid size={14} className="workspace-switcher-icon" />
-      <select
-        value={current}
-        title="工作区：每张画布对应一个会话或项目"
-        onChange={(event) => {
-          if (event.target.value !== current) switchWorkspace(event.target.value);
-        }}
-      >
+      <div className="workspace-tabs">
         {items.map((item) => (
-          <option key={item.id} value={item.id}>
-            {item.name}
-            {item.canvasExists ? '' : '（空）'}
-          </option>
+          <div
+            key={item.id}
+            className={`workspace-tab ${item.id === current ? 'active' : ''}`}
+            title={item.running ? `运行中（${item.running} 个任务）· 点击查看进度` : item.name}
+            onClick={() => {
+              if (item.id !== current) switchWorkspace(item.id);
+            }}
+          >
+            {(item.running ?? 0) > 0 && <span className="workspace-tab-running" />}
+            <span className="workspace-tab-name">{item.name}</span>
+            <button
+              className="workspace-tab-close"
+              title={closeDisabled ? "至少保留一个画布" : "关闭标签页（画布进历史，可恢复）"}
+              disabled={closeDisabled || busy}
+              onClick={(event) => {
+                event.stopPropagation();
+                setPendingClose(item.id);
+                setConfirmArchive(true);
+              }}
+            >
+              <X size={11} />
+            </button>
+          </div>
         ))}
-      </select>
-      <button
-        className="icon-tool workspace-new"
-        onClick={() => void createAndSwitch()}
-        disabled={busy}
-        title="新建空白画布"
-      >
-        <Plus size={14} />
-      </button>
-      <button
-        className="icon-tool workspace-delete"
-        onClick={() => setConfirmDelete(true)}
-        disabled={busy || items.length <= 1}
-        title={
-          items.length <= 1
-            ? '至少保留一张画布'
-            : `删除「${active?.name ?? '当前画布'}」及其节点、消息与运行记录`
-        }
-      >
-        <Trash2 size={14} />
-      </button>
-      <button
-        className={`icon-tool ${editorOpen ? 'active' : ''}`}
-        onClick={() => setEditorOpen((open) => !open)}
-        title="工作区公共指令：注入本画布每个 worker 的常驻规范"
-      >
-        <FileCog size={14} />
-      </button>
+        <button className="icon-tool workspace-new" onClick={() => void createAndSwitch()} disabled={busy} title="新建空白画布">
+          <Plus size={14} />
+        </button>
+        <div className="workspace-history-anchor">
+          <button
+            className={`icon-tool ${historyOpen ? 'active' : ''}`}
+            onClick={() => setHistoryOpen((open) => !open)}
+            title="历史画布：关闭过的画布在这里，可恢复或彻底删除"
+          >
+            <History size={14} />
+          </button>
+          {historyOpen && (
+            <div className="workspace-history" onClick={(event) => event.stopPropagation()}>
+              <div className="workspace-history-title">
+                <Clock size={12} /> 历史画布（{archived.length}）
+              </div>
+              {archived.length === 0 && <div className="workspace-history-empty">没有关闭过的画布。</div>}
+              {archived.map((item) => (
+                <div key={item.id} className="workspace-history-item">
+                  <div className="workspace-history-meta">
+                    <b>{item.name}</b>
+                    <span>关闭于 {timeLabel(item.archivedAt)}</span>
+                  </div>
+                  <div className="workspace-history-actions">
+                    <button className="keys-mini" disabled={busy} onClick={() => void restoreOne(item.id)}>
+                      <RotateCcw size={11} /> 恢复
+                    </button>
+                    <button
+                      className="keys-mini danger"
+                      disabled={busy}
+                      onClick={() => setConfirmPurge(item.id)}
+                    >
+                      <Trash2 size={11} /> 永久删除
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <button
+          className={`icon-tool ${editorOpen ? 'active' : ''}`}
+          onClick={() => setEditorOpen((open) => !open)}
+          title="工作区公共指令：注入本画布每个 worker 的常驻规范"
+        >
+          <FileCog size={14} />
+        </button>
+      </div>
       {active && !active.canvasExists && <span className="workspace-empty-hint">空白画布</span>}
 
       {editorOpen && (
@@ -192,13 +306,22 @@ export function WorkspaceSwitcher() {
         </div>
       )}
 
+      {archiveError && <div className="keys-error">{archiveError}</div>}
       <ConfirmDialog
-        open={confirmDelete}
-        title={`删除画布「${active?.name ?? ''}」？`}
-        detail="节点、连线、消息与这个画布上的运行记录会一并删除，模型连接与密钥不受影响。"
-        confirmLabel="删除画布"
-        onConfirm={() => void deleteCurrent()}
-        onCancel={() => setConfirmDelete(false)}
+        open={confirmArchive}
+        title={`关闭画布「${items.find((item) => item.id === (pendingClose ?? current))?.name ?? ''}」？`}
+        detail="标签页会移除，画布进「历史画布」：之后可以恢复，也可以在历史里彻底删除。"
+        confirmLabel="关闭并进历史"
+        onConfirm={() => void archiveCurrent()}
+        onCancel={() => setConfirmArchive(false)}
+      />
+      <ConfirmDialog
+        open={Boolean(confirmPurge)}
+        title={`永久删除「${archived.find((item) => item.id === confirmPurge)?.name ?? ''}」？`}
+        detail="画布文件、节点与连线会被删掉，不可恢复。运行记录仍在全局历史里。"
+        confirmLabel="永久删除"
+        onConfirm={() => confirmPurge && void purgeOne(confirmPurge)}
+        onCancel={() => setConfirmPurge(null)}
       />
     </div>
   );

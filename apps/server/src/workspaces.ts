@@ -20,6 +20,8 @@ export interface WorkspaceMeta {
   updatedAt: number;
   /** 工作区公共指令：注入本画布每个 worker 的系统提示（借鉴 DSH 的 team sections）。 */
   instructions?: string;
+  /** 软删除时间：标签页关掉进「历史画布」，可恢复；不设就是活跃画布。 */
+  archivedAt?: number;
 }
 
 interface WorkspaceFile {
@@ -245,6 +247,48 @@ export class WorkspaceStore {
       // 目录删不掉不影响索引；下次启动再清
     }
     return { ok: true };
+  }
+
+  /** 关标签页 = 软删除：画布进「历史」，可随时恢复或彻底删除。 */
+  archive(id: string): { ok: true; current: string } | { ok: false; reason: string } {
+    this.refreshIfChanged();
+    const meta = this.get(id);
+    if (!meta) return { ok: false, reason: 'not_found' };
+    // 全部关掉就再没有恢复入口：至少留一个活跃画布。
+    if (!meta.archivedAt && this.listActive().length <= 1) {
+      return { ok: false, reason: 'last_active' };
+    }
+    meta.archivedAt = Date.now();
+    if (this.data.current === id) {
+      const next =
+        this.data.items.find((item) => item.id !== id && !item.archivedAt) ??
+        this.data.items.find((item) => item.id !== id);
+      if (next) this.data.current = next.id;
+    }
+    this.persist();
+    return { ok: true, current: this.data.current };
+  }
+
+  /** 从历史里恢复：清掉时间戳，回到标签栏。 */
+  restore(id: string): { ok: true } | { ok: false; reason: string } {
+    this.refreshIfChanged();
+    const meta = this.get(id);
+    if (!meta) return { ok: false, reason: 'not_found' };
+    delete meta.archivedAt;
+    meta.updatedAt = Date.now();
+    this.persist();
+    return { ok: true };
+  }
+
+  /** 活跃（未归档）画布，按创建顺序。 */
+  listActive(): WorkspaceMeta[] {
+    return this.list().filter((item) => !item.archivedAt);
+  }
+
+  listArchived(): WorkspaceMeta[] {
+    return this.list()
+      .filter((item) => item.archivedAt)
+      .sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0));
   }
 
   touch(id: string): void {

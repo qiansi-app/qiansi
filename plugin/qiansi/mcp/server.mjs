@@ -434,7 +434,7 @@ const tools = [
   {
     name: 'delegate_task',
     description:
-      'Hand a task from this conversation to Qiansi: the canvas orchestrator splits it into work orders (named deliverable + checkable acceptance per task), assigns models, rebuilds the worker part of the canvas, and starts a live run. Use it when the user asks Qiansi to do the work — e.g. "让牵丝来做这件事" or when delegating a research/writing/verification job. Returns the run id; poll with get_run_result.',
+      'Hand a task from this conversation to Qiansi: a NEW canvas is created for it (one workflow = one canvas, so the current canvas is untouched), the orchestrator splits the task into work orders (named deliverable + checkable acceptance per task), assigns models, and starts a live run there. Use it when the user asks Qiansi to do the work. Returns workspaceId + run id; poll with get_run_result.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -638,7 +638,7 @@ async function callTool(name, args = {}) {
     if (data?.ok && data.runId) {
       return {
         ...data,
-        note: `牵丝已接管：${data.tasks} 个任务${data.revised ? '（已按审校意见调整）' : ''}，运行 ${data.runId.slice(0, 8)}。用 get_run_result 跟踪进度。`,
+        note: `牵丝已接管：新画布「${data.workspaceName ?? ''}」上 ${data.tasks} 个任务${data.revised ? '（已按审校意见调整）' : ''}，运行 ${data.runId.slice(0, 8)}。用 get_run_result 跟踪进度。`,
       };
     }
     return data;

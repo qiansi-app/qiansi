@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link2, Loader2, X } from 'lucide-react';
+import { switchWorkspace } from '../workspace';
 
 /**
  * 接续外部 agent 的会话：把最近一段真实对话与项目事实提取成资料包挂到画布，
@@ -21,19 +22,28 @@ interface HandoffResult {
   pack?: { bytes: number; name: string };
   arranged?: { nodes: number; edges: number };
   runId?: string | null;
+  workspaceId?: string;
+  workspaceName?: string;
   notes?: string[];
 }
 
 interface HandoffModalProps {
   open: boolean;
   onClose: () => void;
+  /** 设置里「附着的主流 Agent」：决定默认读哪个来源的会话。 */
+  defaultSource?: 'claude-code' | 'codex' | 'cursor' | 'none';
 }
 
-export function HandoffModal({ open, onClose }: HandoffModalProps) {
-  const [source, setSource] = useState<'auto' | 'claude-code' | 'codex'>('auto');
+export function HandoffModal({ open, onClose, defaultSource }: HandoffModalProps) {
+  const [source, setSource] = useState<'auto' | 'claude-code' | 'codex'>(() => {
+    if (defaultSource === 'claude-code' || defaultSource === 'codex') return defaultSource;
+    return 'auto';
+  });
   const [cwd, setCwd] = useState('');
   const [autoArrange, setAutoArrange] = useState(true);
-  const [autoRun, setAutoRun] = useState(false);
+  const [autoRun, setAutoRun] = useState(true);
+  // 任务原文：留空则从会话里取最后一条真实需求。
+  const [task, setTask] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<HandoffResult | null>(null);
   const [error, setError] = useState('');
@@ -56,6 +66,7 @@ export function HandoffModal({ open, onClose }: HandoffModalProps) {
         body: JSON.stringify({
           source,
           cwd: cwd.trim() || undefined,
+          task: task.trim() || undefined,
           autoArrange,
           autoRun,
         }),
@@ -106,6 +117,15 @@ export function HandoffModal({ open, onClose }: HandoffModalProps) {
               placeholder="留空则用服务端当前目录"
             />
           </label>
+          <label>
+            任务原文
+            <textarea
+              value={task}
+              onChange={(event) => setTask(event.target.value)}
+              rows={3}
+              placeholder="留空则取会话里最后一条真实需求；也可以直接写清楚要牵丝做什么"
+            />
+          </label>
           <label className="handoff-check">
             <input
               type="checkbox"
@@ -153,6 +173,20 @@ export function HandoffModal({ open, onClose }: HandoffModalProps) {
             {result.arranged && result.arranged.nodes > 0 && (
               <div className="handoff-meta">
                 自动编排：新增 {result.arranged.nodes} 个节点、{result.arranged.edges} 条连线
+              </div>
+            )}
+            {result.workspaceName && (
+              <div className="handoff-meta">
+                已写入新画布「{result.workspaceName}」
+                {result.workspaceId && (
+                  <button
+                    className="keys-mini"
+                    style={{ marginLeft: 8 }}
+                    onClick={() => result.workspaceId && switchWorkspace(result.workspaceId)}
+                  >
+                    去新画布看进度
+                  </button>
+                )}
               </div>
             )}
             {result.runId && <div className="handoff-meta">已启动运行：{result.runId.slice(0, 8)}</div>}

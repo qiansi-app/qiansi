@@ -59,6 +59,7 @@ interface ToolbarProps {
   onOpenAttention: () => void;
   onOpenSelfOpt: () => void;
   onOpenHandoff: () => void;
+  onCanvasStarted?: (name: string) => void;
   onAutoLayout: () => void;
   layouting: boolean;
   brushMode: RegionMode | null;
@@ -123,6 +124,7 @@ export function Toolbar({
   onOpenAttention,
   onOpenSelfOpt,
   onOpenHandoff,
+  onCanvasStarted,
   onAutoLayout,
   layouting,
   brushMode,
@@ -158,7 +160,7 @@ export function Toolbar({
         </div>
       </div>
 
-      <WorkspaceSwitcher />
+      <WorkspaceSwitcher onCanvasStarted={onCanvasStarted} />
 
       <div className="toolbar-stat">
         <strong>{nodeCount}</strong> 节点
@@ -248,6 +250,14 @@ export function Toolbar({
         <span className="toolbar-divider" />
 
         <button
+          className="btn primary"
+          onClick={onOpenHandoff}
+          title="接管会话：读取最近的 agent 会话，任务原文直接交给画布拆解开跑"
+        >
+          <Link2 size={13} /> 接管会话
+        </button>
+
+        <button
           className="btn"
           onClick={onReload}
           title="重载画布：先保存本地编辑，再整页刷新——版本更新或页面状态不对时点这里"
@@ -306,12 +316,6 @@ export function Toolbar({
                 label="模型连接"
                 hint="Key、协议与工具权限"
                 onClick={menuAction(onOpenModels)}
-              />
-              <MenuItem
-                icon={Link2}
-                label="接续 Agent 会话"
-                hint="读对话与项目，接着干"
-                onClick={menuAction(onOpenHandoff)}
               />
               <MenuItem
                 icon={KeyRound}

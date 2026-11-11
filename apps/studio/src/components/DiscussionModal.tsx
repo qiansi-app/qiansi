@@ -47,14 +47,14 @@ export function DiscussionModal({
   const [transcript, setTranscript] = useState<DiscussionRound[]>([]);
   const [note, setNote] = useState<string | null>(null);
 
-  if (!open) return null;
-
-  const start = async () => {
-    useEffect(() => {
+  useEffect(() => {
     if (!styleTouched) setStyle(suggestStyle(topic));
   }, [topic, styleTouched]);
 
-  const text = topic.trim();
+  if (!open) return null;
+
+  const start = async () => {
+    const text = topic.trim();
     if (!text || running) return;
     setRunning(true);
     setError(null);
