@@ -27,7 +27,6 @@ import {
   Inbox,
 } from 'lucide-react';
 import type { RegionMode } from '../data/demoGraph';
-import { WorkspaceSwitcher } from './WorkspaceSwitcher';
 
 interface ToolbarProps {
   running: boolean;
@@ -59,7 +58,6 @@ interface ToolbarProps {
   onOpenAttention: () => void;
   onOpenSelfOpt: () => void;
   onOpenHandoff: () => void;
-  onCanvasStarted?: (name: string) => void;
   onAutoLayout: () => void;
   layouting: boolean;
   brushMode: RegionMode | null;
@@ -124,7 +122,6 @@ export function Toolbar({
   onOpenAttention,
   onOpenSelfOpt,
   onOpenHandoff,
-  onCanvasStarted,
   onAutoLayout,
   layouting,
   brushMode,
@@ -132,6 +129,19 @@ export function Toolbar({
   onReload,
 }: ToolbarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  // 按顶栏自身宽度收紧：VS Code 侧栏很窄，不能把操作区挤掉。
+  const [width, setWidth] = useState<number>(typeof window === 'undefined' ? 1440 : window.innerWidth);
+  const headerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const element = headerRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) setWidth(entry.contentRect.width);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const density = width < 560 ? ' tight' : width < 860 ? ' compact' : '';
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -149,7 +159,7 @@ export function Toolbar({
   };
 
   return (
-    <header className="toolbar">
+    <header ref={headerRef} className={`toolbar${density}`}>
       <div className="brand">
         <div className="brand-mark">
           <Network size={17} strokeWidth={2.2} />
@@ -159,8 +169,6 @@ export function Toolbar({
           <div className="brand-sub">Qiansi · 多 AI 协作画布</div>
         </div>
       </div>
-
-      <WorkspaceSwitcher onCanvasStarted={onCanvasStarted} />
 
       <div className="toolbar-stat">
         <strong>{nodeCount}</strong> 节点

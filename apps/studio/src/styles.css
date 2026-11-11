@@ -1619,3 +1619,59 @@ textarea {
 .selfopt-version-actions { display: flex; gap: 6px; flex: none; }
 .selfopt-diff { margin-top: 10px; }
 .selfopt-diff pre { max-height: 240px; overflow: auto; margin: 6px 0 0; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.3); font-size: 10px; line-height: 1.5; white-space: pre; }
+
+
+/* 画布标签独立一行：VS Code 侧栏很窄，不能和操作区挤在同一行 */
+.workspace-row {
+  flex: 0 0 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(12, 17, 22, 0.92);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  z-index: 4;
+}
+.workspace-row .workspace-switcher { margin-left: 0; flex: 1; min-width: 0; }
+.workspace-row .workspace-tabs { max-width: none; }
+:root[data-theme="light"] .workspace-row { background: #f7f9fc; }
+
+/* 顶栏按宽度收紧：窄面板下先让步品牌文案与统计，操作区永远可见 */
+.toolbar.compact { gap: 10px; padding: 0 10px; }
+.toolbar.compact .brand-sub { display: none; }
+.toolbar.compact .toolbar-stat { display: none; }
+.toolbar.compact .btn { padding: 0 8px; }
+.toolbar.tight { gap: 6px; padding: 0 8px; }
+.toolbar.tight .brand div:last-child { display: none; }
+.toolbar.tight .toolbar-actions { gap: 4px; }
+.toolbar.tight .btn span, .toolbar.tight .btn { font-size: 11px; }
+.toolbar.compact .toolbar-actions, .toolbar.tight .toolbar-actions {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.toolbar.compact .toolbar-actions::-webkit-scrollbar,
+.toolbar.tight .toolbar-actions::-webkit-scrollbar { display: none; }
+
+
+/* 极窄面板：主操作（接管/重载/运行/更多）排到最前，次要图标向右滚动 */
+.toolbar.tight .toolbar-actions > .btn { order: -3; }
+.toolbar.tight .toolbar-actions > .toolbar-more { order: -1; }
+.toolbar.tight .toolbar-actions > .toolbar-divider { order: -2; display: none; }
+
+
+/* 按钮文字不换行：窄面板下宁可让次要图标滚出，也不能把「运行编排」挤成竖排 */
+.toolbar .btn { white-space: nowrap; flex: 0 0 auto; }
+
+
+/* 极窄面板：操作区吃满剩余宽度，主操作从左侧开始排 */
+.toolbar.tight .toolbar-spacer { display: none; }
+.toolbar.tight .toolbar-actions { flex: 1 1 auto; min-width: 0; justify-content: flex-start; }
+
+
+/* 窄面板下品牌不再占 220px 固定宽，把空间让给操作区 */
+.toolbar.compact .brand, .toolbar.tight .brand { min-width: 0; }

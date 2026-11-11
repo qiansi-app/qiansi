@@ -26,6 +26,7 @@ import { RunProgress } from './components/RunProgress';
 import { RunReport } from './components/RunReport';
 import { SettingsModal } from './components/SettingsModal';
 import { Toolbar } from './components/Toolbar';
+import { WorkspaceSwitcher } from './components/WorkspaceSwitcher';
 import { WorkflowModal, type WorkflowPlan } from './components/WorkflowModal';
 import { catalogOf, initialModels, preferredModel, type ModelDraft } from './data/models';
 import { loadSettings, saveSettings, type AppSettings } from './data/settings';
@@ -133,6 +134,30 @@ export function App() {
   const recentShownRef = useRef<string | null>(null);
   /** 当前在跑的运行 id：停止要通知服务端。 */
   const activeRunIdRef = useRef("");
+  const canvasWrapRef = useRef<HTMLDivElement | null>(null);
+  /** 画布区域尺寸变化后重新适配视野：分栏拖动、面板变窄时图形不跑出屏幕。 */
+  useEffect(() => {
+    const element = canvasWrapRef.current;
+    if (!element) return;
+    let timer = 0;
+    const observer = new ResizeObserver(() => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        const instance = rfRef.current;
+        if (!instance) return;
+        try {
+          instance.fitView({ padding: 0.18, duration: 200 });
+        } catch {
+          // 画布尚未初始化
+        }
+      }, 250);
+    });
+    observer.observe(element);
+    return () => {
+      window.clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, []);
   /** 进度条当前显示的是「补显的完成态」：服务端窗口过了就整体撤下。 */
   const recentOnlyRef = useRef(false);
   const [choice, setChoice] = useState<Choice | null>(null);
@@ -3253,7 +3278,6 @@ export function App() {
         onOpenAttention={() => setAttentionOpen(true)}
         onOpenSelfOpt={() => setSelfOptOpen(true)}
         onOpenHandoff={() => setHandoffOpen(true)}
-        onCanvasStarted={(name) => setToast(`新画布「${name}」已开跑，点标签页看进度`)}
         onAutoLayout={() => void autoLayout()}
         layouting={layouting}
         brushMode={brushMode}
@@ -3261,8 +3285,14 @@ export function App() {
         onReload={() => void reloadCanvas()}
       />
 
+      <div className="workspace-row">
+        <WorkspaceSwitcher
+          onCanvasStarted={(name) => setToast(`新画布「${name}」已开跑，点标签页看进度`)}
+        />
+      </div>
+
       <div className="workspace">
-        <div className="canvas-wrap">
+        <div className="canvas-wrap" ref={canvasWrapRef}>
           <Canvas
             nodes={visibleNodes}
             edges={visibleEdges}
