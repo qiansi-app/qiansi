@@ -410,18 +410,24 @@ function defaultSelfOptRoot(): string {
 
 /**
  * 自我优化的模型通道：复盘与实现用旗舰模型（默认 deepseek-v4-pro），
- * 与评委的选择口径一致。可用 QIANSI_SELFOPT_MODEL 覆盖。
+ * 与评委的选择口径一致。评审团会显式指定模型（options.model），
+ * 指定模型不可用时退回默认链。可用 QIANSI_SELFOPT_MODEL 覆盖默认。
  */
 async function selfOptChat(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-  options: { maxTokens: number; timeoutMs: number }
-): Promise<{ text: string; usage: { total: number } }> {
+  options: { maxTokens: number; timeoutMs: number; model?: string }
+): Promise<{ text: string; usage: { total: number }; model?: string }> {
   await ensureQuotaSeeded();
   const requested = String(process.env.QIANSI_SELFOPT_MODEL ?? '').trim();
   // 会思考的模型可能把整个预算花在推理上、正文为空；空输出就换下一家。
-  const candidates = [requested, 'deepseek-v4-pro', 'deepseek-flash', 'glm-5.3-flash', 'MiniMax-M3.1-Flash'].filter(
-    Boolean
-  );
+  const candidates = [
+    String(options.model ?? '').trim(),
+    requested,
+    'deepseek-v4-pro',
+    'deepseek-flash',
+    'glm-5.3-flash',
+    'MiniMax-M3.1-Flash',
+  ].filter((item, index, list) => Boolean(item) && list.indexOf(item) === index);
   let lastError = 'no_usable_key';
   for (const model of candidates) {
     const family = familyOf(model);
@@ -446,12 +452,36 @@ async function selfOptChat(
         tokens: result.usage.total,
         source: 'chat',
       });
-      return { text: result.text, usage: { total: result.usage.total } };
+      return { text: result.text, usage: { total: result.usage.total }, model };
     } catch (error) {
       lastError = redactSecrets(error instanceof Error ? error.message : String(error), []);
     }
   }
   throw new Error(lastError);
+}
+
+/**
+ * 评审团的候选名单：每个有 key 的厂商取最多两个模型（旗舰 + 快模型）。
+ * 评审团优先凑不同厂商，引擎再做去重与截断。
+ * 读 key 要走 DPAPI（每次几百毫秒），所以结果缓存一分钟：状态轮询不会反复解密。
+ */
+let selfOptRosterCache: { at: number; models: string[] } | null = null;
+
+async function availableSelfOptModels(): Promise<string[]> {
+  if (selfOptRosterCache && Date.now() - selfOptRosterCache.at < 60_000) {
+    return selfOptRosterCache.models;
+  }
+  await ensureQuotaSeeded();
+  const models: string[] = [];
+  for (const family of modelFamilies()) {
+    const credential = await slotCredential(family.slot);
+    if (!credential) continue;
+    for (const model of family.models.slice(0, 2)) {
+      if (!models.includes(model)) models.push(model);
+    }
+  }
+  selfOptRosterCache = { at: Date.now(), models };
+  return models;
 }
 
 /** 自省会话 -> 画布：体检与每条问题都成为可读的节点。 */
@@ -467,8 +497,9 @@ function publishSelfOpt(session: {
   usedTokens: number;
   budget: { maxTokens: number };
   stages: Array<{ id: string; label: string; status: string; detail?: string; tokens?: number }>;
-  findings: Array<{ id: string; title: string; kind: string; severity: string; evidence: string; proposal: string; acceptance: string; status: string; note?: string; commit?: string }>;
+  findings: Array<{ id: string; title: string; kind: string; severity: string; evidence: string; proposal: string; acceptance: string; status: string; note?: string; commit?: string; proposedBy?: string; reviews?: Array<{ verdict: string }> }>;
   versions: string[];
+  panel?: string[];
 }): void {
   const workspaceId = selfoptCanvases.get(session.id);
   if (!workspaceId) return;
@@ -492,7 +523,7 @@ function publishSelfOpt(session: {
       data: {
         kind: 'library',
         name: `自省 · ${repo}`,
-        role: `${session.mode}/${session.level} · 预算 ${session.budget.maxTokens}`,
+        role: `${session.mode}/${session.level} · 预算 ${session.budget.maxTokens}${session.panel && session.panel.length > 1 ? ` · 评审团 ${session.panel.length} 家` : ''}`,
         provider: 'local',
         model: 'library',
         effort: 'off',
@@ -530,12 +561,22 @@ function publishSelfOpt(session: {
         finding.status === 'failed' ? 'failed' as const :
         finding.status === 'skipped' ? 'idle' as const :
         (session.status === 'running' ? 'running' as const : 'idle' as const);
+      const reviewLine = (() => {
+        const reviews = finding.reviews ?? [];
+        if (reviews.length === 0) return '';
+        const count = (verdict: string) => reviews.filter((item) => item.verdict === verdict).length;
+        return `互审：${count('confirm')} 确认 / ${count('revise')} 修正 / ${count('refute')} 驳回`;
+      })();
       const text = [
+        finding.proposedBy ? `提出：${finding.proposedBy}` : '',
+        reviewLine,
         `依据：${finding.evidence}`,
         `改法：${finding.proposal}`,
         `验收：${finding.acceptance}`,
         `状态：${finding.status}${finding.note ? `（${finding.note}）` : ''}${finding.commit ? ` · 提交 ${finding.commit}` : ''}`,
-      ].join(String.fromCharCode(10));
+      ]
+        .filter(Boolean)
+        .join(String.fromCharCode(10));
       upsert({
         id: `finding-${index + 1}`,
         type: 'artifact',
@@ -576,6 +617,7 @@ const selfOpt = new SelfOptEngine({
   audit: (entry) => audit.record(entry),
   onProgress: (session) => publishSelfOpt(session),
   chat: selfOptChat,
+  roster: async () => (await availableSelfOptModels()).map((model) => ({ model })),
   search: (query, maxResults) => webSearch.search({ query, maxResults }),
 });
 
@@ -3322,17 +3364,18 @@ app.post('/api/selfopt/stop', (context) => {
   return context.json({ ok: true, stopped, session: selfOpt.current() });
 });
 
-app.get('/api/selfopt/status', (context) =>
-  context.json({
+app.get('/api/selfopt/status', async (context) => {
+  const roster = await availableSelfOptModels().catch(() => [] as string[]);
+  return context.json({
     ok: true,
     session: (() => {
       const current = selfOpt.current();
       if (!current) return null;
       return { ...current, canvasWorkspaceId: selfoptCanvases.get(current.id) ?? null };
     })(),
-    meta: { rootDir: defaultSelfOptRoot(), ...describeSelfOpt() },
-  })
-);
+    meta: { rootDir: defaultSelfOptRoot(), roster, ...describeSelfOpt() },
+  });
+});
 
 app.get('/api/selfopt/versions', async (context) => {
   const rootDir = String(context.req.query('rootDir') ?? '') || defaultSelfOptRoot();

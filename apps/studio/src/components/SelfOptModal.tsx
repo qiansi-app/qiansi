@@ -41,6 +41,8 @@ interface Finding {
   status: 'proposed' | 'applied' | 'skipped' | 'failed';
   note?: string;
   commit?: string;
+  proposedBy?: string;
+  reviews?: Array<{ by: string; verdict: 'confirm' | 'revise' | 'refute'; note?: string }>;
 }
 
 interface Forecast {
@@ -66,6 +68,7 @@ interface Session {
   versions: string[];
   forecast?: Forecast;
   canvasWorkspaceId?: string | null;
+  panel?: string[];
   error?: string;
   log: string[];
 }
@@ -90,6 +93,8 @@ interface Meta {
   levels: LevelSpec[];
   defaultBudget: { tokens: number; rounds: number };
   safety: string[];
+  /** 有 key 的模型候选：评审团从这里取。 */
+  roster?: string[];
 }
 
 interface VersionsPayload {
@@ -337,6 +342,20 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
         {error && <div className="keys-error">{error}</div>}
         {toast && <div className="attention-hint">{toast}</div>}
 
+        {meta?.roster && meta.roster.length > 0 && (
+          <div className="selfopt-forecast">
+            评审团：
+            <b>
+              {meta.roster.slice(0, 5).join(' · ')}
+              {meta.roster.length > 5 ? ` 等 ${meta.roster.length} 个模型` : ''}
+            </b>
+            <span className="attention-hint">
+              {' '}
+              · 各自独立复盘 → 互相质询（确认/修正/驳回）→ 综合合稿；只有一个模型时自动退回单模型
+            </span>
+          </div>
+        )}
+
         <div className="selfopt-row">
           <div className="selfopt-label">模式</div>
           <div className="selfopt-grid">
@@ -469,6 +488,17 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
                             ? `跳过：${finding.note ?? ''}`
                             : '待处理'}
                     </span>
+                    {(finding.proposedBy || (finding.reviews?.length ?? 0) > 0) && (
+                      <span className="attention-hint">
+                        {finding.proposedBy ? `提出：${finding.proposedBy}` : ''}
+                        {(finding.reviews?.length ?? 0) > 0
+                          ? `${finding.proposedBy ? ' · ' : ''}互审：${finding.reviews!
+                              .filter((review) => review.verdict === 'confirm').length} 确认 / ${finding.reviews!
+                              .filter((review) => review.verdict === 'revise').length} 修正 / ${finding.reviews!
+                              .filter((review) => review.verdict === 'refute').length} 驳回`
+                          : ''}
+                      </span>
+                    )}
                   </div>
                 ))}
               </div>

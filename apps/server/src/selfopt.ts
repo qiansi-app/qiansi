@@ -14,8 +14,10 @@ import { join, resolve, sep } from 'node:path';
 /**
  * 自我优化（自省循环）。
  *
- * 固定链路：体检（跑类型检查/测试、读 git 与 TODO）→ 复盘（旗舰模型基于证据产出问题清单）
- * → 执行（逐条改代码、校验、提交）→ 记录（版本快照，可切换）。
+ * 链路：体检（跑类型检查/测试、读 git 与 TODO）→ 复盘（多个模型各带一个视角独立产出问题清单）
+ * → 互审（互相质询：确认、修正或驳回）→ 综合（旗舰模型合并去重、排出终稿）
+ * → 执行（逐条改代码、换一个模型复核 diff、校验、提交）→ 记录（版本快照，可切换）。
+ * 只有一个可用模型时，互审与综合跳过，退回单模型复盘。
  * 其中「对标（联网找竞品与论文）」仅在 value / evolve 等 search: true 模式下启用，见 SELFOPT_MODES 的 search 字段。
  *
  * 三条设计约束，其它都从这里推：
@@ -119,11 +121,64 @@ export function findLevel(id: string): LevelSpec | undefined {
   return SELFOPT_LEVELS.find((item) => item.id === id);
 }
 
+/**
+ * 本轮评审团用几个模型：多模型互审是默认做法，环境变量可调。
+ * 档位越高看得越深，但 L5 会多轮，控制每个模型都要付的固定成本。
+ */
+export function panelSizeFor(level: LevelSpec): number {
+  const env = Number(process.env.QIANSI_SELFOPT_PANEL ?? '');
+  const base =
+    level.id === 'L1' ? 2 : level.id === 'L2' ? 3 : level.id === 'L3' ? 3 : level.id === 'L4' ? 4 : 3;
+  return clampNumber(Number.isFinite(env) && env > 0 ? Math.round(env) : base, 1, 5);
+}
+
+/** 同一家厂商的模型归一组：评审团优先凑齐不同厂商，再看同厂商的第二个模型。 */
+function vendorOf(model: string): string {
+  const id = String(model ?? '').toLowerCase();
+  if (id.startsWith('deepseek')) return 'deepseek';
+  if (id.startsWith('minimax') || id.startsWith('abab')) return 'minimax';
+  if (id.startsWith('glm') || id.startsWith('zhipu') || id.startsWith('chatglm')) return 'zhipu';
+  if (id.startsWith('kimi') || id.startsWith('moonshot')) return 'moonshot';
+  if (id.startsWith('qwen')) return 'qwen';
+  if (id.startsWith('claude') || id.startsWith('fable')) return 'claude';
+  if (id.startsWith('gpt') || /^o[134]-/.test(id)) return 'openai';
+  return id.split(/[-_/]/)[0] ?? id;
+}
+
+/** 复盘视角：同一份证据，不同模型被要求从不同方向找问题。 */
+const REFLECT_LENSES: Array<{ id: string; label: string; focus: string }> = [
+  {
+    id: 'correctness',
+    label: '正确性',
+    focus: '以缺陷猎人的方式阅读证据：找真实报错、崩溃、逻辑错误、回归与类型漏洞。',
+  },
+  {
+    id: 'adversarial',
+    label: '对抗',
+    focus: '假设现有实现是错的：找边界值、并发与竞态、失败路径、安全与资源问题，并说明触发条件。',
+  },
+  {
+    id: 'usability',
+    label: '体验',
+    focus: '站在使用者视角：找误导的提示、缺失的空状态、文档与实现不一致、重复劳动。',
+  },
+  {
+    id: 'evolution',
+    label: '演进',
+    focus: '站在维护者视角：结合最近改动、TODO 与外部对标，找该做而未做、做了却半途而废的事。',
+  },
+];
+
 export function describeSelfOpt() {
   return {
     modes: SELFOPT_MODES,
     levels: SELFOPT_LEVELS,
     defaultBudget: { tokens: 120_000, rounds: 3 },
+    panel: {
+      sizeEnv: 'QIANSI_SELFOPT_PANEL',
+      modelsEnv: 'QIANSI_SELFOPT_MODELS',
+      note: '多个可用模型组成评审团：各自独立复盘 → 交叉质询 → 综合纠错；只有一个模型时退回单模型复盘。',
+    },
     safety: [
       '只在 git 仓库里运行；工作区不干净时，写代码的档位直接拒绝',
       '每次提交前扫描暂存差异，发现疑似密钥即中止并回滚',
@@ -181,21 +236,28 @@ export function forecastSelfOpt(input: {
   level: SelfOptLevel;
   budget: number;
   findings?: number;
+  /** 评审团规模：每个模型各自复盘一次，再互审一次。 */
+  panel?: number;
   history?: ForecastHistory[];
 }): SelfOptForecast {
   const mode = findMode(input.mode) ?? SELFOPT_MODES[0];
   const level = findLevel(input.level) ?? SELFOPT_LEVELS[0];
   const budget = Math.max(1000, Math.round(input.budget || 120_000));
   const findings = clampNumber(Math.round(input.findings ?? 4), 1, 12);
+  const panel = clampNumber(Math.round(input.panel ?? panelSizeFor(level)), 1, 5);
 
   const survey = 1_500;
   const search = mode.search ? 6_000 : 0;
-  const reflect = 9_000;
+  // 每位评审独立复盘一次；两人以上再付一轮互审（每位评一次 + 一次综合）。
+  const reflect = 9_000 * panel;
+  const critique = panel >= 2 ? panel * 2_500 + 6_000 : 0;
   const proposeOnly = level.id === 'L2' ? findings * 2_500 : 0;
   const perApply =
     level.id === 'L3' ? 9_000 : level.id === 'L4' ? 14_000 : level.id === 'L5' ? 10_000 : 0;
+  // 写代码的档位每条改动多一次独立复核（只给 diff，成本很小）。
+  const perReview = level.writes ? 1_200 : 0;
 
-  const round = survey + search + reflect + proposeOnly + findings * perApply;
+  const round = survey + search + reflect + critique + proposeOnly + findings * (perApply + perReview);
   const rawRounds = level.iterates ? Math.floor(budget / Math.max(1, round)) : 1;
   const rounds = level.iterates ? clampNumber(rawRounds, 1, 8) : 1;
   const cappedByBudget = level.iterates && rawRounds > 8;
@@ -214,9 +276,11 @@ export function forecastSelfOpt(input: {
   const basis = [
     `体检 ${survey}`,
     mode.search ? `对标 ${search}` : '',
-    `复盘 ${reflect}`,
+    `复盘 ${panel > 1 ? `${panel} 位评审 ` : ''}${reflect}`,
+    critique ? `互审 ${critique}` : '',
     proposeOnly ? `建议 ${proposeOnly}` : '',
     perApply ? `实现 ${findings}×${perApply}` : '',
+    perReview ? `复核 ${findings}×${perReview}` : '',
   ]
     .filter(Boolean)
     .join(' + ');
@@ -332,8 +396,10 @@ export interface SelfOptDeps {
   audit: (entry: { actor: string; action: string; target?: string; detail?: Record<string, unknown> }) => void;
   chat: (
     messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-    options: { maxTokens: number; timeoutMs: number }
-  ) => Promise<{ text: string; usage: { total: number } }>;
+    options: { maxTokens: number; timeoutMs: number; model?: string }
+  ) => Promise<{ text: string; usage: { total: number }; model?: string }>;
+  /** 可用模型清单：评审团从这里取不同厂商的模型。 */
+  roster?: () => Promise<Array<{ model: string; label?: string }>>;
   search?: (query: string, maxResults: number) => Promise<Array<{ title: string; url: string; snippet?: string }>>;
   runShell?: (cmdLine: string, timeoutMs: number, cwd: string) => Promise<ShellResult>;
   runGit?: (args: string[], cwd: string) => Promise<ShellResult>;
@@ -341,7 +407,14 @@ export interface SelfOptDeps {
   onProgress?: (session: SelfOptSession) => void;
 }
 
-export type SelfOptStageId = 'survey' | 'benchmark' | 'reflect' | 'apply' | 'verify' | 'snapshot';
+export type SelfOptStageId =
+  | 'survey'
+  | 'benchmark'
+  | 'reflect'
+  | 'critique'
+  | 'apply'
+  | 'verify'
+  | 'snapshot';
 
 export interface SelfOptStage {
   id: SelfOptStageId;
@@ -368,6 +441,10 @@ export interface SelfOptFinding {
   status: 'proposed' | 'applied' | 'skipped' | 'failed';
   note?: string;
   commit?: string;
+  /** 提出这条问题的模型。 */
+  proposedBy?: string;
+  /** 其他模型的互审意见：确认、修正或驳回。 */
+  reviews?: Array<{ by: string; verdict: 'confirm' | 'revise' | 'refute'; note?: string }>;
 }
 
 export interface SelfOptVersion {
@@ -403,6 +480,8 @@ export interface SelfOptSession {
   baseCommit?: string;
   baseBranch?: string;
   forecast?: SelfOptForecast;
+  /** 本轮评审团的模型（至少两个才启用互审）。 */
+  panel?: string[];
   /** 用户要求的每轮问题数上限；缺省按档位。 */
   requestedFindings?: number;
   error?: string;
@@ -509,6 +588,8 @@ class BudgetExceeded extends Error {
 export class SelfOptEngine {
   private session: SelfOptSession | null = null;
   private stopped = false;
+  /** 最近一次模型调用实际由哪个模型完成（显式指定模型不可用时会降级）。 */
+  private lastChatModel?: string;
   private readonly dir: string;
 
   constructor(private readonly deps: SelfOptDeps) {
@@ -575,11 +656,13 @@ export class SelfOptEngine {
   // -- 预测 ----------------------------------------------------------------
 
   async forecast(input: { rootDir: string; mode: SelfOptMode; level: SelfOptLevel; budget?: number; findings?: number }) {
+    const level = findLevel(input.level) ?? SELFOPT_LEVELS[0];
     return forecastSelfOpt({
       mode: input.mode,
       level: input.level,
       budget: input.budget ?? 120_000,
       findings: input.findings,
+      panel: panelSizeFor(level),
       history: this.history(input.rootDir),
     });
   }
@@ -628,6 +711,7 @@ export class SelfOptEngine {
     }
 
     const maxTokens = Math.max(5_000, Math.round(options.maxTokens ?? 120_000));
+    const panel = await this.resolvePanel(level);
     const session: SelfOptSession = {
       id: `so-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
       rootDir,
@@ -646,20 +730,35 @@ export class SelfOptEngine {
       versions: [],
       baseBranch: meta.branch,
       baseCommit: meta.head,
+      panel,
       forecast: forecastSelfOpt({
         mode: mode.id,
         level: level.id,
         budget: maxTokens,
         findings: options.findings,
+        panel: Math.max(1, panel.length),
         history: this.history(rootDir),
       }),
       requestedFindings: options.findings ? Math.max(1, Math.min(12, Math.round(options.findings))) : undefined,
       log: [],
     };
+    if (panel.length < 2) {
+      const critique = session.stages.find((stage) => stage.id === 'critique');
+      if (critique) {
+        critique.status = 'skipped';
+        critique.detail = '只有一个可用模型，跳过互审';
+      }
+    }
     this.session = session;
     this.stopped = false;
     this.save(session);
     this.log(session, `开始：${mode.label}/${level.label}，预算 ${maxTokens} tokens`);
+    this.log(
+      session,
+      panel.length >= 2
+        ? `评审团：${panel.join(' / ')} —— 各自独立复盘，再交叉质询、综合纠错`
+        : '评审团只有一个模型（配置多家 key 后自动启用互审）'
+    );
 
     void this.execute(session, level, mode).catch((error: unknown) => {
       session.status = 'failed';
@@ -678,11 +777,52 @@ export class SelfOptEngine {
     return true;
   }
 
+  /**
+   * 组评审团：优先不同厂商，凑不满再补同厂商的第二个模型。
+   * QIANSI_SELFOPT_MODELS 可直接指定（逗号分隔），用于实验与验收。
+   */
+  private async resolvePanel(level: LevelSpec): Promise<string[]> {
+    const want = panelSizeFor(level);
+    if (want < 2) return [];
+    const forced = String(process.env.QIANSI_SELFOPT_MODELS ?? '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    let roster: Array<{ model: string }> = forced.map((model) => ({ model }));
+    if (roster.length === 0 && this.deps.roster) {
+      try {
+        roster = await this.deps.roster();
+      } catch {
+        roster = [];
+      }
+    }
+    const unique: string[] = [];
+    for (const entry of roster) {
+      const id = String(entry?.model ?? '').trim();
+      if (id && !unique.includes(id)) unique.push(id);
+    }
+    const picked: string[] = [];
+    const seenVendors = new Set<string>();
+    for (const model of unique) {
+      if (picked.length >= want) break;
+      const vendor = vendorOf(model);
+      if (seenVendors.has(vendor)) continue;
+      seenVendors.add(vendor);
+      picked.push(model);
+    }
+    for (const model of unique) {
+      if (picked.length >= want) break;
+      if (!picked.includes(model)) picked.push(model);
+    }
+    return picked;
+  }
+
   private initialStages(mode: ModeSpec, level: LevelSpec): SelfOptStage[] {
     return [
       { id: 'survey', label: '体检', status: 'pending' },
       { id: 'benchmark', label: '对标', status: mode.search ? 'pending' : 'skipped' },
       { id: 'reflect', label: '复盘', status: 'pending' },
+      { id: 'critique', label: '互审', status: 'pending' },
       { id: 'apply', label: '执行', status: level.writes ? 'pending' : 'skipped' },
       { id: 'verify', label: '校验', status: level.writes ? 'pending' : 'skipped' },
       { id: 'snapshot', label: '快照', status: level.commits ? 'pending' : 'skipped' },
@@ -777,9 +917,14 @@ export class SelfOptEngine {
         session.round = rounds;
         this.log(session, `第 ${rounds} 轮复盘`);
 
-        const findings = await this.runStage(session, 'reflect', () =>
-          this.reflect(session, mode, level, survey, digest, benchmark, rounds)
+        let findings = await this.runStage(session, 'reflect', () =>
+          this.propose(session, mode, level, survey, digest, benchmark, rounds)
         );
+        if (findings && findings.length > 0 && (session.panel?.length ?? 0) >= 2) {
+          findings = await this.runStage(session, 'critique', () =>
+            this.critique(session, mode, level, findings as SelfOptFinding[])
+          );
+        }
         if (!findings || findings.length === 0) {
           this.log(session, '本轮没有新问题');
           break;
@@ -1078,74 +1223,77 @@ export class SelfOptEngine {
       .join('\n\n');
   }
 
-  /**
-   * 一次模型调用 + 解析；解析失败时把坏输出贴回去让它自纠正一次。
-   * 会思考的模型经常把 JSON 截断或夹带说明文字，重试比换模型划算。
-   */
   private async chatJson<T>(
     session: SelfOptSession,
     stageId: SelfOptStageId,
     system: string,
     user: string,
-    maxTokens: number
-  ): Promise<T | null> {
+    maxTokens: number,
+    model?: string
+  ): Promise<{ data: T | null; model?: string }> {
     const stage = this.stage(session, stageId);
     const call = async (messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>) => {
-      const result = await this.deps.chat(messages, { maxTokens, timeoutMs: 150_000 });
+      const result = await this.deps.chat(messages, { maxTokens, timeoutMs: 150_000, model });
+      this.lastChatModel = result.model ?? model;
       this.charge(session, result.usage.total);
       stage.tokens = (stage.tokens ?? 0) + result.usage.total;
-      return result.text;
+      return { text: result.text, model: result.model ?? model };
     };
 
     const first = await call([
       { role: 'system', content: system },
       { role: 'user', content: user },
     ]);
-    const parsed = parseJson<T>(first);
-    if (parsed) return parsed;
+    const parsed = parseJson<T>(first.text);
+    if (parsed) return { data: parsed, model: first.model };
 
     const retry = await call([
       { role: 'system', content: system },
       { role: 'user', content: user },
-      { role: 'assistant', content: first.slice(0, 5000) || '（空输出）' },
+      { role: 'assistant', content: first.text.slice(0, 5000) || '（空输出）' },
       {
         role: 'user',
         content:
           '你上次的输出无法解析为 JSON（可能被截断或夹带了说明文字）。只输出一个完整的 JSON 对象本身，从 { 开始到 } 结束，不要任何其他文字，字段与上面要求一致。',
       },
     ]);
-    const second = parseJson<T>(retry);
+    const second = parseJson<T>(retry.text);
     if (!second) {
       this.log(
         session,
-        `${stageId} 的 JSON 解析失败，原始输出前 300 字：${(retry || first).slice(0, 300).replace(/\s+/g, ' ')}`
+        `${stageId} 的 JSON 解析失败，原始输出前 300 字：${(retry.text || first.text).slice(0, 300).replace(/\s+/g, ' ')}`
       );
     }
-    return second;
+    return { data: second, model: retry.model ?? first.model };
   }
 
-  private async reflect(
-    session: SelfOptSession,
+  // -- 复盘（评审团） ------------------------------------------------------
+
+  private reflectPrompt(
     mode: ModeSpec,
     level: LevelSpec,
     survey: SurveyReport,
     digest: string,
     benchmark: string,
-    round: number
-  ): Promise<SelfOptFinding[]> {
-    const maxFindings = Math.min(session.requestedFindings ?? (level.writes ? 4 : 6), 12);
+    round: number,
+    lens: { label: string; focus: string },
+    seat: { index: number; total: number },
+    maxFindings: number
+  ): { system: string; user: string; maxFindings: number } {
     const system = [
       '你是牵丝的自我优化复盘官。',
+      `你的评审视角：${lens.label} —— ${lens.focus}`,
       `模式：${mode.label}（${mode.does.join('；')}）。明确不做：${mode.avoids.join('；')}。`,
       `程度：${level.label}（${level.blurb}）。`,
       '只依据下面提供的证据下判断：可以指出证据里的问题，可以提出由这些证据直接推出的改进；不要引用不存在的文件、接口或数字。',
+      `本轮共有 ${seat.total} 位评审各自独立复盘，稍后会互相质询。只输出你最确定的问题，把最严重的放前面。`,
       '只输出一个 JSON 对象，不要解释，不要 Markdown 代码块。',
     ].join('\n');
 
     const user = [
       `## 体检证据\n${digest}`,
       benchmark ? `## 外部对标\n${benchmark}` : '',
-      `## 仓库\n分支 ${survey.branch} · 脏文件 ${survey.dirty.length} · 第 ${round} 轮`,
+      `## 仓库\n分支 ${survey.branch} · 脏文件 ${survey.dirty.length} · 第 ${round} 轮 · 你是第 ${seat.index} 位评审`,
       `## 输出格式
 {"summary":"一句中文总评","findings":[{"id":"f1","title":"短标题","kind":"bug|security|perf|ux|docs|value|research","area":"模块或文件","severity":"high|medium|low","evidence":"来自上面证据的具体依据","proposal":"具体怎么改","risk":"low|medium|high","acceptance":"怎么算改好了","estTokens":8000,"files":["可能涉及的文件"]}]}
 
@@ -1154,18 +1302,23 @@ export class SelfOptEngine {
 2. kind 必须落在模式允许的范围内：${mode.kinds.join(', ')}；
 3. evidence 必须能在上面的证据里找到对应，不许编造；
 4. 如果证据不足以支持任何改动，findings 返回空数组；
-5. 每条 proposal 要能直接落到文件和函数上，不要写「优化架构」这种空话。`,
+5. 每条 proposal 要能直接落到文件和函数上，不要写「优化架构」这种空话；
+6. 从你的视角看不到的问题不要硬凑，留给其他评审。`,
     ]
       .filter(Boolean)
       .join('\n\n');
 
-    const parsed = await this.chatJson<{ summary?: string; findings?: Array<Record<string, unknown>> }>(
-      session,
-      'reflect',
-      system,
-      user.slice(0, 60_000),
-      8000
-    );
+    return { system, user: user.slice(0, 60_000), maxFindings };
+  }
+
+  private toFindings(
+    parsed: { summary?: string; findings?: Array<Record<string, unknown>> } | null,
+    maxFindings: number,
+    mode: ModeSpec,
+    session: SelfOptSession,
+    round: number,
+    suffix: string
+  ): SelfOptFinding[] {
     if (!parsed) return [];
     const allowed = new Set<string>(mode.kinds);
     const findings: SelfOptFinding[] = [];
@@ -1173,7 +1326,7 @@ export class SelfOptEngine {
       const kind = String(raw?.kind ?? 'bug') as FindingKind;
       if (!allowed.has(kind)) continue;
       findings.push({
-        id: `${session.id}-r${round}-f${index + 1}`,
+        id: `${session.id}-r${round}-${suffix}-f${index + 1}`,
         title: String(raw?.title ?? `问题 ${index + 1}`).slice(0, 80),
         kind,
         area: String(raw?.area ?? '').slice(0, 120),
@@ -1193,8 +1346,287 @@ export class SelfOptEngine {
         status: 'proposed',
       });
     }
-    if (parsed.summary) this.stage(session, 'reflect').detail = String(parsed.summary).slice(0, 240);
     return findings;
+  }
+
+  /** 复盘：每位评审用不同视角独立找问题；只有一位就是原来的单模型复盘。 */
+  private async propose(
+    session: SelfOptSession,
+    mode: ModeSpec,
+    level: LevelSpec,
+    survey: SurveyReport,
+    digest: string,
+    benchmark: string,
+    round: number
+  ): Promise<SelfOptFinding[]> {
+    const panel = session.panel ?? [];
+    const seats = panel.length >= 2 ? panel : [''];
+    const maxFindings = Math.min(session.requestedFindings ?? (level.writes ? 4 : 6), 12);
+    const results = await Promise.allSettled(
+      seats.map(async (model, index) => {
+        const lens = REFLECT_LENSES[index % REFLECT_LENSES.length]!;
+        const prompt = this.reflectPrompt(mode, level, survey, digest, benchmark, round, lens, {
+          index: index + 1,
+          total: seats.length,
+        }, maxFindings);
+        const result = await this.chatJson<{ summary?: string; findings?: Array<Record<string, unknown>> }>(
+          session,
+          'reflect',
+          prompt.system,
+          prompt.user,
+          8000,
+          model || undefined
+        );
+        if (model && result.model && result.model !== model) {
+          this.log(session, `评审 ${model} 不可用，由 ${result.model} 代答（${lens.label}视角）`);
+        }
+        const list = this.toFindings(result.data, prompt.maxFindings, mode, session, round, `p${index + 1}`);
+        for (const item of list) item.proposedBy = result.model ?? (model || undefined);
+        if (result.data?.summary) {
+          this.log(session, `${lens.label}视角：${String(result.data.summary).slice(0, 120)}`);
+        }
+        return list;
+      })
+    );
+
+    const merged: SelfOptFinding[] = [];
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') merged.push(...result.value);
+      else {
+        const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        this.log(session, `第 ${index + 1} 位评审失败：${message.slice(0, 160)}`);
+      }
+    });
+    if (merged.length === 0) return [];
+    const rank = (severity: string) => (severity === 'high' ? 0 : severity === 'medium' ? 1 : 2);
+    merged.sort((a, b) => rank(a.severity) - rank(b.severity));
+    const capped = merged.slice(0, 12);
+    const stage = this.stage(session, 'reflect');
+    stage.detail = `${seats.length > 1 ? `${seats.length} 位评审` : '单模型'}产出 ${capped.length} 条候选`;
+    this.save(session);
+    return capped;
+  }
+
+  /** 互审：每位评审逐条确认 / 修正 / 驳回别人提的问题。 */
+  private async reviewAs(
+    session: SelfOptSession,
+    model: string,
+    proposals: SelfOptFinding[]
+  ): Promise<number> {
+    const candidates = proposals.filter((item) => item.proposedBy !== model);
+    if (candidates.length === 0) return 0;
+    const payload = candidates.map((item) => ({
+      id: item.id,
+      title: item.title,
+      kind: item.kind,
+      severity: item.severity,
+      area: item.area,
+      evidence: item.evidence.slice(0, 400),
+      proposal: item.proposal.slice(0, 500),
+      acceptance: item.acceptance.slice(0, 200),
+    }));
+    const system = [
+      '你是牵丝自我优化的互审评审。',
+      '下面这些候选问题由其他模型提出。逐条判断它是否站得住：',
+      'confirm = 证据成立、值得处理；',
+      'revise = 方向对但依据/改法/验收有误，给出修正；',
+      'refute = 证据不足或判断错误，说明理由。',
+      '只依据给出的内容判断，不臆造新证据；宁可 confirm，也不要因为风格不合就驳回。',
+      '只输出一个 JSON 对象，不要解释，不要 Markdown 代码块。',
+    ].join('\n');
+    const user = [
+      `## 候选问题\n${JSON.stringify(payload, null, 1).slice(0, 40_000)}`,
+      `## 输出格式
+{"reviews":[{"id":"候选 id","verdict":"confirm|revise|refute","note":"一句理由","proposal":"修正后的改法（revise 时必填）","evidence":"修正后的依据（可选）","acceptance":"修正后的验收（可选）","severity":"high|medium|low（可选）"}]}`,
+    ].join('\n\n');
+    const result = await this.chatJson<{ reviews?: Array<Record<string, unknown>> }>(
+      session,
+      'critique',
+      system,
+      user,
+      2500,
+      model
+    );
+    if (!result.data) return 0;
+    let count = 0;
+    for (const raw of result.data.reviews ?? []) {
+      const target = proposals.find((item) => item.id === String(raw?.id ?? ''));
+      if (!target) continue;
+      const verdict = String(raw?.verdict ?? '');
+      if (!['confirm', 'revise', 'refute'].includes(verdict)) continue;
+      const note = String(raw?.note ?? '').slice(0, 300);
+      target.reviews = target.reviews ?? [];
+      target.reviews.push({ by: result.model ?? model, verdict: verdict as 'confirm' | 'revise' | 'refute', note });
+      count += 1;
+      if (verdict === 'revise') {
+        const proposal = String(raw?.proposal ?? '').trim();
+        const evidence = String(raw?.evidence ?? '').trim();
+        const acceptance = String(raw?.acceptance ?? '').trim();
+        const severity = String(raw?.severity ?? '');
+        if (proposal) target.proposal = proposal.slice(0, 800);
+        if (evidence) target.evidence = evidence.slice(0, 600);
+        if (acceptance) target.acceptance = acceptance.slice(0, 300);
+        if (['high', 'medium', 'low'].includes(severity)) {
+          target.severity = severity as SelfOptFinding['severity'];
+        }
+      }
+    }
+    return count;
+  }
+
+  /** 综合：旗舰模型合并重复、采纳修正、复核驳回，产出终稿。 */
+  private async synthesize(
+    session: SelfOptSession,
+    mode: ModeSpec,
+    level: LevelSpec,
+    kept: SelfOptFinding[],
+    dropped: SelfOptFinding[]
+  ): Promise<SelfOptFinding[] | null> {
+    const panel = session.panel ?? [];
+    const model = panel[0];
+    if (!model) return null;
+    const maxFindings = Math.min(session.requestedFindings ?? (level.writes ? 4 : 6), 12);
+    const brief = (item: SelfOptFinding) => ({
+      title: item.title,
+      kind: item.kind,
+      severity: item.severity,
+      area: item.area,
+      evidence: item.evidence.slice(0, 400),
+      proposal: item.proposal.slice(0, 500),
+      acceptance: item.acceptance.slice(0, 200),
+      proposedBy: item.proposedBy ?? '',
+      reviews: item.reviews ?? [],
+    });
+    const system = [
+      '你是牵丝自我优化的主持人。几位评审已经各自提出候选问题并互相质询，现在由你合稿。',
+      '只依据下面的候选、互审意见与证据下结论；不要引入候选之外的新问题。',
+      '只输出一个 JSON 对象，不要解释，不要 Markdown 代码块。',
+    ].join('\n');
+    const user = [
+      `## 模式与程度\n模式：${mode.label}（允许类别：${mode.kinds.join(', ')}）；程度：${level.label}。`,
+      `## 存活候选\n${JSON.stringify(kept.map(brief), null, 1).slice(0, 40_000)}`,
+      dropped.length
+        ? `## 被互审驳回的候选\n${JSON.stringify(dropped.map(brief), null, 1).slice(0, 16_000)}`
+        : '',
+      `## 输出格式
+{"summary":"一句中文总评","findings":[{"title":"短标题","kind":"bug|security|perf|ux|docs|value|research","area":"模块或文件","severity":"high|medium|low","evidence":"来自候选的具体依据","proposal":"具体怎么改","risk":"low|medium|high","acceptance":"怎么算改好了","estTokens":8000,"files":["可能涉及的文件"]}]}
+
+规则：
+1. 指向同一处问题（同一文件/函数/现象）的候选合并成一条，保留证据最扎实的表述；
+2. 最多 ${maxFindings} 条，按严重度排序；
+3. 互审修正过依据/改法/验收的，采用修正后的版本；
+4. 被驳回的候选默认不要；只有明确判定驳回理由站不住、并在 evidence 里写出了理由，才恢复；
+5. kind 必须落在 ${mode.kinds.join(', ')} 之内；
+6. evidence 必须来自候选内容，不许编造。`,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+    const result = await this.chatJson<{ summary?: string; findings?: Array<Record<string, unknown>> }>(
+      session,
+      'critique',
+      system,
+      user,
+      6000,
+      model
+    );
+    if (!result.data) return null;
+    const final = this.toFindings(result.data, maxFindings, mode, session, session.round, 'syn');
+    if (final.length === 0 && kept.length > 0) {
+      this.log(session, '综合结果为空，沿用互审后的候选');
+      return null;
+    }
+    const lookup = new Map<string, SelfOptFinding>();
+    for (const item of [...kept, ...dropped]) lookup.set(item.title.trim(), item);
+    for (const item of final) {
+      const source =
+        lookup.get(item.title.trim()) ??
+        [...kept, ...dropped].find(
+          (candidate) => candidate.area && item.area && candidate.area === item.area
+        );
+      if (source) {
+        item.proposedBy = source.proposedBy;
+        item.reviews = source.reviews;
+      } else {
+        item.proposedBy = result.model ?? model;
+      }
+    }
+    if (result.data.summary) {
+      this.stage(session, 'critique').detail = `${String(result.data.summary).slice(0, 200)} · 终稿 ${final.length} 条`;
+    }
+    return final;
+  }
+
+  private async critique(
+    session: SelfOptSession,
+    mode: ModeSpec,
+    level: LevelSpec,
+    proposals: SelfOptFinding[]
+  ): Promise<SelfOptFinding[]> {
+    const panel = session.panel ?? [];
+    const stage = this.stage(session, 'critique');
+    if (panel.length < 2) {
+      stage.status = 'skipped';
+      stage.detail = '只有一个可用模型，跳过互审';
+      this.save(session);
+      return proposals;
+    }
+    try {
+      const results = await Promise.allSettled(panel.map((model) => this.reviewAs(session, model, proposals)));
+      let reviewed = 0;
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') reviewed += result.value;
+        else {
+          const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+          this.log(session, `评审 ${panel[index]} 互审失败：${message.slice(0, 160)}`);
+        }
+      });
+
+      const kept: SelfOptFinding[] = [];
+      const dropped: SelfOptFinding[] = [];
+      for (const finding of proposals) {
+        const reviews = finding.reviews ?? [];
+        const approves = reviews.filter((review) => review.verdict !== 'refute');
+        if (reviews.length > 0 && approves.length === 0) dropped.push(finding);
+        else kept.push(finding);
+      }
+      if (dropped.length > 0) {
+        this.log(
+          session,
+          `互审驳回 ${dropped.length} 条：${dropped
+            .map((item) => item.title)
+            .slice(0, 3)
+            .join('；')}`
+        );
+      }
+
+      let final = kept;
+      if (kept.length > 0 || dropped.length > 0) {
+        const synthesized = await this.synthesize(session, mode, level, kept, dropped);
+        if (synthesized) final = synthesized;
+      }
+      const revised = proposals.reduce(
+        (sum, item) => sum + (item.reviews ?? []).filter((review) => review.verdict === 'revise').length,
+        0
+      );
+      stage.detail = `${panel.length} 位互审 · ${reviewed} 条意见 · 驳回 ${dropped.length} · 修正 ${revised} · 终稿 ${final.length}`;
+      this.log(
+        session,
+        `互审完成：${reviewed} 条意见，驳回 ${dropped.length} 条，终稿 ${final.length} 条`
+      );
+      this.save(session);
+      return final;
+    } catch (error) {
+      if (error instanceof BudgetExceeded) {
+        stage.detail = '预算用尽，沿用候选清单';
+        this.log(session, '互审预算用尽，沿用候选清单');
+        return proposals;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      stage.detail = `互审出错，沿用候选：${message.slice(0, 120)}`;
+      this.log(session, `互审出错，沿用候选清单：${message.slice(0, 160)}`);
+      return proposals;
+    }
   }
 
   // -- 执行 ----------------------------------------------------------------
@@ -1252,17 +1684,17 @@ export class SelfOptEngine {
 4. 代码风格与文件保持一致，注释用中文。`,
     ].join('\n\n');
 
-    const parsed = await this.chatJson<{ changes?: Array<Record<string, unknown>>; note?: string }>(
+    const proposal = await this.chatJson<{ changes?: Array<Record<string, unknown>>; note?: string }>(
       session,
       'apply',
       system,
       user.slice(0, 60_000),
       8000
     );
-    const changes = (parsed?.changes ?? []).slice(0, level.maxFilesPerFinding);
+    const changes = (proposal.data?.changes ?? []).slice(0, level.maxFilesPerFinding);
     if (changes.length === 0) {
       finding.status = 'skipped';
-      finding.note = String(parsed?.note ?? '模型认为无法安全实现').slice(0, 200);
+      finding.note = String(proposal.data?.note ?? '模型认为无法安全实现').slice(0, 200);
       this.save(session);
       return false;
     }
@@ -1311,6 +1743,18 @@ export class SelfOptEngine {
       }
       verifyStage.status = 'done';
       verifyStage.finishedAt = Date.now();
+
+      // 独立复核：换一个模型只看 diff，挡住「检查能过但改错了」的情况。
+      const review = await this.reviewChange(session, finding, touched);
+      if (review && !review.ok) {
+        verifyStage.status = 'failed';
+        verifyStage.detail = '独立复核驳回';
+        await rollback();
+        finding.status = 'failed';
+        finding.note = `复核驳回：${review.problems.slice(0, 3).join('；').slice(0, 400)}`;
+        this.save(session);
+        return false;
+      }
 
       // 密钥扫描：提交前最后一道闸。
       const staged = await this.git(['add', '--', ...touched], session.rootDir);
@@ -1377,6 +1821,61 @@ export class SelfOptEngine {
       this.save(session);
       this.log(session, `实现失败：${finding.note}`);
       return false;
+    }
+  }
+
+  /**
+   * 独立模型复核 diff：实现者与复核者不是同一个模型。
+   * 复核失败（网络/预算）不阻塞主流程，只有明确 `ok:false` 才回滚。
+   */
+  private async reviewChange(
+    session: SelfOptSession,
+    finding: SelfOptFinding,
+    files: string[]
+  ): Promise<{ ok: boolean; problems: string[] } | null> {
+    const panel = session.panel ?? [];
+    if (panel.length < 2) return null;
+    const diff = await this.git(['diff', '--', ...files], session.rootDir);
+    if (diff.code !== 0 || !diff.stdout.trim()) return null;
+    const reviewer = panel.find((model) => model !== this.lastChatModel) ?? panel[0]!;
+    const system = [
+      '你是牵丝自我优化的独立改动复核者。',
+      '你只判断给出的 diff 是否：(1) 只动了与问题直接相关的行；(2) 没有引入新错误或行为突变；(3) 能满足验收标准；(4) 没有夹带密钥、调试残留或无关改动。',
+      '证据不足时判通过，不要因为风格不同就驳回。',
+      '只输出一个 JSON 对象，不要解释，不要 Markdown 代码块。',
+    ].join('\n');
+    const user = [
+      `## 问题\n标题：${finding.title}\n依据：${finding.evidence}\n改法：${finding.proposal}\n验收：${finding.acceptance}`,
+      `## 改动 diff\n${diff.stdout.slice(0, 12_000)}`,
+      `## 输出格式
+{"ok":true|false,"problems":[{"severity":"high|medium|low","note":"指出具体哪一行、为什么"}]}`,
+    ].join('\n\n');
+    try {
+      const result = await this.chatJson<{ ok?: boolean; problems?: Array<Record<string, unknown>> }>(
+        session,
+        'verify',
+        system,
+        user,
+        1200,
+        reviewer
+      );
+      if (!result.data) return null;
+      const problems = (result.data.problems ?? [])
+        .map((item) => String(item?.note ?? item ?? ''))
+        .filter(Boolean)
+        .slice(0, 5);
+      const ok = result.data.ok !== false;
+      this.log(
+        session,
+        `改动复核（${result.model ?? reviewer}）：${ok ? '通过' : `驳回 ${problems[0] ?? ''}`}`
+      );
+      return { ok, problems };
+    } catch (error) {
+      this.log(
+        session,
+        `改动复核失败，按校验结果继续：${error instanceof Error ? error.message.slice(0, 160) : String(error)}`
+      );
+      return null;
     }
   }
 
