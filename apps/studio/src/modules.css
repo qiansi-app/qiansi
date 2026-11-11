@@ -684,9 +684,11 @@
 .toolbar-divider { width: 1px; height: 22px; margin: 0 6px; background: var(--border); }
 .toolbar-more { position: relative; }
 .toolbar-menu {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 8px);
+  /* 顶栏操作区在窄面板下是横向滚动容器，绝对定位于其中会被裁掉；
+     固定定位挂在视口上，任何宽度都能打开。 */
+  position: fixed;
+  right: 12px;
+  top: 62px;
   width: 244px;
   padding: 6px;
   border: 1px solid var(--border);
