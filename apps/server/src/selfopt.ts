@@ -16,7 +16,7 @@ import { join, resolve, sep } from 'node:path';
  *
  * 固定链路：体检（跑类型检查/测试、读 git 与 TODO）→ 复盘（旗舰模型基于证据产出问题清单）
  * → 执行（逐条改代码、校验、提交）→ 记录（版本快照，可切换）。
- * 其中「对标（联网找竞品与论文）」仅 value / evolve 档启用，见 SELFOPT_MODES 的 search 字段。
+ * 其中「对标（联网找竞品与论文）」仅在 value / evolve 等 search: true 模式下启用，见 SELFOPT_MODES 的 search 字段。
  *
  * 三条设计约束，其它都从这里推：
  * 1. 只依据证据下判断：复盘提示里给什么，就只能引用什么，避免模型编造 API。
