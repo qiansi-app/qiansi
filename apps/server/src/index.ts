@@ -15,7 +15,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import {
   AnthropicMessagesAdapter,
@@ -454,9 +454,127 @@ async function selfOptChat(
   throw new Error(lastError);
 }
 
+/** 自省会话 -> 画布：体检与每条问题都成为可读的节点。 */
+const selfoptCanvases = new Map<string, string>();
+const selfoptSyncAt = new Map<string, number>();
+
+function publishSelfOpt(session: {
+  id: string;
+  rootDir: string;
+  mode: string;
+  level: string;
+  status: string;
+  usedTokens: number;
+  budget: { maxTokens: number };
+  stages: Array<{ id: string; label: string; status: string; detail?: string; tokens?: number }>;
+  findings: Array<{ id: string; title: string; kind: string; severity: string; evidence: string; proposal: string; acceptance: string; status: string; note?: string; commit?: string }>;
+  versions: string[];
+}): void {
+  const workspaceId = selfoptCanvases.get(session.id);
+  if (!workspaceId) return;
+  const now = Date.now();
+  if (session.status === 'running' && now - (selfoptSyncAt.get(session.id) ?? 0) < 700) return;
+  selfoptSyncAt.set(session.id, now);
+  try {
+    const store = canvasFor(workspaceId);
+    const doc = store.read();
+    const existing = new Set(doc.nodes.map((node) => node.id));
+    const ops: CanvasOp[] = [];
+    const upsert = (node: CanvasNode) => {
+      if (existing.has(node.id)) ops.push({ op: 'update_node', id: node.id, patch: node.data ?? {} });
+      else ops.push({ op: 'add_node', node });
+    };
+    const repo = basename(session.rootDir) || session.rootDir;
+    upsert({
+      id: 'selfopt-root',
+      type: 'library',
+      position: { x: 60, y: 60 },
+      data: {
+        kind: 'library',
+        name: `自省 · ${repo}`,
+        role: `${session.mode}/${session.level} · 预算 ${session.budget.maxTokens}`,
+        provider: 'local',
+        model: 'library',
+        effort: 'off',
+        status: 'idle',
+        accent: '#38d9c2',
+        isPublic: true,
+        metric: `${session.status} · ${session.usedTokens} tok`,
+        output: session.rootDir,
+      },
+    });
+    const survey = session.stages.find((stage) => stage.id === 'survey');
+    const surveyText = (survey?.detail ?? '') + (survey?.tokens ? ` · ${survey.tokens} tok` : '');
+    upsert({
+      id: 'selfopt-survey',
+      type: 'artifact',
+      position: { x: 420, y: 60 },
+      data: {
+        kind: 'artifact',
+        name: '体检',
+        role: '跑检查、读 git 与 TODO',
+        provider: '',
+        model: '',
+        effort: 'off',
+        status: survey?.status === 'failed' ? 'failed' : survey?.status === 'done' ? 'done' : 'running',
+        accent: '#4d6bfe',
+        taskId: '',
+        output: surveyText.slice(0, 4000),
+        artifact: surveyText.slice(0, 120),
+        metric: '体检',
+      },
+    });
+    session.findings.forEach((finding, index) => {
+      const status =
+        finding.status === 'applied' ? 'done' as const :
+        finding.status === 'failed' ? 'failed' as const :
+        finding.status === 'skipped' ? 'idle' as const :
+        (session.status === 'running' ? 'running' as const : 'idle' as const);
+      const text = [
+        `依据：${finding.evidence}`,
+        `改法：${finding.proposal}`,
+        `验收：${finding.acceptance}`,
+        `状态：${finding.status}${finding.note ? `（${finding.note}）` : ''}${finding.commit ? ` · 提交 ${finding.commit}` : ''}`,
+      ].join(String.fromCharCode(10));
+      upsert({
+        id: `finding-${index + 1}`,
+        type: 'artifact',
+        position: { x: 420, y: 230 + index * 170 },
+        data: {
+          kind: 'artifact',
+          name: `[${finding.severity}/${finding.kind}] ${finding.title}`.slice(0, 60),
+          role: finding.status,
+          provider: '',
+          model: '',
+          effort: 'off',
+          status,
+          accent: finding.severity === 'high' ? '#f87171' : finding.severity === 'medium' ? '#e0a458' : '#4d6bfe',
+          taskId: finding.id,
+          output: text.slice(0, 4000),
+          artifact: `改法：${finding.proposal}`.slice(0, 120),
+          metric: finding.status,
+        },
+      });
+    });
+    const edgeExists = new Set(doc.edges.map((edge) => edge.id));
+    if (!edgeExists.has('so-edge-root')) {
+      ops.push({ op: 'add_edge', edge: { id: 'so-edge-root', source: 'selfopt-root', target: 'selfopt-survey', label: '体检', data: { kind: 'handoff' } } });
+    }
+    session.findings.forEach((_, index) => {
+      const id = `so-edge-f${index + 1}`;
+      if (edgeExists.has(id)) return;
+      ops.push({ op: 'add_edge', edge: { id, source: 'selfopt-survey', target: `finding-${index + 1}`, label: '问题', data: { kind: 'review' } } });
+    });
+    if (ops.length > 0) store.apply(ops);
+  } catch {
+    // 展示失败不影响自省
+  }
+}
+
 const selfOpt = new SelfOptEngine({
   stateDir,
   audit: (entry) => audit.record(entry),
+  onProgress: (session) => publishSelfOpt(session),
   chat: selfOptChat,
   search: (query, maxResults) => webSearch.search({ query, maxResults }),
 });
@@ -3171,6 +3289,11 @@ app.post('/api/selfopt/start', async (context) => {
       allowDirty: body?.allowDirty === true,
       actor: actorOf(context),
     });
+    // 自省过程放到独立画布：体检、问题、改法都成为节点，可随时查看。
+    const repoName = basename(session.rootDir) || 'project';
+    const canvasWs = workspaces.create(`自省 · ${repoName}`.slice(0, 40));
+    selfoptCanvases.set(session.id, canvasWs.id);
+    publishSelfOpt(session);
     audit.record({
       actor: actorOf(context),
       action: 'selfopt.start',
@@ -3183,7 +3306,7 @@ app.post('/api/selfopt/start', async (context) => {
         forecast: session.forecast?.expected,
       },
     });
-    return context.json({ ok: true, session });
+    return context.json({ ok: true, session, canvasWorkspaceId: canvasWs.id });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const status = message === 'selfopt_in_progress' || message === 'worktree_dirty' ? 409 : 400;
@@ -3200,7 +3323,11 @@ app.post('/api/selfopt/stop', (context) => {
 app.get('/api/selfopt/status', (context) =>
   context.json({
     ok: true,
-    session: selfOpt.current(),
+    session: (() => {
+      const current = selfOpt.current();
+      if (!current) return null;
+      return { ...current, canvasWorkspaceId: selfoptCanvases.get(current.id) ?? null };
+    })(),
     meta: { rootDir: defaultSelfOptRoot(), ...describeSelfOpt() },
   })
 );

@@ -337,6 +337,8 @@ export interface SelfOptDeps {
   search?: (query: string, maxResults: number) => Promise<Array<{ title: string; url: string; snippet?: string }>>;
   runShell?: (cmdLine: string, timeoutMs: number, cwd: string) => Promise<ShellResult>;
   runGit?: (args: string[], cwd: string) => Promise<ShellResult>;
+  /** 每次状态变化回调：用它把体检/问题同步到画布。 */
+  onProgress?: (session: SelfOptSession) => void;
 }
 
 export type SelfOptStageId = 'survey' | 'benchmark' | 'reflect' | 'apply' | 'verify' | 'snapshot';
@@ -694,6 +696,11 @@ export class SelfOptEngine {
       writeFileSync(join(dir, `${session.id}.json`), JSON.stringify(session, null, 2), 'utf8');
     } catch {
       // 落盘失败不影响本轮继续
+    }
+    try {
+      this.deps.onProgress?.(session);
+    } catch {
+      // 展示层失败不影响自省本身
     }
   }
 

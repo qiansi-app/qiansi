@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Eye, GitBranch, Play, RotateCcw, Sparkles, Square, X } from 'lucide-react';
+import { switchWorkspace } from '../workspace';
 
 /**
  * 自我优化面板：选模式和程度 → 看预算预测 → 跑 → 看阶段与问题 → 在版本之间切换。
@@ -64,6 +65,7 @@ interface Session {
   findings: Finding[];
   versions: string[];
   forecast?: Forecast;
+  canvasWorkspaceId?: string | null;
   error?: string;
   log: string[];
 }
@@ -129,6 +131,8 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
   const [level, setLevel] = useState('L1');
   const [budget, setBudget] = useState(120_000);
   const [maxRounds, setMaxRounds] = useState(3);
+  /** 被优化的项目目录：留空 = 牵丝自己；其它项目填绝对路径。 */
+  const [rootDir, setRootDir] = useState('');
   const [forecast, setForecast] = useState<Forecast | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -220,7 +224,7 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
       const response = await fetch('/api/selfopt/start', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ mode, level, maxTokens: budget, maxRounds }),
+        body: JSON.stringify({ mode, level, maxTokens: budget, maxRounds, rootDir: rootDir.trim() || undefined }),
       });
       const body = (await response.json().catch(() => null)) as
         | { ok?: boolean; session?: Session; error?: string }
@@ -372,6 +376,23 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
         </div>
 
         <div className="selfopt-row">
+          <div className="selfopt-label">项目</div>
+          <div className="selfopt-controls">
+            <label style={{ flex: 1 }}>
+              被优化的仓库（留空 = 牵丝自己）
+              <input
+                className="selfopt-input"
+                style={{ width: '100%' }}
+                value={rootDir}
+                disabled={running}
+                onChange={(event) => setRootDir(event.target.value)}
+                placeholder="例如 E:/some-project（必须是 git 仓库）"
+              />
+            </label>
+          </div>
+        </div>
+
+        <div className="selfopt-row">
           <div className="selfopt-label">预算</div>
           <div className="selfopt-controls">
             <label>
@@ -454,6 +475,19 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
             )}
 
             {session.error && <div className="keys-error">{session.error}</div>}
+
+            {session.canvasWorkspaceId && (
+              <div className="selfopt-forecast">
+                体检与问题已同步到画布
+                <button
+                  className="keys-mini"
+                  style={{ marginLeft: 8 }}
+                  onClick={() => session.canvasWorkspaceId && switchWorkspace(session.canvasWorkspaceId)}
+                >
+                  去画布看问题
+                </button>
+              </div>
+            )}
 
             {session.log.length > 0 && (
               <details className="selfopt-log">

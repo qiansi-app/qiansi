@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Self-optimization runs on a canvas, on any repository.** Each session now creates its own canvas — 「自省 · <repo>」 — where the survey becomes a node and every discovered problem becomes an artifact node carrying its evidence, proposed fix, acceptance criteria and status (updated live as fixes are applied). The panel gained a project-path field, so the same survey → benchmark → reflect → apply → verify → snapshot loop can optimize any git project, not just Qiansi; the result view links straight to the canvas. Verified end-to-end on a separate fixture repo: one [high/bug] finding (off-by-one in findNote) surfaced as a node with its fix, on a canvas named after that repo.
+
 - **Layout that survives a narrow panel.** The canvas tabs moved out of the toolbar into their own row; the toolbar measures itself and, below 860px, drops the brand subtitle and counters, and below 560px reorders itself so 接管会话 / 重载 / 运行编排 stay fully visible while secondary tool icons scroll. The canvas refits the graph (~250ms debounce) whenever its container changes size, so dragging the VS Code sidebar no longer leaves nodes off-screen.
 
 - **One workflow = one canvas, with tabs and history.** Delegated tasks and handoffs now each get a fresh canvas named after the task instead of overwriting the one you are looking at. The workspace dropdown became a tab strip: running canvases show a pulsing dot, closing a tab archives the canvas into 历史画布 (soft delete), and history offers restore or permanent delete. `POST /api/workspaces/:id/archive|restore` added; `GET /api/workspaces` now carries `archivedAt` and a live `running` count per canvas.
