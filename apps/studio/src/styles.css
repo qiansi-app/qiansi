@@ -1634,7 +1634,7 @@ textarea {
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;
-  z-index: 4;
+  z-index: 35;
 }
 .workspace-row .workspace-switcher { margin-left: 0; flex: 1; min-width: 0; }
 .workspace-row .workspace-tabs { max-width: none; }
@@ -1675,3 +1675,8 @@ textarea {
 
 /* 窄面板下品牌不再占 220px 固定宽，把空间让给操作区 */
 .toolbar.compact .brand, .toolbar.tight .brand { min-width: 0; }
+
+
+/* 层叠顺序：顶栏/标签行 > 画布内的进度条与浮层。固定定位的下拉挂在顶栏上下文里，
+   顶栏的整体层级必须高于画布区，否则进度条会把菜单盖住。 */
+.toolbar { z-index: 40; }
