@@ -61,6 +61,8 @@ textarea {
   padding: 0 18px;
   border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, #12171d, #0e1217);
+  position: relative;
+  z-index: 5;
 }
 
 .brand {
