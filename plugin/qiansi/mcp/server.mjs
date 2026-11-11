@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Generated from packages/mcp/server.mjs by scripts/sync-plugin-mcp.mjs; do not edit.
 /**
  * Qiansi MCP server (stdio, zero dependencies).
  *

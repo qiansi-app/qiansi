@@ -7,7 +7,7 @@
  * Run `npm run plugin:sync` after editing packages/mcp/server.mjs, and
  * `npm run plugin:check` (CI) to catch drift.
  */
-import { copyFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,7 +18,19 @@ const targets = [
   join(root, 'codex', 'plugin', 'mcp', 'server.mjs'),
 ];
 
-const canonical = readFileSync(source, 'utf8');
+// 副本头部标注来源：插件被拷进宿主缓存后无法反查仓库路径。
+const banner =
+  '// Generated from packages/mcp/server.mjs by scripts/sync-plugin-mcp.mjs; do not edit.\n';
+
+/** 把生成说明插在 shebang 之后（shebang 必须留在第一行）。 */
+function withBanner(text) {
+  if (!text.startsWith('#!')) return banner + text;
+  const end = text.indexOf('\n');
+  if (end === -1) return `${text}\n${banner}`;
+  return `${text.slice(0, end + 1)}${banner}${text.slice(end + 1)}`;
+}
+
+const canonical = withBanner(readFileSync(source, 'utf8'));
 
 if (process.argv.includes('--check')) {
   let stale = 0;
@@ -46,6 +58,6 @@ if (process.argv.includes('--check')) {
 
 for (const target of targets) {
   mkdirSync(dirname(target), { recursive: true });
-  copyFileSync(source, target);
+  writeFileSync(target, canonical);
   console.log(`synced ${target}`);
 }
