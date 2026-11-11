@@ -3292,7 +3292,9 @@ app.post('/api/selfopt/start', async (context) => {
     // 自省过程放到独立画布：体检、问题、改法都成为节点，可随时查看。
     const repoName = basename(session.rootDir) || 'project';
     const canvasWs = workspaces.create(`自省 · ${repoName}`.slice(0, 40));
-    selfoptCanvases.set(session.id, canvasWs.id);
+    selfoptCanvases.clear();
+selfoptSyncAt.clear();
+selfoptCanvases.set(session.id, canvasWs.id);
     publishSelfOpt(session);
     audit.record({
       actor: actorOf(context),
