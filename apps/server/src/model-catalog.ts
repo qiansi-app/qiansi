@@ -76,7 +76,9 @@ export function modelFamilies(relay: string = relayBase): ModelFamily[] {
       match: /^glm|^zhipu|^chatglm/i,
       label: '智谱 GLM',
       protocol: 'openai-chat',
-      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      // GLM Coding 套餐的 Key 只认 coding 端点；标准 /api/paas/v4 会返回
+      // 1113「余额不足或无可用资源包」。普通按量 Key 若需要可改回标准端点。
+      baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
       vaultRef: 'conn-zhipu',
       envVar: 'ZHIPUAI_API_KEY',
       models: ['glm-5.3-flash', 'glm-5.3-flashx', 'glm-4.6'],

@@ -62,14 +62,14 @@ export async function completeChat(
 ): Promise<ChatResult> {
   const protocol: Protocol =
     connection.protocol === 'anthropic-messages' ? 'anthropic-messages' : 'openai-chat';
-  const baseUrl =
+  const requestedBaseUrl =
     connection.baseUrl?.trim() ||
     (protocol === 'anthropic-messages' ? 'http://127.0.0.1:15721' : 'https://api.deepseek.com');
   const model = connection.model?.trim() || (protocol === 'anthropic-messages' ? 'claude-sonnet-4-6[1M]' : 'deepseek-chat');
   const apiKey =
     connection.apiKey?.trim() ||
     (connection.connectionId ? await vault.get(connection.connectionId) : null) ||
-    envFallback(connection.connectionId, baseUrl);
+    envFallback(connection.connectionId, requestedBaseUrl);
 
   const baseAdapter = adapters[protocol];
   const searches: Array<{ query: string; hits: number }> = [];
@@ -84,11 +84,13 @@ export async function completeChat(
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 45000);
   let text = '';
   const usage = { input: 0, output: 0, total: 0 };
-  try {
+  const invoke = async (baseUrl: string): Promise<void> => {
+    text = '';
+    usage.input = 0;
+    usage.output = 0;
+    usage.total = 0;
     // Build through the shared request builder so the family's effort dialect
     // applies: sending 'off' turns thinking OFF for GLM/Kimi/Qwen-class models.
-    // Constructing the request by hand here left thinking on, and a 500-token
-    // budget went entirely to reasoning — discussions came back empty.
     const profile = { ...profileForModel(model), protocol, baseUrl };
     const request = buildChatRequest(profile, messages, 'off', {
       apiKey,
@@ -103,6 +105,23 @@ export async function completeChat(
         usage.total += event.input + event.output;
       }
       if (event.type === 'error') throw new Error(event.message);
+    }
+  };
+  try {
+    try {
+      await invoke(requestedBaseUrl);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // 智谱 Coding 套餐 Key 在标准端点上会报 1113；同一把 Key 在 coding
+      // 端点可用。只在明确是这个错误时切一次，普通按量 Key 不受影响。
+      if (
+        message.includes('1113') &&
+        requestedBaseUrl.includes('open.bigmodel.cn/api/paas/v4')
+      ) {
+        await invoke('https://open.bigmodel.cn/api/coding/paas/v4');
+      } else {
+        throw error;
+      }
     }
   } finally {
     clearTimeout(timer);

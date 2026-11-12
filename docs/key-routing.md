@@ -46,6 +46,11 @@ curl -X PATCH /api/keys/zhipu/default -d '{"billing":"subscription"}'
 
 全局策略：`subscription`（订阅优先）。
 
+> **智谱 Coding 套餐 Key 的端点**：只认 `https://open.bigmodel.cn/api/coding/paas/v4`；
+> 打到标准 `https://open.bigmodel.cn/api/paas/v4` 会返回 `1113 余额不足或无可用资源包`，
+> 看起来像欠费，其实是端点不对。模型目录与界面预设已使用 coding 端点；`completeChat`
+> 在标准端点收到 1113 时会自动切一次 coding 端点；本地模型缓存里的旧标准地址会在加载时迁移。
+
 ## 验证
 
 - 路由单测 8/8：三种策略的排序、已用尽家族永远垫底、解释文案。

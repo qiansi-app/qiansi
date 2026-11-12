@@ -174,7 +174,22 @@ export function App() {
       const raw = window.localStorage.getItem('qiansi.models.v1');
       if (raw) {
         const parsed = JSON.parse(raw) as ModelDraft[];
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          // 智谱 Coding 套餐 Key 只认 coding 端点；旧缓存里的标准端点
+          // 会让所有 GLM 请求报 1113，加载时迁移一次并写回。
+          const migrated = parsed.map((model) =>
+            model.baseUrl?.includes('open.bigmodel.cn/api/paas/v4') &&
+            !model.baseUrl.includes('/coding/')
+              ? { ...model, baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4' }
+              : model
+          );
+          try {
+            window.localStorage.setItem('qiansi.models.v1', JSON.stringify(migrated));
+          } catch {
+            // 隐私模式写不回：本次会话仍用迁移后的内存值
+          }
+          return migrated;
+        }
       }
     } catch {
       // 隐私模式读不了 localStorage：回退默认值

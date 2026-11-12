@@ -92,7 +92,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     label: '智谱 GLM',
     provider: 'Zhipu',
     protocol: 'openai-chat',
-    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    // GLM Coding 套餐 Key 只认 coding 端点；标准端点会报 1113。
+    baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
     keyHint: '….',
   },
   {
