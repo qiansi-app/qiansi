@@ -51,6 +51,28 @@ export function WorkspaceSwitcher({ onCanvasStarted }: { onCanvasStarted?: (name
   const [purging, setPurging] = useState<string | null>(null);
   const [archiveError, setArchiveError] = useState("");
   const knownIds = useRef<Set<string> | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * 画布一多，标签会横向溢出；鼠标滚轮在默认行为里是纵向滚动，滚不到被藏起来的标签。
+   * 这里把滚轮转成横向滚动（优先滚外层 workspace-row，其次滚标签条本身）。
+   */
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY === 0 && event.deltaX === 0) return;
+      const row = el.closest('.workspace-row') as HTMLElement | null;
+      const tabs = el.querySelector('.workspace-tabs') as HTMLElement | null;
+      const candidates = [row, tabs].filter((node): node is HTMLElement => Boolean(node));
+      const target = candidates.find((node) => node.scrollWidth > node.clientWidth + 1);
+      if (!target) return;
+      event.preventDefault();
+      target.scrollLeft += event.deltaY + event.deltaX;
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [items.length, archived.length]);
 
   const load = async (announce = false) => {
     try {
@@ -193,7 +215,7 @@ export function WorkspaceSwitcher({ onCanvasStarted }: { onCanvasStarted?: (name
 
   if (items.length === 0 && archived.length === 0) {
     return (
-      <div className="workspace-switcher">
+      <div className="workspace-switcher" ref={rootRef}>
         <div className="workspace-tabs">
           <button className="icon-tool workspace-new" onClick={() => void createAndSwitch()} disabled={busy} title="新建空白画布">
             <Plus size={14} />
@@ -205,7 +227,7 @@ export function WorkspaceSwitcher({ onCanvasStarted }: { onCanvasStarted?: (name
   }
 
   return (
-    <div className="workspace-switcher">
+    <div className="workspace-switcher" ref={rootRef}>
       <div className="workspace-tabs">
         {items.map((item) => (
           <div

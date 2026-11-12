@@ -134,6 +134,8 @@ Key 解析顺序：
 
 Live 运行限制：每个任务 240 秒超时、输出上限 12288 token、最多 1 次重试；依赖任务的产出会作为上游上下文注入下游 prompt。验收分三级：结构检查（0 token）→ 便宜闸门（主控节点或目录里最便宜的模型，只放行明显通过）→ 完整评委（sonnet 档，25 秒超时后软通过）。每条判定带 `gate` 字段，运行结束的 `run.gates` 审计给出各级命中次数。`run.start` 还要过策略闸门，运行记录里保存 mandate（谁批准、按哪个策略版本），审计里带 `strategy`（性能/订阅/成本优先）与实际使用的 Key。
 
+节点工具默认开启：每个任务可以调用 `read_file` / `write_file` / `list_dir` / `run_command` / `describe_canvas` 等工具，工作目录取画布的 `rootDir`（未设则服务端目录）。传 `payload.tools = false` 可整轮关闭；每次调用发 `tool.called` 事件并写 `node.tool` 审计。
+
 ### `GET /api/runs/active`
 
 正在跑的运行的快照，供没发起这次运行的窗口（VS Code 面板、另一个标签页、agent 触发）显示进度。

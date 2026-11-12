@@ -20,6 +20,8 @@ export interface WorkspaceMeta {
   updatedAt: number;
   /** 工作区公共指令：注入本画布每个 worker 的系统提示（借鉴 DSH 的 team sections）。 */
   instructions?: string;
+  /** 这个画布的工作目录：节点工具（读写文件/终端）只在这里面活动。 */
+  rootDir?: string;
   /** 软删除时间：标签页关掉进「历史画布」，可恢复；不设就是活跃画布。 */
   archivedAt?: number;
 }
@@ -227,6 +229,19 @@ export class WorkspaceStore {
     const value = String(instructions ?? '').trim().slice(0, 2000);
     if (value.includes('�')) return undefined;
     meta.instructions = value || undefined;
+    meta.updatedAt = Date.now();
+    this.persist();
+    return meta;
+  }
+
+  /** 工具的工作目录：必须是已存在的绝对路径；设空表示清除。 */
+  setRootDir(id: string, rootDir: string): WorkspaceMeta | undefined {
+    this.refreshIfChanged();
+    const meta = this.get(id);
+    if (!meta) return undefined;
+    const value = String(rootDir ?? '').trim();
+    if (value && !existsSync(value)) return undefined;
+    meta.rootDir = value || undefined;
     meta.updatedAt = Date.now();
     this.persist();
     return meta;

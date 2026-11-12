@@ -33,6 +33,8 @@ interface SlotView {
   state: 'ok' | 'warn' | 'exhausted' | 'unconfigured';
   periodResetsAt: number | null;
   prices?: { in: number; out: number };
+  /** 整个厂商被停用：评审团、接续编排与运行都不会再用它。 */
+  disabled?: boolean;
 }
 
 interface KeysModalProps {
@@ -151,6 +153,21 @@ export function KeysModal({ open, onClose }: KeysModalProps) {
     if (ok) setEditing(null);
   };
 
+  /** 整个厂商停用/启用：欠费或被停用的 key 不该再被评审团和接续编排选中。 */
+  const toggleSlot = async (slot: SlotView) => {
+    const current = await fetch('/api/model-policy')
+      .then((response) => response.json() as Promise<{ disabledSlots?: string[] }>)
+      .catch(() => null);
+    const list = new Set(current?.disabledSlots ?? []);
+    if (slot.disabled) list.delete(slot.slot);
+    else list.add(slot.slot);
+    const ok = await call('/api/model-policy', {
+      method: 'PUT',
+      body: JSON.stringify({ disabledSlots: [...list] }),
+    });
+    if (ok) await load();
+  };
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal report-modal keys-modal" onClick={(event) => event.stopPropagation()}>
@@ -207,6 +224,14 @@ export function KeysModal({ open, onClose }: KeysModalProps) {
                   {STATE_LABEL[slot.state] ?? slot.state}
                   {slot.headroomTokens >= 0 ? ` · 余 ${formatTokens(slot.headroomTokens)}` : ''}
                 </span>
+                {slot.disabled && <span className="keys-badge muted">已停用</span>}
+                <button
+                  className="keys-mini"
+                  title="停用后，评审团、接续编排与运行都不会再选这家模型"
+                  onClick={() => void toggleSlot(slot)}
+                >
+                  {slot.disabled ? '启用' : '停用'}
+                </button>
                 <button className="keys-mini" onClick={() => setAdding(adding === slot.slot ? null : slot.slot)}>
                   <Plus size={12} /> 添加 Key
                 </button>

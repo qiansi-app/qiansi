@@ -74,6 +74,35 @@ export interface ToolSpec {
   parameters: Record<string, unknown>;
 }
 
+/** Result of one server-side tool execution. */
+export interface ToolExecution {
+  content: string;
+  isError?: boolean;
+}
+
+export type ToolExecutor = (call: ToolCall) => Promise<ToolExecution>;
+
+/**
+ * Server-side tools a run can hand to its nodes: file access, shell, canvas
+ * queries, web search. The model only chooses a tool and its arguments; the
+ * server validates paths/commands and executes it.
+ */
+export interface ToolboxOptions {
+  tools: ToolSpec[];
+  execute: ToolExecutor;
+  /** Maximum tool rounds per task (each round is one extra model call). */
+  maxRounds?: number;
+  /** Called after each tool execution (logging / live UI). */
+  onCall?: (info: {
+    id: string;
+    name: string;
+    arguments: string;
+    ok: boolean;
+    ms: number;
+    content: string;
+  }) => void;
+}
+
 /** One ranked result from a web search provider. */
 export interface SearchHit {
   title: string;
@@ -284,6 +313,16 @@ export type RunEvent =
       nodeId: string;
       query: string;
       hits: number;
+    }
+  | {
+      type: 'tool.called';
+      taskId: string;
+      nodeId: string;
+      tool: string;
+      args: string;
+      ok: boolean;
+      ms: number;
+      preview: string;
     }
   | {
       type: 'usage';

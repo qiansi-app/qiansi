@@ -2639,6 +2639,30 @@ export function App() {
       );
     });
 
+    on('tool.called', (event) => {
+      const payload = JSON.parse(event.data) as {
+        event: {
+          nodeId: string;
+          taskId: string;
+          tool: string;
+          args: string;
+          ok: boolean;
+          ms: number;
+          preview: string;
+        };
+      };
+      const call = payload.event;
+      if (!call.nodeId) return;
+      patchNode(call.nodeId, { metric: `工具 ${call.tool} · ${call.ok ? '成功' : '失败'}` });
+      push(
+        call.nodeId,
+        'assistant',
+        `调用工具 ${call.tool}（${call.ms}ms）：${call.ok ? '成功' : '失败'}${
+          call.preview ? ` · ${call.preview.slice(0, 160)}` : ''
+        }`
+      );
+    });
+
     on('task.acceptance', (event) => {
       const payload = JSON.parse(event.data) as {
         event: {

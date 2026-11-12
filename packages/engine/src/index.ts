@@ -11,6 +11,7 @@ export {
   OpenAIChatAdapter,
   AnthropicMessagesAdapter,
   SearchToolAdapter,
+  ServerToolAdapter,
   WEB_SEARCH_TOOL,
   readSSE,
 } from './providers/index.js';

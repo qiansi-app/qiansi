@@ -79,6 +79,7 @@ import { orderByStrategy, performanceOf } from './routing.js';
 import { buildHandoffPack } from './handoff.js';
 import { part, summarize, type HealthPart, type StatusReport } from './status.js';
 import { RunStore, type RunEnvelope } from './store.js';
+import { buildNodeToolbox } from './node-tools.js';
 import {
   SelfOptEngine,
   describeSelfOpt,
@@ -161,6 +162,12 @@ function redactRunEvent<T extends { type: string }>(event: T): T {
         typeof reason === 'string' ? redactSecrets(reason, []) : reason
       ),
     };
+    changed = true;
+  }
+  // 工具调用可能把路径或命令里的密钥带进事件流：落盘前脱敏。
+  if (record.type === 'tool.called') {
+    if (typeof record.args === 'string') next.args = redactSecrets(record.args, []);
+    if (typeof record.preview === 'string') next.preview = redactSecrets(record.preview, []);
     changed = true;
   }
   return (changed ? next : record) as unknown as T;
@@ -374,6 +381,8 @@ async function slotCredential(
   slot: KeySlot
 ): Promise<{ keyId: string; secret: string } | null> {
   await ensureQuotaSeeded();
+  // 用户明确停用的厂商：连环境变量兜底也不给用，否则「停用」只是界面上的。
+  if (readDisabledSlots().has(slot)) return null;
   const family = modelFamilies().find((item) => item.slot === slot);
   const envSecret = family ? (process.env[family.envVar] ?? '') : '';
 
@@ -1081,10 +1090,60 @@ app.get('/api/vault/status', async (context) => context.json({ refs: await vault
  * measure, disable, or rotate to. Secrets go straight into the DPAPI vault and
  * are never returned by any of these routes.
  */
+/**
+ * 厂商级停用：某个家族的 key 不可用（欠费、被停用）时，直接把它从一切
+ * 选模型的地方排除——评审团、接续编排、自动编排、运行时的 key 解析都走这里。
+ */
+const modelPolicyFile = join(stateDir, 'model-policy.json');
+
+function readDisabledSlots(): Set<string> {
+  try {
+    const parsed = JSON.parse(readFileSync(modelPolicyFile, 'utf8')) as {
+      disabledSlots?: unknown;
+    };
+    return new Set(
+      (Array.isArray(parsed.disabledSlots) ? parsed.disabledSlots : [])
+        .map((item) => String(item))
+        .filter(Boolean)
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function writeDisabledSlots(slots: string[]): void {
+  const allowed = new Set(modelFamilies().map((family) => family.slot));
+  const clean = [...new Set(slots.map((slot) => String(slot)).filter((slot) => allowed.has(slot as KeySlot)))];
+  writeFileSync(
+    modelPolicyFile,
+    JSON.stringify({ version: 1, disabledSlots: clean }, null, 1),
+    { encoding: 'utf8', mode: 0o600 }
+  );
+}
+
+app.get('/api/model-policy', (context) =>
+  context.json({ ok: true, disabledSlots: [...readDisabledSlots()] })
+);
+
+app.put('/api/model-policy', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const list = Array.isArray(body?.disabledSlots) ? body.disabledSlots : [];
+  writeDisabledSlots(list);
+  audit.record({
+    actor: actorOf(context),
+    action: 'model-policy.update',
+    target: 'disabledSlots',
+    detail: { disabledSlots: [...readDisabledSlots()] },
+  });
+  return context.json({ ok: true, disabledSlots: [...readDisabledSlots()] });
+});
+
 async function keysSnapshot() {
   await ensureQuotaSeeded();
+  const disabled = readDisabledSlots();
   return modelFamilies().map((family) => ({
     ...quota.view(family.slot, family.label),
+    disabled: disabled.has(family.slot),
     prices: quota.prices()[family.slot],
     protocol: family.protocol,
     models: family.models,
@@ -2220,6 +2279,8 @@ app.post('/api/handoff', async (context) => {
   const createdWs = workspaces.create(wsName.ok ? wsName.name : '接续会话');
   const handoffWsId = createdWs.id;
   const handoffStore = canvasFor(handoffWsId);
+  // 节点工具的工作目录 = 会话项目目录：worker 可以在里面读写与跑命令。
+  if (pack.project?.cwd) workspaces.setRootDir(handoffWsId, pack.project.cwd);
 
   const fileId = randomUUID();
   const filesDir = join(stateDir, 'files');
@@ -2238,12 +2299,17 @@ app.post('/api/handoff', async (context) => {
     );
   }
 
-  // 接续画布天生是空的：优先沿用当前画布的主控；没有就按计费策略合成一个。
+  // 接续画布天生是空的：优先沿用当前画布的主控；没有、或主控属于已停用厂商，
+  // 就按计费策略合成一个——否则新画布会带着一个注定调不通的主控。
   const handoffOrchestratorSource = canvasFor(workspaceOf(context)).read();
+  const sourceOrchestrator = handoffOrchestratorSource.nodes.find(
+    (node) => node.id === handoffOrchestratorSource.orchestratorId
+  );
   const handoffOrchestratorNode =
-    handoffOrchestratorSource.nodes.find(
-      (node) => node.id === handoffOrchestratorSource.orchestratorId
-    ) ?? (await synthesizedOrchestratorNode());
+    (sourceOrchestrator &&
+    !readDisabledSlots().has(familyOf(String(sourceOrchestrator.data?.model ?? ''))?.slot ?? '')
+      ? sourceOrchestrator
+      : undefined) ?? (await synthesizedOrchestratorNode());
   const document = handoffStore.read();
   const ops: CanvasOp[] = [];
   if (handoffOrchestratorNode) {
@@ -2345,11 +2411,13 @@ app.post('/api/handoff', async (context) => {
           }
         : { connectionId: available[0]!.connectionId, model: available[0]!.model };
       // 主控候选：画布主控优先，之后把每个可用模型都试一遍。
-      // 单只 Key 失效时不能让整个接续失败。
+      // 单只 Key 失效时不能让整个接续失败；用户停用的厂商直接跳过。
       const seenModels = new Set<string>();
+      const disabledSlots = readDisabledSlots();
       const orchestrators = [orchestrator, ...available.map((item) => ({ connectionId: item.connectionId, model: item.model }))]
         .filter((candidate) => {
           if (!candidate.model || seenModels.has(candidate.model)) return false;
+          if (disabledSlots.has(familyOf(candidate.model)?.slot ?? '')) return false;
           seenModels.add(candidate.model);
           return true;
         });
@@ -2383,19 +2451,29 @@ app.post('/api/handoff', async (context) => {
         }
         if (!response) throw new Error('workflow_unavailable');
         // /api/workflow 返回 { ok, workflow: { summary, nodes, edges } }
-        const raw = (await response.json().catch(() => null)) as {
+        // 先读文本再解析：解析失败时这里还能把服务端的错误原文呈现给用户。
+        const responseText = await response.text().catch(() => '');
+        let raw: {
           workflow?: { nodes?: Array<Record<string, any>>; edges?: Array<Record<string, any>> };
           nodes?: Array<Record<string, any>>;
           edges?: Array<Record<string, any>>;
-        } | null;
+          error?: string;
+        } | null = null;
+        try {
+          raw = responseText ? JSON.parse(responseText) : null;
+        } catch {
+          raw = null;
+        }
         const generated = {
           nodes: raw?.workflow?.nodes ?? raw?.nodes ?? [],
           edges: raw?.workflow?.edges ?? raw?.edges ?? [],
         };
         console.log(`[handoff] workflow status=${response.status} nodes=${generated.nodes.length}`);
         if (!response.ok) {
-          const detail = await response.text().catch(() => '');
-          pack.notes.push(`自动编排失败：/api/workflow 返回 HTTP ${response.status} ${detail.slice(0, 200)}`);
+          const detail = raw?.error ? ` · ${raw.error}` : '';
+          pack.notes.push(
+            `自动编排失败：/api/workflow 返回 HTTP ${response.status}${detail} ${responseText.slice(0, 300)}`
+          );
         }
         if (response.ok && generated?.nodes?.length) {
           const doc = handoffStore.read();
@@ -2626,7 +2704,9 @@ app.post('/api/workflow', async (context) => {
       model: String(item?.model ?? ''),
       effort: String(item?.effort ?? 'medium'),
     }))
-    .filter((item: any) => item.connectionId);
+    .filter((item: any) => item.connectionId)
+    // 用户停用的厂商不参与编排：否则计划会派活给一个注定失败的模型。
+    .filter((item: any) => !readDisabledSlots().has(familyOf(item.model)?.slot ?? ''));
   if (models.length === 0) return context.json({ error: 'models_required' }, 400);
 
   const files = (Array.isArray(body?.files) ? body.files : [])
@@ -2682,7 +2762,7 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
 11. 分工不要重叠：两个节点不能产出同一份交付物；也不要留空档——总目标里明确要求的每一块，都要有节点负责；
 12. 最终交付节点（把成果交给用户的那一步）的 acceptance 里要有一条形态标准：交付物形态与用户要求的形态一致；
 13. 目标保真是红线：允许提升目标层级（对结果负责），不允许更换交付物形态；
-14. 每个工作节点都是纯文本模型：能读文件预览与上游产出，能联网搜索，但**不能调用 MCP 工具、终端或读写本地文件**。目标里要求这类操作时（如「调用 mcp__…」「修改仓库代码」「运行测试」），不要把动作原样写成工单；把能产出的部分落成文本交付（方案、补丁全文、命令清单），并把需要工具执行的步骤单列成一份「待执行清单」作为交付物之一，验收针对文本产物判定。`,
+14. 每个工作节点都能调用本地工具：读写工作目录内的文件、执行 shell 命令、查询画布、联网检索。目标要求改代码/跑测试/写文件时，把动作写进工单，验收写成可判定的结果（例如「npm test 退出码为 0」「文件 X 中包含 Y」）；不需要工具的任务不要强行调用。`,
       },
     ];
 
@@ -3065,6 +3145,10 @@ app.patch('/api/workspaces/:id', async (context) => {
   if (body && typeof body.instructions === 'string') {
     const updated = workspaces.setInstructions(context.req.param('id'), body.instructions);
     if (!updated) return context.json({ ok: false, error: 'workspace_not_found' }, 404);
+  }
+  if (body && typeof body.rootDir === 'string') {
+    const updated = workspaces.setRootDir(context.req.param('id'), body.rootDir);
+    if (!updated) return context.json({ ok: false, error: 'root_dir_invalid' }, 400);
   }
   const meta = workspaces.get(context.req.param('id'));
   if (!meta) return context.json({ ok: false, error: 'workspace_not_found' }, 404);
@@ -4043,6 +4127,42 @@ app.post('/api/commands', async (context) => {
       detail: { model: judgeTarget.profile.model, slot: judgeSlot },
     });
 
+    // 节点工具：文件读写、终端、画布查询、联网。工作目录取画布设置，
+    // 没设就用服务端目录；payload.tools === false 可整体关闭。
+    const toolWorkspaceId = workspaceOf(context);
+    const toolRootDir = workspaces.get(toolWorkspaceId)?.rootDir || process.cwd();
+    const nodeToolbox =
+      body?.payload?.tools === false
+        ? undefined
+        : buildNodeToolbox({
+            rootDir: toolRootDir,
+            workspaceId: toolWorkspaceId,
+            runId,
+            canvas: () => canvasFor(toolWorkspaceId).read(),
+            workspaces: () =>
+              workspaces.list().map((item) => ({
+                id: item.id,
+                name: item.name,
+                archivedAt: item.archivedAt,
+              })),
+            runs: () =>
+              store.list().map((item) => ({
+                runId: item.runId,
+                status: item.status,
+                goal: item.goal,
+                workspaceId: item.workspaceId,
+              })),
+            runResult: (id) => store.snapshot(id) ?? { error: 'run_not_found', runId: id },
+            search: (query, maxResults) => webSearch.search({ query, maxResults }),
+            audit: (entry) =>
+              audit.record({
+                actor: 'node-tool',
+                action: entry.action,
+                target: entry.target,
+                detail: entry.detail,
+              }),
+          });
+
     const orchestrator = new Orchestrator({
       profiles: profilesToRun,
       adapters: {
@@ -4070,6 +4190,8 @@ app.post('/api/commands', async (context) => {
       ...(resumePrepared ? { seedOutputs: resumePrepared.prevOutputs } : {}),
       // 只有 profile.webSearch === true 的节点才会被 ToolAdapter 包一层。
       search: webSearch.search,
+      // 有工具箱时所有节点都能调用文件/终端/画布/联网工具。
+      toolbox: nodeToolbox,
       accept: createRoutedJudge({
         router: routerPick
           ? {
