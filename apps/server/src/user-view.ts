@@ -80,6 +80,17 @@ export function detectProject(rootDir: string): ProjectProbe {
     }
     const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) } as Record<string, string>;
     const scripts = (pkg.scripts ?? {}) as Record<string, string>;
+    if (typeof scripts.dev === 'string' && /concurrently/i.test(scripts.dev)) {
+      // 一条 dev 脚本同时拉起多个服务时，没有唯一的「页面」可验收；
+      // 自动启动会白起一整套开发栈，还可能和服务端口打架。
+      return {
+        kind: 'unknown',
+        runnable: false,
+        reason:
+          'dev 脚本会同时启动多个服务（concurrently），自动验收不知道该打开哪个页面；可以传入已经在运行的 url 验收。',
+        entry: 'scripts.dev',
+      };
+    }
     if (typeof scripts.dev === 'string') {
       if (deps.vite) return { kind: 'vite', runnable: true, script: 'dev', entry: 'scripts.dev' };
       if (deps.next) return { kind: 'next', runnable: true, script: 'dev', entry: 'scripts.dev' };
