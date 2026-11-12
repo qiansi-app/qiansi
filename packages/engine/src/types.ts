@@ -238,6 +238,8 @@ export type TaskStatus =
   | 'failed'
   | 'blocked';
 
+export type TaskAutonomy = 'investigate' | 'draft' | 'auto' | 'full';
+
 export interface Subtask {
   id: string;
   title: string;
@@ -248,6 +250,8 @@ export interface Subtask {
   acceptanceCriteria: string;
   /** 对话风格：决定这个任务怎么组织输出、怎么把上游交给下游。 */
   style?: import("./styles.js").ConversationStyle;
+  /** 团队自治档位：调查/草稿只能用只读工具，执行/全权才允许改动。 */
+  autonomy?: TaskAutonomy;
   machineCheckable: boolean;
   dependsOn: string[];
   status: TaskStatus;

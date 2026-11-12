@@ -3,6 +3,7 @@ import { FolderOpen, Loader2, Paperclip, Sparkles, X } from 'lucide-react';
 import type { LibraryFile } from '../data/demoGraph';
 import type { ModelDraft } from '../data/models';
 import { workflowTemplates } from '../data/templates';
+import type { TeamMember } from '../types';
 
 export interface WorkflowNodePlan {
   id: string;
@@ -16,6 +17,9 @@ export interface WorkflowNodePlan {
   acceptance?: string[];
   connectionId: string;
   effort: string;
+  /** 计划指派给团队里的哪个成员。 */
+  memberId?: string;
+  memberName?: string;
 }
 
 export interface WorkflowEdgePlan {
@@ -39,6 +43,9 @@ export interface WorkflowPlan {
 interface WorkflowModalProps {
   open: boolean;
   models: ModelDraft[];
+  /** 团队名册：编排时优先把任务交给职责最贴近的成员。 */
+  team?: TeamMember[];
+  playbook?: string;
   onClose: () => void;
   onUploadFiles: (files: File[]) => Promise<LibraryFile[]>;
   onApply: (plan: WorkflowPlan, files: LibraryFile[], orchestratorId: string) => void;
@@ -47,6 +54,8 @@ interface WorkflowModalProps {
 export function WorkflowModal({
   open,
   models,
+  team,
+  playbook,
   onClose,
   onUploadFiles,
   onApply,
@@ -116,6 +125,13 @@ export function WorkflowModal({
             model: model.model,
             effort: 'medium',
           })),
+          team: (team ?? []).map((member) => ({
+            id: member.id,
+            name: member.name,
+            job: member.job,
+            model: member.model ?? '',
+          })),
+          playbook: playbook ?? '',
           files: uploaded.map((file) => ({ name: file.name, preview: file.preview })),
         }),
       });
@@ -146,6 +162,7 @@ export function WorkflowModal({
             </h2>
             <p className="workflow-sub">
               描述任务、选主控和工作模型，主控会自动拆解并连好画布
+              {team && team.length > 0 ? `；任务会优先交给团队名册里的 ${team.length} 名成员` : ''}
             </p>
           </div>
           <button className="icon-btn" onClick={onClose} title="关闭">

@@ -48,6 +48,9 @@ export interface AgentNodeData extends Record<string, unknown> {
   status: NodeStatus;
   kind: NodeKind;
   accent: string;
+  /** 挂给团队成员：名字用于显示，职责/档位/记忆在运行时注入。 */
+  memberId?: string;
+  memberName?: string;
   /** 该节点运行/对话时是否挂服务端 web_search 工具。 */
   webSearch?: boolean;
   metric?: string;

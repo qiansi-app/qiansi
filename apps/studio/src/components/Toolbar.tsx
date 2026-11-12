@@ -23,6 +23,7 @@ import {
   Sparkles,
   Square,
   Target,
+  Users,
   Wand2,
   Inbox,
 } from 'lucide-react';
@@ -58,6 +59,8 @@ interface ToolbarProps {
   onOpenAttention: () => void;
   onOpenSelfOpt: () => void;
   onOpenHandoff: () => void;
+  onOpenTeam: () => void;
+  teamCount: number;
   onAutoLayout: () => void;
   layouting: boolean;
   brushMode: RegionMode | null;
@@ -122,6 +125,8 @@ export function Toolbar({
   onOpenAttention,
   onOpenSelfOpt,
   onOpenHandoff,
+  onOpenTeam,
+  teamCount,
   onAutoLayout,
   layouting,
   brushMode,
@@ -309,6 +314,15 @@ export function Toolbar({
                 label="让牵丝优化自己"
                 hint="体检 → 对标 → 复盘 → 改代码 → 留版本"
                 onClick={menuAction(onOpenSelfOpt)}
+              />
+
+              <div className="toolbar-menu-section">团队</div>
+              <MenuItem
+                icon={Users}
+                label="团队名册与手册"
+                hint="一人一职、标准广播、自治档位"
+                badge={teamCount}
+                onClick={menuAction(onOpenTeam)}
               />
 
               <div className="toolbar-menu-section">面板</div>

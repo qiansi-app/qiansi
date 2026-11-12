@@ -340,6 +340,33 @@ OpenAI 兼容调用，支持 `stream: true`（SSE）与非流式。模型由服�
 工作目录来自画布的 `rootDir`；没设置时用服务端目录并标注 `source: "server"`。
 厂商被停用或没有 Key 时 `models[].note` 会写清楚，界面据此给出「启用」按钮。
 
+### `GET /api/team` / `PUT /api/team`
+
+团队名册与手册（每张画布一份，存在 `~/.qiansi/workspaces/<id>/team.json`）。
+
+`GET` 返回：
+
+```json
+{
+  "ok": true,
+  "team": {
+    "playbook": "交付必须附证据……",
+    "members": [{ "id": "...", "name": "小核", "job": "核实事实与来源", "autonomy": "investigate", "model": "deepseek-flash", "memory": "只信官方文档" }],
+    "warnings": ["团队手册是空的……"],
+    "cap": 12
+  }
+}
+```
+
+`PUT` 请求 `{ "members": [...], "playbook": "..." }`。校验规则：称呼唯一、职责非空、
+职责不能完全相同（包含关系只提醒）、成员上限 12（超过 8 提醒）。失败返回 400 与
+`error` / `hint`；成功返回规范化后的团队。
+
+名册的用途：自动编排优先按职责把任务分给成员（节点带 `memberId` / `memberName`），
+运行时把成员身份、自治档位（调查/草稿=只读工具，执行/全权=全部工具）和记忆注入任务提示。
+`/api/workflow` 接受可选的 `team`（`[{id,name,job,model}]`）与 `playbook`；
+`/api/discuss` 的参与者接受可选的 `role`，用于团队会议。详见 [team.md](team.md)。
+
 ### `POST /api/runs/:id/rerun`
 
 主动重跑。请求 `{ "mode": "resume" | "fresh", "rootDir": "可选，顺手修正工作目录" }`。

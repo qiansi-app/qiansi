@@ -79,6 +79,15 @@ import { orderByStrategy, performanceOf } from './routing.js';
 import { buildHandoffPack } from './handoff.js';
 import { buildRunDiagnosis } from './run-diagnosis.js';
 import {
+  AUTONOMY_LABEL,
+  TEAM_MEMBER_CAP,
+  TeamStore,
+  normalizeTeamInput,
+  restrictToolbox,
+  teamWarnings,
+  type TeamDoc,
+} from './team.js';
+import {
   detectProject,
   latestUserView,
   readUserView,
@@ -468,6 +477,23 @@ function workspaceOf(context: Context): string {
   const fromHeader = context.req.header('x-qiansi-workspace');
   const fromQuery = context.req.query('ws');
   return workspaces.resolve(fromHeader ?? fromQuery).id;
+}
+
+/** 每张画布一个团队名册；读取是纯文件操作，随用随读。 */
+function teamFor(workspaceId: string): TeamDoc {
+  return new TeamStore(workspaces.dirOf(workspaceId)).read();
+}
+
+/**
+ * 新建画布时沿用来源画布的团队：接管与委托都是「接着干」，
+ * 名册和手册一起带过去，否则新画布上的节点就没有可派的成员。
+ */
+function copyTeam(fromWorkspace: string, toWorkspace: string): TeamDoc {
+  const doc = teamFor(fromWorkspace);
+  if (doc.members.length > 0 || doc.playbook.trim()) {
+    new TeamStore(workspaces.dirOf(toWorkspace)).write(doc);
+  }
+  return doc;
 }
 const audit = new AuditLog(stateDir);
 const policy = new PolicyStore(stateDir);
@@ -1995,6 +2021,8 @@ interface DiscussParticipant {
   id: string;
   name: string;
   model: string;
+  /** 团队成员参会时带上唯一职责：发言要站在自己的职责上。 */
+  role?: string;
   connectionId?: string;
   protocol?: string;
   baseUrl?: string;
@@ -2037,7 +2065,7 @@ async function runDiscussion(input: {
               role: 'system',
               content:
                 `你正在参加一场多 AI 讨论。直接给出观点，引用或反驳前面发言者的具体内容；不要复述主题，不要使用客套话。控制在 300 字以内。
-${discussionPrompt(style)}`,
+${participant.role ? `你在团队里的唯一职责：${participant.role}。从职责出发发言；与其他成员的判断冲突时明确指出分歧，不要为了和气而附和。\n` : ''}${discussionPrompt(style)}`,
             },
             {
               role: 'user',
@@ -2072,6 +2100,7 @@ app.post('/api/discuss', async (context) => {
       id: String(item?.id ?? ''),
       name: String(item?.name ?? '模型'),
       model: String(item?.model ?? ''),
+      role: item?.role ? String(item.role).slice(0, 120) : undefined,
       connectionId: item?.connectionId ? String(item.connectionId) : undefined,
       protocol: item?.protocol ? String(item.protocol) : undefined,
       baseUrl: item?.baseUrl ? String(item.baseUrl) : undefined,
@@ -2244,6 +2273,7 @@ app.post('/api/delegate-task', async (context) => {
   const wsName = checkWorkspaceName(task.split(/[。；;\n]/)[0]?.slice(0, 24) || '委托任务');
   const createdWs = workspaces.create(wsName.ok ? wsName.name : '委托任务');
   const wsId = createdWs.id;
+  copyTeam(workspaceOf(context), wsId);
   const store = canvasFor(wsId);
 
   /** 落盘 ops：主控节点与 orchestratorId 必须写进存储，内存副本不算数。 */
@@ -2328,6 +2358,7 @@ app.post('/api/delegate-task', async (context) => {
   ].filter((item) => item.connectionId);
 
   let response: Response | null = null;
+  const rosterForPlan = teamFor(wsId);
   for (const candidate of candidates) {
     if (!candidate.model) continue;
     response = await fetch(`${origin}/api/workflow`, {
@@ -2337,6 +2368,13 @@ app.post('/api/delegate-task', async (context) => {
         goal: task,
         orchestrator: candidate,
         models,
+        team: rosterForPlan.members.map((member) => ({
+          id: member.id,
+          name: member.name,
+          job: member.job,
+          model: member.model ?? '',
+        })),
+        playbook: rosterForPlan.playbook,
         // 画布上已有的公共资料库直接当上下文喂给编排器。
         files: current.nodes
           .filter((node) => String(node.data?.kind ?? '') === 'library' && node.data?.isPublic)
@@ -2397,6 +2435,8 @@ app.post('/api/delegate-task', async (context) => {
           status: 'idle',
           accent: '#4d6bfe',
           connectionId: String(item.connectionId ?? ''),
+          memberId: String(item.memberId ?? ''),
+          memberName: String(item.memberName ?? ''),
         },
       },
     });
@@ -2575,6 +2615,7 @@ app.post('/api/handoff', async (context) => {
   const wsName = checkWorkspaceName(goalGuess || '接续会话');
   const createdWs = workspaces.create(wsName.ok ? wsName.name : '接续会话');
   const handoffWsId = createdWs.id;
+  copyTeam(workspaceOf(context), handoffWsId);
   const handoffStore = canvasFor(handoffWsId);
   // 节点工具的工作目录 = 会话项目目录：worker 可以在里面读写与跑命令。
   if (pack.project?.cwd) workspaces.setRootDir(handoffWsId, pack.project.cwd);
@@ -2735,6 +2776,13 @@ app.post('/api/handoff', async (context) => {
               goal,
               orchestrator: candidate,
               models: available,
+              team: teamFor(handoffWsId).members.map((member) => ({
+                id: member.id,
+                name: member.name,
+                job: member.job,
+                model: member.model ?? '',
+              })),
+              playbook: teamFor(handoffWsId).playbook,
               files: [{ name: fileName, preview: pack.markdown.slice(0, 900) }],
               // 接续要快：跳过第二遍审校。形态兜底与派活边补齐仍是确定性的。
               critique: false,
@@ -2800,6 +2848,8 @@ app.post('/api/handoff', async (context) => {
                   status: 'idle',
                   accent: '#4d6bfe',
                   connectionId: String(item.connectionId ?? ''),
+                  memberId: String(item.memberId ?? ''),
+                  memberName: String(item.memberName ?? ''),
                 },
               },
             });
@@ -3016,6 +3066,24 @@ app.post('/api/workflow', async (context) => {
     .filter((item: any) => !readDisabledSlots().has(familyOf(item.model)?.slot ?? ''));
   if (models.length === 0) return context.json({ error: 'models_required' }, 400);
 
+  // 团队名册（可选）：编排时优先把任务交给职责最贴近的成员。
+  const roster = (Array.isArray(body?.team) ? body.team : [])
+    .slice(0, 12)
+    .map((item: any) => ({
+      id: String(item?.id ?? ''),
+      name: String(item?.name ?? '').trim().slice(0, 24),
+      job: String(item?.job ?? '').trim().slice(0, 120),
+      model: String(item?.model ?? '').trim().slice(0, 80),
+    }))
+    .filter((member: { name: string; job: string }) => member.name && member.job);
+  const memberByName = new Map<string, (typeof roster)[number]>(
+    roster.map((member) => [member.name.toLowerCase(), member])
+  );
+  const rosterText = roster
+    .map((member) => `- ${member.name}：${member.job}${member.model ? `（默认 ${member.model}）` : ''}`)
+    .join('\n');
+  const playbookText = String(body?.playbook ?? '').trim().slice(0, 4000);
+
   const files = (Array.isArray(body?.files) ? body.files : [])
     .slice(0, 40)
     .map((item: any) => ({
@@ -3039,9 +3107,9 @@ app.post('/api/workflow', async (context) => {
         content: `用户目标：${goal}
 
 可用模型：${JSON.stringify(models)}
-${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileContext}\n` : ''}
+${rosterText ? `\n团队成员（一人一职，优先把任务交给职责最贴近的人）：\n${rosterText}\n每个工作节点填 member（成员称呼）；名册里确实没有合适人选时才留空。\n` : ''}${playbookText ? `\n团队手册（所有成员必须遵守的标准）：\n${playbookText}\n` : ''}${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileContext}\n` : ''}
 请按任务实际需要决定规模（2–10 个节点），并只输出：
-{"summary":"一句中文概述","nodes":[{"id":"n1","name":"事实梳理","role":"该环节用的方法与资料，如：逐条对照官方文档核实","task":"一句话工单：输入是什么、要产出什么","deliverable":"交付物名称（形式：清单/表格/代码/文稿），必须包含哪几项","acceptance":["可判定的验收条件 1","验收条件 2"],"connectionId":"从上面选择","model":"从上面列表选择具体模型","effort":"low|medium|high"}],"edges":[{"source":"orchestrator","target":"n1","kind":"assign","label":"任务 · 调研"}]}
+{"summary":"一句中文概述","nodes":[{"id":"n1","member":"名册中的成员称呼，可省略","name":"事实梳理","role":"该环节用的方法与资料，如：逐条对照官方文档核实","task":"一句话工单：输入是什么、要产出什么","deliverable":"交付物名称（形式：清单/表格/代码/文稿），必须包含哪几项","acceptance":["可判定的验收条件 1","验收条件 2"],"connectionId":"从上面选择","model":"从上面列表选择具体模型","effort":"low|medium|high"}],"edges":[{"source":"orchestrator","target":"n1","kind":"assign","label":"任务 · 调研"}]}
 
 目标怎么定（先读这里）：
 - 对结果负责，不对字面动作负责：「帮我回客户邮件」背后往往是「让这个客户续约」。先判断用户真正要达成的结果，验收标准对着结果写（如「客户看完愿意约下一次通话」），流程围绕结果设计；
@@ -3069,7 +3137,8 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
 11. 分工不要重叠：两个节点不能产出同一份交付物；也不要留空档——总目标里明确要求的每一块，都要有节点负责；
 12. 最终交付节点（把成果交给用户的那一步）的 acceptance 里要有一条形态标准：交付物形态与用户要求的形态一致；
 13. 目标保真是红线：允许提升目标层级（对结果负责），不允许更换交付物形态；
-14. 每个工作节点都能调用本地工具：读写工作目录内的文件、执行 shell 命令、查询画布、联网检索。目标要求改代码/跑测试/写文件时，把动作写进工单，验收写成可判定的结果（例如「npm test 退出码为 0」「文件 X 中包含 Y」）；不需要工具的任务不要强行调用。`,
+14. 每个工作节点都能调用本地工具：读写工作目录内的文件、执行 shell 命令、查询画布、联网检索。目标要求改代码/跑测试/写文件时，把动作写进工单，验收写成可判定的结果（例如「npm test 退出码为 0」「文件 X 中包含 Y」）；不需要工具的任务不要强行调用。
+15. 名册优先：给了团队成员时，每个工作节点填 member（成员称呼），选唯一职责与任务最贴近的人；同一个人可以接多个节点，但不要把与他职责无关的任务塞给他；名册里没有合适人选时 member 留空，不要硬指派。`,
       },
     ];
 
@@ -3137,12 +3206,12 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
             {
               role: 'system',
               content:
-                '你是工作流计划的审校者。只判断五件事：分工是否重叠、总目标里是否有没人负责的部分、验收条件能否被第三方独立判定、节点数是否与任务规模匹配（该拆没拆，或为了凑数硬加）、交付物形态是否与用户要求的形态一致（允许提升目标层级，不允许更换形态）。只输出一个 JSON 对象。',
+                '你是工作流计划的审校者。只判断六件事：分工是否重叠、总目标里是否有没人负责的部分、验收条件能否被第三方独立判定、节点数是否与任务规模匹配（该拆没拆，或为了凑数硬加）、交付物形态是否与用户要求的形态一致（允许提升目标层级，不允许更换形态）、成员分配是否把任务塞给了职责不符的人。只输出一个 JSON 对象。',
             },
             {
               role: 'user',
               content: `总目标：${goal}
-
+${rosterText ? `\n团队成员（一人一职）：\n${rosterText}\n` : ''}
 待审计划：${JSON.stringify({ summary: parsed.summary, nodes: parsed.nodes, edges: parsed.edges }).slice(0, 7000)}
 
 输出格式：
@@ -3152,7 +3221,8 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
 1. verdict=revise 时，在 nodes/edges 里给出修正后的完整计划，字段与原计划一致；verdict=ok 时两者留空数组；
 2. 只改有问题的部分，没问题的节点原样保留；
 3. issues 写事实，不写建议措辞：例如「n2 与 n3 都产出初稿」「总目标要求的成本对比没人负责」「n1 的验收『表达清晰』无法判定」「用户要 PPT，n4 的交付物却是一份文字稿，形态被换了」；
-4. 节点数按任务实际需要判断：单一产出 2–3 个，要调研、写作再核对的中等任务 4–6 个，复杂任务 7–10 个。节点数超过所在档位上限时，只有每个多出来的节点都有独立交付物、且能被下游直接使用才算合理；否则判 revise 合并。`,
+4. 节点数按任务实际需要判断：单一产出 2–3 个，要调研、写作再核对的中等任务 4–6 个，复杂任务 7–10 个。节点数超过所在档位上限时，只有每个多出来的节点都有独立交付物、且能被下游直接使用才算合理；否则判 revise 合并。
+5. 成员分配按职责判断，不按人名凑：把核对任务交给了写稿的人、或给同一成员塞了多件互不相关的事，都要在 issues 里指出并改派（或留空 member）。`,
             },
           ],
           { maxTokens: 7000, timeoutMs: 150000 }
@@ -3215,6 +3285,11 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
         const roleText = String(item?.role ?? '执行子任务').slice(0, 160);
         const taskText = String(item?.task ?? roleText).trim().slice(0, 240) || roleText;
         const deliverable = String(item?.deliverable ?? '').trim().slice(0, 120) || `${nodeName}的产出`;
+        // 计划里的 member 是成员称呼；对不上名册就留空，不硬塞给任何人。
+        const requestedMember = String(item?.member ?? item?.memberName ?? '').trim();
+        const member = requestedMember
+          ? memberByName.get(requestedMember.toLowerCase())
+          : undefined;
         const accepted = (Array.isArray(item?.acceptance) ? item.acceptance : [])
           .map((line: unknown) => String(line).trim().slice(0, 140))
           .filter(Boolean)
@@ -3234,6 +3309,8 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
           connectionId,
           model,
           effort: effortValues.has(String(item?.effort)) ? String(item?.effort) : 'medium',
+          memberId: member?.id ?? '',
+          memberName: member?.name ?? '',
         };
       });
     if (nodes.length === 0) throw new Error('workflow_nodes_missing');
@@ -3407,6 +3484,45 @@ app.post('/api/workspaces/:id/restore', (context) => {
 
 const NAME_ENCODING_HINT =
   '名字里有无法解码的字节（U+FFFD）。通常是调用方用了非 UTF-8 编码发送请求——Windows 控制台默认 GBK，请改用 UTF-8 或直接用界面/Node 的 fetch。';
+
+/* ── 团队：名册 + 手册 ──────────────────────────────────────────────
+ * 一张画布一个团队。一人一职、成员上限、手册广播；保存前严格校验，
+ * 重叠的职责直接拒绝，规模问题以提醒的形式说出来。
+ */
+app.get('/api/team', (context) => {
+  const workspaceId = workspaceOf(context);
+  const doc = teamFor(workspaceId);
+  return context.json({
+    ok: true,
+    team: { ...doc, warnings: teamWarnings(doc), cap: TEAM_MEMBER_CAP },
+  });
+});
+
+app.put('/api/team', async (context) => {
+  const workspaceId = workspaceOf(context);
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const checked = normalizeTeamInput(body?.team ?? body ?? {});
+  if (!checked.ok || !checked.doc) {
+    return context.json({ ok: false, error: checked.error, hint: checked.hint }, 400);
+  }
+  const teamStore = new TeamStore(workspaces.dirOf(workspaceId));
+  teamStore.write(checked.doc);
+  const saved = teamStore.read();
+  audit.record({
+    actor: actorOf(context),
+    action: 'team.update',
+    target: workspaceId,
+    detail: { members: saved.members.length, playbook: saved.playbook.length },
+  });
+  return context.json({
+    ok: true,
+    team: {
+      ...saved,
+      warnings: [...(checked.warnings ?? []), ...teamWarnings(saved)],
+      cap: TEAM_MEMBER_CAP,
+    },
+  });
+});
 
 app.post('/api/workspaces', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
@@ -4049,6 +4165,8 @@ app.post('/api/commands', async (context) => {
   const team = Array.isArray(body?.payload?.team)
     ? (body.payload.team as Array<Record<string, unknown>>).slice(0, 20)
     : [];
+  // 这张画布的持久团队：手册广播给所有成员，名册只给主控参考。
+  const teamDoc = teamFor(workspaceOf(context));
   const teamContext = [
     team
       .filter((member) => member && member.name)
@@ -4061,6 +4179,14 @@ app.post('/api/commands', async (context) => {
           )}`
       )
       .join('\n'),
+    teamDoc.members.length
+      ? `团队成员名册（一人一职）：\n${teamDoc.members
+          .map((member) => `- ${member.name}：${member.job}（${AUTONOMY_LABEL[member.autonomy]}）`)
+          .join('\n')}`
+      : '',
+    teamDoc.playbook.trim()
+      ? `团队手册（所有成员必须遵守的标准）：\n${teamDoc.playbook.trim().slice(0, 4000)}`
+      : '',
     // 工作区公共指令（借鉴 DSH 的 team sections）：注入每个 worker 的系统提示。
     workspaces.get(workspaceOf(context))?.instructions
       ? `工作区公共指令（必须遵守）：\n${workspaces.get(workspaceOf(context))?.instructions}`
@@ -4218,6 +4344,7 @@ app.post('/api/commands', async (context) => {
     } else {
       const canvasPlan = buildPlanFromCanvas(canvasDocument, requestedGoal, {
         files: canvasFiles,
+        team: teamDoc,
       });
 
       if (!canvasPlan && !allowDemoFallback) {
@@ -4470,6 +4597,13 @@ app.post('/api/commands', async (context) => {
               }),
           });
 
+    // 团队自治档位：调查/草稿只能用只读工具。工具列表和实际执行两层都收紧，
+    // 模型即使硬要写文件也会被拒绝，而不是靠提示词自觉。
+    const toolboxFor = nodeToolbox
+      ? (task: { autonomy?: 'investigate' | 'draft' | 'auto' | 'full' }) =>
+          restrictToolbox(nodeToolbox, task.autonomy ?? 'auto')
+      : undefined;
+
     const orchestrator = new Orchestrator({
       profiles: profilesToRun,
       adapters: {
@@ -4499,6 +4633,7 @@ app.post('/api/commands', async (context) => {
       search: webSearch.search,
       // 有工具箱时所有节点都能调用文件/终端/画布/联网工具。
       toolbox: nodeToolbox,
+      toolboxFor,
       accept: createRoutedJudge({
         router: routerPick
           ? {

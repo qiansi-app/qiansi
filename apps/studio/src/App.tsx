@@ -24,6 +24,7 @@ import { ArtifactModal } from './components/ArtifactModal';
 import { ExternalModal } from './components/ExternalModal';
 import { RunProgress } from './components/RunProgress';
 import { RunReport } from './components/RunReport';
+import { TeamModal } from './components/TeamModal';
 import { UserViewModal } from './components/UserViewModal';
 import { SettingsModal } from './components/SettingsModal';
 import { Toolbar } from './components/Toolbar';
@@ -52,6 +53,7 @@ import type {
   RunSummary,
   RunTaskView,
   Selection,
+  TeamDoc,
   UserViewReport,
 } from './types';
 
@@ -208,6 +210,9 @@ export function App() {
   const [userView, setUserView] = useState<UserViewReport | null>(null);
   const [userViewBusy, setUserViewBusy] = useState(false);
   const [userViewOpen, setUserViewOpen] = useState(false);
+  /** 团队名册与手册：一人一职，编排优先使用，运行注入职责与档位。 */
+  const [team, setTeam] = useState<TeamDoc | null>(null);
+  const [teamOpen, setTeamOpen] = useState(false);
   const [runTokens, setRunTokens] = useState(0);
   /** 补显完成态时用真实结束时间算耗时，而不是定格在 0.0s。 */
   const [recentEndedAt, setRecentEndedAt] = useState(0);
@@ -1180,10 +1185,13 @@ export function App() {
           effort: (planned.effort as EffortLevel) ?? 'medium',
           status: 'idle',
           accent: palette[index % palette.length],
-          metric: 'ready',
+          metric: planned.memberName ? `${planned.memberName} · ready` : 'ready',
           connectionId: model?.id,
           protocol: model?.protocol,
           baseUrl: model?.baseUrl,
+          ...(planned.memberId
+            ? { memberId: planned.memberId, memberName: planned.memberName ?? '' }
+            : {}),
         },
       });
     });
@@ -3253,6 +3261,16 @@ export function App() {
     void refreshUserView();
   }, []);
 
+  /** 读取这张画布的团队名册：工具栏徽标与节点指派都靠它。 */
+  useEffect(() => {
+    void fetch('/api/team')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body: { ok?: boolean; team?: TeamDoc } | null) => {
+        if (body?.team) setTeam(body.team);
+      })
+      .catch(() => undefined);
+  }, []);
+
   const send = async (nodeId: string, text: string) => {
     push(nodeId, 'user', text);
     // Talking to the orchestrator is how a session starts: it plans, hands out
@@ -3535,6 +3553,8 @@ export function App() {
         onOpenAttention={() => setAttentionOpen(true)}
         onOpenSelfOpt={() => setSelfOptOpen(true)}
         onOpenHandoff={() => setHandoffOpen(true)}
+        onOpenTeam={() => setTeamOpen(true)}
+        teamCount={team?.members.length ?? 0}
         onAutoLayout={() => void autoLayout()}
         layouting={layouting}
         brushMode={brushMode}
@@ -3683,6 +3703,10 @@ export function App() {
             node={drawer.mode === 'node' ? (drawer.node as AgentNodeData) : undefined}
             edge={drawer.mode === 'edge' ? drawer.edge : undefined}
             models={models}
+            team={team?.members}
+            onMemberChange={(memberId, memberName) => {
+              if (selectedNode) patchNode(selectedNode.id, { memberId, memberName });
+            }}
             onClose={() => setSelection(null)}
             onSend={(text) => {
               if (drawer.mode === 'node' && selectedNode) {
@@ -3856,9 +3880,18 @@ export function App() {
       <WorkflowModal
         open={workflowOpen}
         models={models}
+        team={team?.members}
+        playbook={team?.playbook}
         onClose={() => setWorkflowOpen(false)}
         onUploadFiles={uploadFilesForWorkflow}
         onApply={applyWorkflow}
+      />
+
+      <TeamModal
+        open={teamOpen}
+        models={models}
+        onClose={() => setTeamOpen(false)}
+        onSaved={(doc) => setTeam(doc)}
       />
 
       <input

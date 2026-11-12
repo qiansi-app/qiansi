@@ -1,7 +1,8 @@
-import { isConversationStyle, suggestStyle, type CapabilityProfile, type Effort, type Plan, type Subtask } from '@qiansi/engine';
+import { isConversationStyle, suggestStyle, type CapabilityProfile, type Effort, type Plan, type TaskAutonomy, type Subtask } from '@qiansi/engine';
 import type { CanvasDocument, CanvasNode } from './canvas.js';
 import { filesForTask, type CanvasFileText } from './canvas-files.js';
 import { profileForModel, resolveModelRoute, type KeySlot } from './model-catalog.js';
+import { memberPrompt, type TeamMember } from './team.js';
 
 // 复杂任务可以拆到十几个节点；低于并发上限的部分会排队，代价只是时间。
 const MAX_SUBTASKS = 12;
@@ -15,6 +16,10 @@ function asEffort(value: unknown): Effort {
   return value === 'low' || value === 'high' || value === 'max' || value === 'off'
     ? value
     : 'medium';
+}
+
+function asAutonomy(value: unknown): TaskAutonomy {
+  return value === 'investigate' || value === 'draft' || value === 'full' ? value : 'auto';
 }
 
 function workerNodes(document: CanvasDocument): CanvasNode[] {
@@ -77,7 +82,7 @@ export function diagnoseCanvas(document: CanvasDocument): {
 export function buildPlanFromCanvas(
   document: CanvasDocument,
   goal: string,
-  options: { files?: CanvasFileText[] } = {}
+  options: { files?: CanvasFileText[]; team?: { members: TeamMember[] } } = {}
 ): {
   plan: Plan;
   profiles: CapabilityProfile[];
@@ -145,11 +150,18 @@ export function buildPlanFromCanvas(
         : DEFAULT_ACCEPTANCE;
     const deliverable = String(data.deliverable ?? '').trim();
     const workOrder = String(data.task ?? '').trim();
+    // 节点挂了团队成员：身份、唯一职责、自治档位和个人记忆一起进提示词。
+    // 团队手册由运行层统一注入，这里只带成员自己的部分。
+    const memberId = String(data.memberId ?? '').trim();
+    const member = memberId
+      ? options.team?.members.find((item) => item.id === memberId)
+      : undefined;
 
     return {
       id: lane,
       title: String(data.name ?? data.role ?? nodeId),
       description: [
+        member ? memberPrompt(member) : '',
         workOrder ? `你的工单：${workOrder}` : data.role ? `你的角色：${String(data.role)}` : '',
         deliverable ? `交付物：${deliverable}` : '',
         acceptanceFromNode.length > 0
@@ -165,6 +177,7 @@ export function buildPlanFromCanvas(
       profileId: `canvas-${nodeId}`,
       effort: asEffort(data.effort),
       acceptanceCriteria,
+      autonomy: member?.autonomy ?? asAutonomy(data.autonomy),
       style: isConversationStyle(data.style)
         ? data.style
         : suggestStyle(`${String(data.name ?? "")} ${String(data.role ?? "")}`),

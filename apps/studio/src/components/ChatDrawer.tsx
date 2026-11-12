@@ -15,7 +15,7 @@ import {
 import type { AgentNodeData, EffortLevel } from '../data/demoGraph';
 import { catalogOf, type ModelDraft } from '../data/models';
 import { CONVERSATION_STYLES, isConversationStyle, styleById, suggestStyle } from '@qiansi/engine';
-import type { ChatMessage } from '../types';
+import type { ChatMessage, TeamMember } from '../types';
 
 type Tab = 'chat' | 'tasks' | 'logs' | 'profile';
 
@@ -33,6 +33,9 @@ interface ChatDrawerProps {
     target: string;
   };
   models: ModelDraft[];
+  /** 团队名册：把节点指派给某个成员。 */
+  team?: TeamMember[];
+  onMemberChange?: (memberId: string, memberName: string) => void;
   onClose: () => void;
   onSend: (text: string) => void;
   onEffortChange: (effort: EffortLevel) => void;
@@ -70,6 +73,8 @@ export function ChatDrawer({
   node,
   edge,
   models,
+  team,
+  onMemberChange,
   onClose,
   onSend,
   onEffortChange,
@@ -350,6 +355,29 @@ export function ChatDrawer({
           <div className="field-hint">
             节点身份会作为团队名册，在下一轮运行时反馈给主控模型与评委。
           </div>
+          {team && team.length > 0 && onMemberChange && (
+            <div className="field" style={{ marginBottom: 10 }}>
+              <label>团队成员（一人一职）</label>
+              <select
+                className="select"
+                value={node.memberId ?? ''}
+                onChange={(event) => {
+                  const member = team.find((item) => item.id === event.target.value);
+                  onMemberChange(member?.id ?? '', member?.name ?? '');
+                }}
+              >
+                <option value="">不指派（自由执行）</option>
+                {team.map((member) => (
+                  <option key={member.id} value={member.id}>
+                    {member.name} · {member.job}
+                  </option>
+                ))}
+              </select>
+              <div className="field-hint">
+                指派后，这个节点的提示词会带上该成员的职责、自治档位与团队记忆；调查/草稿档位只能读，不能写文件或跑命令。
+              </div>
+            </div>
+          )}
           {onMakeOrchestrator && (
             <button className="btn ghost orchestrator-action" onClick={onMakeOrchestrator}>
               <Crown size={13} /> 设为主控模型

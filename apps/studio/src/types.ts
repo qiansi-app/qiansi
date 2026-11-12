@@ -95,8 +95,7 @@ export interface RunDiagnosis {
 }
 
 /** 用户视角验收：真实跑起来、截图、逐项检查。 */
-export interface UserViewCheck {
-  name: string;
+export interface UserViewCheck {  name: string;
   label: string;
   ok: boolean;
   soft?: boolean;
@@ -131,4 +130,26 @@ export interface ExternalCallEvent {
   output: string;
   usage: { input: number; output: number; total: number };
   at: number;
+}
+
+/** 团队自治档位：调查/草稿只能用只读工具。 */
+export type TeamAutonomy = 'investigate' | 'draft' | 'auto' | 'full';
+
+export interface TeamMember {
+  id: string;
+  name: string;
+  /** 唯一职责，一句话。 */
+  job: string;
+  model?: string;
+  autonomy: TeamAutonomy;
+  memory: string;
+  createdAt?: number;
+}
+
+export interface TeamDoc {
+  playbook: string;
+  members: TeamMember[];
+  warnings?: string[];
+  cap?: number;
+  updatedAt?: number;
 }
