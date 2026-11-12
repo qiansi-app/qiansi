@@ -136,6 +136,10 @@ Live 运行限制：每个任务 240 秒超时、输出上限 12288 token、最�
 
 节点工具默认开启：每个任务可以调用 `read_file` / `write_file` / `list_dir` / `run_command` / `describe_canvas` 等工具，工作目录取画布的 `rootDir`（未设则服务端目录）。传 `payload.tools = false` 可整轮关闭；每次调用发 `tool.called` 事件并写 `node.tool` 审计。
 
+### `GET/POST /api/takeover/watch`
+
+实时接管开关。`POST { "enabled": true, "sessionFile"?: string }` 开始监听（留空则盯全局最新的 Claude Code 会话），`{ "enabled": false }` 停止。状态包含 `enabled` / `file` / `sessionId` / `lastAsk` / `lastFiredAt` / `pendingAsk` / `busy` / `lastError`。状态落盘到 `~/.qiansi/takeover-watch.json`，服务重启后自动恢复；发现新需求会自动调用 `/api/handoff`（任务原文、自动编排、立即运行）。
+
 ### `GET /api/runs/active`
 
 正在跑的运行的快照，供没发起这次运行的窗口（VS Code 面板、另一个标签页、agent 触发）显示进度。

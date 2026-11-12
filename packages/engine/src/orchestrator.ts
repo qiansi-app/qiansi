@@ -17,6 +17,7 @@ import type {
   Subtask,
   TaskStatus,
   ToolboxOptions,
+  ToolEvidence,
   UsageSnapshot,
 } from './types.js';
 
@@ -43,7 +44,7 @@ export interface OrchestratorOptions {
   search?: SearchFn;
   /** Server-side tools every node can call (files, shell, canvas queries). */
   toolbox?: ToolboxOptions;
-  accept?: (task: Subtask, output: string) => Promise<AcceptanceResult>;
+  accept?: (task: Subtask, output: string, evidence?: ToolEvidence) => Promise<AcceptanceResult>;
   /** Return the chosen option id. Omit to auto-abort when a run stalls. */
   onChoice?: (card: ChoiceCard) => Promise<string>;
   /**
@@ -80,6 +81,8 @@ export class Orchestrator {
   private readonly usage: UsageSnapshot = { total: 0, byModel: {} };
   private readonly tokenEvents: Array<{ ts: number; tokens: number }> = [];
   private budgetExceeded = false;
+  /** 每个任务当前尝试实际调用过的工具，验收时作为证据。 */
+  private readonly toolEvidence = new Map<string, Array<{ name: string; ok: boolean }>>();
 
   constructor(private readonly options: OrchestratorOptions) {}
 
@@ -294,7 +297,9 @@ export class Orchestrator {
             reasons: [streamError],
             suggestedFix: 'Retry the request; if it keeps failing, check the connection.',
           }
-        : await this.accept(task, output);
+        : await this.accept(task, output, {
+            tools: this.toolEvidence.get(task.id) ?? [],
+          });
       this.emit({ type: 'task.acceptance', taskId: task.id, result: acceptance });
 
       if (acceptance.pass) {
@@ -356,14 +361,15 @@ export class Orchestrator {
     const profile = profileById(this.options.profiles, task.profileId);
     const baseAdapter = this.options.adapters[profile.protocol];
     if (!baseAdapter) throw new Error(`No adapter registered for protocol ${profile.protocol}`);
-    // Search is a server-side tool: the node keeps its own model, and the
-    // adapter loop turns web_search calls into results the model can cite.
-    // A full toolbox (files, shell, canvas, web search) takes precedence and
-    // runs every tool through the server's executor.
+    // 每次尝试单独记工具证据：验收只看这一次真正发生了什么。
+    this.toolEvidence.delete(task.id);
     const adapter = this.options.toolbox
       ? new ServerToolAdapter(baseAdapter, {
           ...this.options.toolbox,
           onCall: (info) => {
+            const list = this.toolEvidence.get(task.id) ?? [];
+            list.push({ name: info.name, ok: info.ok });
+            this.toolEvidence.set(task.id, list);
             this.emit({
               type: 'tool.called',
               taskId: task.id,
@@ -476,14 +482,19 @@ export class Orchestrator {
           this.recordUsage(task, profile.id, event.input, event.output);
           const violation = this.checkBudget(profile.id);
           if (violation) {
-            this.budgetExceeded = true;
             this.emit({
               type: 'budget.exceeded',
               scope: violation.scope,
               detail: violation.detail,
               runTotal: this.usage.total,
             });
-            throw new Error(`Budget exceeded: ${violation.detail}`);
+            // 速率是软闸：这一分钟花得快不等于该把整轮杀掉（带工具的运行很容易
+            // 一分钟超过 6 万 token）。真被 provider 限流时，适配器会报错重试。
+            // 总量与单模型上限仍是硬闸，直接终止。
+            if (violation.scope !== 'rate') {
+              this.budgetExceeded = true;
+              throw new Error(`Budget exceeded: ${violation.detail}`);
+            }
           }
         } else if (event.type === 'error') {
           throw new Error(`${event.code}: ${event.message}`);
@@ -496,8 +507,12 @@ export class Orchestrator {
     }
   }
 
-  private async accept(task: Subtask, output: string): Promise<AcceptanceResult> {
-    if (this.options.accept) return this.options.accept(task, output);
+  private async accept(
+    task: Subtask,
+    output: string,
+    evidence?: ToolEvidence
+  ): Promise<AcceptanceResult> {
+    if (this.options.accept) return this.options.accept(task, output, evidence);
     const pass = output.trim().length > 0;
     return {
       pass,

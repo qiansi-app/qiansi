@@ -82,6 +82,11 @@ export interface ToolExecution {
 
 export type ToolExecutor = (call: ToolCall) => Promise<ToolExecution>;
 
+/** 一次任务尝试里实际发生过的工具调用，交给验收评委当证据。 */
+export interface ToolEvidence {
+  tools: Array<{ name: string; ok: boolean }>;
+}
+
 /**
  * Server-side tools a run can hand to its nodes: file access, shell, canvas
  * queries, web search. The model only chooses a tool and its arguments; the

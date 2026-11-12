@@ -211,6 +211,14 @@ function collectRecentAsks(file: string, wantAsks = 4, maxBytes = 256 * 1024 * 1
   }
   return asks;
 }
+export function recentClaudeAsks(file: string, want = 3): string[] {
+  try {
+    return collectRecentAsks(file, want);
+  } catch {
+    return [];
+  }
+}
+
 const LINE_BREAK = String.fromCharCode(10);
 const NEWLINE = String.fromCharCode(10);
 const USER_ROLE_MARK = String.fromCharCode(34) + "role" + String.fromCharCode(34) + ":" + String.fromCharCode(34) + "user" + String.fromCharCode(34);
@@ -227,8 +235,16 @@ export function readClaudeSession(cwd?: string): HandoffSession | null {
   const file = cwd
     ? newestJsonl(join(projectsRoot, encodeProjectDir(cwd)))
     : newestJsonl(projectsRoot);
-  if (!file) return null;
+  return file ? readClaudeSessionFile(file) : null;
+}
 
+/** 全机器最新的 Claude Code 会话文件（实时接管用来判断盯哪个文件）。 */
+export function latestClaudeSessionFile(): string | null {
+  return newestJsonl(join(homedir(), '.claude', 'projects'));
+}
+
+/** 读指定会话文件：实时接管盯住一个固定文件时用它。 */
+export function readClaudeSessionFile(file: string): HandoffSession | null {
   let raw = '';
   try {
     raw = readTail(file, 512 * 1024);
@@ -392,9 +408,15 @@ export function buildHandoffPack(input: {
   source?: HandoffSource | 'auto';
   session?: HandoffSession | null;
   project?: HandoffProject | null;
+  /** 指定会话文件：实时接管盯住的那一个。 */
+  sessionFile?: string;
 }): HandoffPack {
   const notes: string[] = [];
   let session = input.session ?? null;
+  if (!session && input.sessionFile) {
+    session = readClaudeSessionFile(input.sessionFile);
+    if (!session) notes.push(`指定的会话文件不可读：${input.sessionFile}`);
+  }
   if (!session) {
     session =
       input.source === 'codex'

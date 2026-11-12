@@ -80,6 +80,7 @@ import { buildHandoffPack } from './handoff.js';
 import { part, summarize, type HealthPart, type StatusReport } from './status.js';
 import { RunStore, type RunEnvelope } from './store.js';
 import { buildNodeToolbox } from './node-tools.js';
+import { TakeoverWatcher } from './takeover-watcher.js';
 import {
   SelfOptEngine,
   describeSelfOpt,
@@ -675,6 +676,92 @@ function resolveToken(): string {
   return generated;
 }
 const token = resolveToken();
+
+/**
+ * 实时接管：盯住当前 agent 会话，用户每发一条新需求就自动「新建画布 →
+ * 自动编排 → 立即运行」。串行走：已有运行在跑时，新需求会退避重试，
+ * 等这一轮结束再接。
+ */
+const takeoverWatcher = new TakeoverWatcher({
+  onAsk: async (ask, info) => {
+    const origin = `http://127.0.0.1:${boundPort ?? Number(process.env.QIANSI_PORT ?? 8787)}`;
+    const response = await fetch(`${origin}/api/handoff`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-qiansi-token': token },
+      body: JSON.stringify({
+        source: 'auto',
+        task: ask,
+        autoArrange: true,
+        autoRun: true,
+        sessionFile: info.file,
+      }),
+      // 编排可能要一分钟；但挂死时不能让 busy 永远为真。
+      signal: AbortSignal.timeout(180_000),
+    });
+    const body = (await response.json().catch(() => null)) as {
+      ok?: boolean;
+      error?: string;
+      archived?: boolean;
+      runId?: string | null;
+      runError?: string | null;
+      workspaceId?: string;
+    } | null;
+    if (!response.ok || !body?.ok) {
+      throw new Error(body?.error ?? `handoff HTTP ${response.status}`);
+    }
+    if (body.archived || !body.runId) {
+      throw new Error(body.runError ?? '自动编排没有产出可运行的节点');
+    }
+    audit.record({
+      actor: 'takeover',
+      action: 'takeover.auto',
+      target: body.workspaceId,
+      detail: { ask: ask.slice(0, 160), runId: body.runId },
+    });
+  },
+  log: (line) => console.log(`[takeover] ${line}`),
+});
+
+app.get('/api/takeover/watch', (context) => context.json({ ok: true, ...takeoverWatcher.status() }));
+
+/** 实时接管状态落盘：服务重启或 VS Code 重载后自动继续监听。 */
+const takeoverStateFile = join(stateDir, 'takeover-watch.json');
+
+function persistTakeoverState(enabled: boolean, file: string): void {
+  try {
+    writeFileSync(
+      takeoverStateFile,
+      JSON.stringify({ enabled, sessionFile: file || undefined }, null, 1),
+      { encoding: 'utf8', mode: 0o600 }
+    );
+  } catch {
+    // 状态文件写不进去不影响本次监听
+  }
+}
+
+try {
+  const saved = JSON.parse(readFileSync(takeoverStateFile, 'utf8')) as {
+    enabled?: boolean;
+    sessionFile?: string;
+  };
+  if (saved.enabled) takeoverWatcher.start(saved.sessionFile);
+} catch {
+  // 没开过实时接管
+}
+
+app.post('/api/takeover/watch', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const enabled = body?.enabled === true;
+  const sessionFile = String(body?.sessionFile ?? '').trim();
+  const status = enabled ? takeoverWatcher.start(sessionFile || undefined) : takeoverWatcher.stop();
+  persistTakeoverState(status.enabled, status.file);
+  audit.record({
+    actor: actorOf(context),
+    action: enabled ? 'takeover.watch.start' : 'takeover.watch.stop',
+    target: status.file || undefined,
+  });
+  return context.json({ ok: true, ...status });
+});
 
 /**
  * A second token that can only read. Anything handed to an external script gets
@@ -2270,8 +2357,10 @@ app.post('/api/handoff', async (context) => {
   const autoRun = body?.autoRun !== false;
   // 任务原文：用户可以直接在弹窗里写，不写才从会话里取。
   const taskOverride = String(body?.task ?? '').trim().slice(0, 4000);
+  // 实时接管可以钉住某个会话文件；不钉就按「全局最新」读。
+  const sessionFile = String(body?.sessionFile ?? '').trim();
 
-  const pack = buildHandoffPack({ cwd, source });
+  const pack = buildHandoffPack({ cwd, source, sessionFile: sessionFile || undefined });
 
   // 一个工作流一张画布：接续新建一张，不碰你正在看的。
   const goalGuess = (taskOverride || pack.session?.userAsks.at(-1) || '').split(/[。；;\n]/)[0]?.slice(0, 24) ?? '';
@@ -3730,12 +3819,12 @@ app.post('/api/commands', async (context) => {
 
   const requestedBudget = (body?.payload?.budget ?? {}) as Record<string, unknown>;
   const budget = {
-    maxTotalTokens: Number(requestedBudget.maxTotalTokens ?? 200000),
-    maxTokensPerModel: Number(requestedBudget.maxTokensPerModel ?? 100000),
-    // 20k/min was sized for short chat tasks; one thinking-model attempt with a
-    // real document pack blows through it and kills the whole run mid-flight.
-    maxTokensPerMinute: Number(requestedBudget.maxTokensPerMinute ?? 60000),
-    maxCallsPerTask: Number(requestedBudget.maxCallsPerTask ?? 4),
+    // 带工具的真实运行一分钟就能花掉 6 万 token：原来的 20 万总量 / 6 万每分钟
+    // 会把正常的多节点工具运行掐死在半路（实测 74k/min 触发后 C2–C5 全灭）。
+    maxTotalTokens: Number(requestedBudget.maxTotalTokens ?? 400000),
+    maxTokensPerModel: Number(requestedBudget.maxTokensPerModel ?? 250000),
+    maxTokensPerMinute: Number(requestedBudget.maxTokensPerMinute ?? 250000),
+    maxCallsPerTask: Number(requestedBudget.maxCallsPerTask ?? 6),
   };
 
   const orchestratorId = String(body?.payload?.orchestratorId ?? '');

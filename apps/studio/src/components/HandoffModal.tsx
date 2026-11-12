@@ -36,6 +36,25 @@ interface HandoffModalProps {
   defaultSource?: 'claude-code' | 'codex' | 'cursor' | 'none';
 }
 
+interface WatchStatus {
+  enabled: boolean;
+  file: string;
+  sessionId: string;
+  lastAsk: string;
+  lastFiredAt?: number;
+  pendingAsk?: string;
+  busy: boolean;
+  lastError?: string;
+}
+
+const timeLabel = (ts?: number) => {
+  if (!ts) return '';
+  const date = new Date(ts);
+  return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(
+    date.getHours()
+  ).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+};
+
 export function HandoffModal({ open, onClose, defaultSource }: HandoffModalProps) {
   const [source, setSource] = useState<'auto' | 'claude-code' | 'codex'>(() => {
     if (defaultSource === 'claude-code' || defaultSource === 'codex') return defaultSource;
@@ -67,6 +86,43 @@ export function HandoffModal({ open, onClose, defaultSource }: HandoffModalProps
     }, 1000);
     return () => window.clearTimeout(timer);
   }, [result]);
+
+  const [watch, setWatch] = useState<WatchStatus | null>(null);
+  const [watchBusy, setWatchBusy] = useState(false);
+
+  const loadWatch = async () => {
+    try {
+      const response = await fetch('/api/takeover/watch');
+      if (!response.ok) return;
+      setWatch((await response.json()) as WatchStatus);
+    } catch {
+      // 服务没起来：保持上一次状态
+    }
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    void loadWatch();
+    const timer = window.setInterval(() => void loadWatch(), 3000);
+    return () => window.clearInterval(timer);
+  }, [open]);
+
+  const toggleWatch = async () => {
+    setWatchBusy(true);
+    try {
+      const response = await fetch('/api/takeover/watch', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ enabled: !watch?.enabled }),
+      });
+      const data = (await response.json().catch(() => null)) as WatchStatus | null;
+      if (data) setWatch(data);
+    } catch {
+      // 失败时保留原状态，下一次轮询会纠正
+    } finally {
+      setWatchBusy(false);
+    }
+  };
 
   if (!open) return null;
 
@@ -167,6 +223,32 @@ export function HandoffModal({ open, onClose, defaultSource }: HandoffModalProps
             {busy ? <Loader2 size={13} className="spin" /> : <Link2 size={13} />}
             {busy ? '读取中…' : '读取并接续'}
           </button>
+        </div>
+
+        <div className="handoff-watch">
+          <div className="handoff-watch-head">
+            <b>实时接管</b>
+            <button className={`btn ${watch?.enabled ? '' : 'primary'}`} onClick={() => void toggleWatch()} disabled={watchBusy}>
+              {watchBusy ? '切换中…' : watch?.enabled ? '停止实时接管' : '开启实时接管'}
+            </button>
+          </div>
+          {watch?.enabled ? (
+            <div className="handoff-meta">
+              监听中 · 会话 {(watch.sessionId || '（等待会话）').slice(0, 8)} ·{' '}
+              {watch.file ? watch.file.split(/[\\/]/).pop() : '尚未找到会话文件'}
+              {watch.busy ? ' · 正在接管…' : ''}
+              {watch.lastFiredAt ? ` · 最近接管 ${timeLabel(watch.lastFiredAt)}` : ''}
+              {watch.pendingAsk ? ` · 新需求排队「${watch.pendingAsk.slice(0, 24)}…」` : ''}
+            </div>
+          ) : (
+            <div className="handoff-meta">
+              开启后，你在这个 agent 会话里发出的每条新需求都会自动新建画布、拆解并开跑；已有运行在跑时会等它结束再接管。
+            </div>
+          )}
+          {watch?.lastError && <div className="handoff-meta warn">接管重试中：{watch.lastError}</div>}
+          {watch?.lastAsk && watch.enabled && (
+            <div className="handoff-meta">最近一条需求：{watch.lastAsk.slice(0, 60)}</div>
+          )}
         </div>
 
         {error && <div className="keys-error">{error}</div>}

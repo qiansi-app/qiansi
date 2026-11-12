@@ -5,6 +5,7 @@ import {
   type AcceptanceResult,
   type CapabilityProfile,
   type Subtask,
+  type ToolEvidence,
 } from '@qiansi/engine';
 
 /**
@@ -111,9 +112,12 @@ async function judgeOnce(
 }
 
 /** Catches the failures that need no model at all. */
-function structuralCheck(output: string): GatedResult | null {
+function structuralCheck(output: string, evidence?: ToolEvidence): GatedResult | null {
   const text = output.trim();
-  if (text.length < 20) {
+  // 真的调用过工具（写文件、跑命令）时，短答复可能是「已完成」，交给评委判断；
+  // 纯文本任务仍然按长度拦空答案。
+  const didWork = (evidence?.tools ?? []).some((tool) => tool.ok);
+  if (text.length < 20 && !didWork) {
     return {
       pass: false,
       score: 0,
@@ -134,6 +138,27 @@ function structuralCheck(output: string): GatedResult | null {
   return null;
 }
 
+/**
+ * 工具证据：模型可能只写「已完成」而不复述调用过程，评委需要独立看到
+ * 这一次真正调用了哪些工具，才能判断「调用 read_file」这类验收条件。
+ */
+function toolEvidenceLine(evidence?: ToolEvidence): string {
+  const tools = evidence?.tools ?? [];
+  if (tools.length === 0) return '';
+  const counts = new Map<string, { ok: number; fail: number }>();
+  for (const tool of tools) {
+    const entry = counts.get(tool.name) ?? { ok: 0, fail: 0 };
+    if (tool.ok) entry.ok += 1;
+    else entry.fail += 1;
+    counts.set(tool.name, entry);
+  }
+  const parts = [...counts.entries()].map(
+    ([name, count]) =>
+      `${name}×${count.ok + count.fail}${count.fail > 0 ? `（${count.fail} 次失败）` : ''}`
+  );
+  return `本次任务实际调用的工具：${parts.join('、')}。`;
+}
+
 export function createRoutedJudge(options: RoutedJudgeOptions) {
   const minConfidence = options.routerMinConfidence ?? 0.7;
   const routerTimeoutMs = options.routerTimeoutMs ?? 12000;
@@ -144,9 +169,10 @@ export function createRoutedJudge(options: RoutedJudgeOptions) {
   // after two consecutive failures the run finishes without the gate.
   let routerFailures = 0;
 
-  return async (task: Subtask, output: string): Promise<GatedResult> => {
-    const early = structuralCheck(output);
+  return async (task: Subtask, output: string, evidence?: ToolEvidence): Promise<GatedResult> => {
+    const early = structuralCheck(output, evidence);
     if (early) return early;
+    const evidenceLine = toolEvidenceLine(evidence);
 
     if (options.router && routerFailures < 2) {
       const excerpt = output.length > 4000 ? `${output.slice(0, 4000)}\n……（已截断）` : output;
@@ -155,11 +181,15 @@ export function createRoutedJudge(options: RoutedJudgeOptions) {
         `你是分派闸门。你的职责只有一个：判断产出是否明显满足验收标准，并给出你的把握程度。拿不准就降低 confidence，不要猜。只返回一个 JSON 对象。${teamLine}`,
         [
           `验收标准：${task.acceptanceCriteria}`,
+          evidenceLine ? `工具证据：${evidenceLine}` : '',
           `产出节选：`,
           excerpt,
           '',
+          '验收标准里要求调用某工具时，以工具证据为准；不要因为产出文本没有提到工具就判失败。',
           '只返回：{"pass":true|false,"confidence":0到1,"reason":"一句话"}',
-        ].join('\n'),
+        ]
+          .filter(Boolean)
+          .join('\n'),
         { maxTokens: 256, timeoutMs: routerTimeoutMs }
       );
 
@@ -198,12 +228,16 @@ export function createRoutedJudge(options: RoutedJudgeOptions) {
       [
         `任务：${task.title}`,
         `验收标准：${task.acceptanceCriteria}`,
+        evidenceLine ? `工具证据：${evidenceLine}` : '',
         `产出：`,
         excerpt,
         '',
+        '验收标准里要求调用某工具或读写文件时，以工具证据为准；不要因为产出文本没有提到工具就判失败。',
         '请严格验收。只返回一个 JSON 对象，不要 Markdown、不要代码围栏、不要解释：',
         '{"pass":true|false,"score":0到1,"reasons":["..."],"suggested_fix":"..."}',
-      ].join('\n'),
+      ]
+        .filter(Boolean)
+        .join('\n'),
       { maxTokens: 1024, timeoutMs: fullTimeoutMs }
     );
 

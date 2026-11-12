@@ -25,9 +25,9 @@ export interface NodeToolboxDeps {
   audit: (entry: { action: string; target?: string; detail?: Record<string, unknown> }) => void;
 }
 
-const MAX_READ = 120_000;
+const MAX_READ = 48_000;
 const MAX_WRITE = 400_000;
-const MAX_OUTPUT = 20_000;
+const MAX_OUTPUT = 16_000;
 const DEFAULT_TIMEOUT = 30_000;
 const MAX_TIMEOUT = 120_000;
 
