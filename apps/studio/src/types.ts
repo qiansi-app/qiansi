@@ -37,6 +37,16 @@ export interface RunSummary {
   tokens?: number;
 }
 
+/** 运行失败归因：界面展示原因与重试入口时用。 */
+export interface RunFailureInfo {
+  headline: string;
+  reasons: string[];
+  failedTasks: Array<{ id: string; title: string; error: string }>;
+  attempt: number;
+  maxAttempts: number;
+  retryScheduled: boolean;
+}
+
 export interface ExternalCallEvent {
   type: 'external.call';
   runId: string;

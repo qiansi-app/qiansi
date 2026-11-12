@@ -1330,6 +1330,27 @@ textarea {
   transition: width 0.4s ease;
 }
 
+/* 失败归因行：原因 + 第几次尝试 + 重试入口 */
+.run-progress-failure {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 2px 0;
+  border-top: 1px solid rgba(239, 68, 68, 0.22);
+  margin-top: 4px;
+}
+.run-progress-failure-text { font-size: 11px; color: #f0a0a0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.run-progress-failure-text b { color: #f87171; font-weight: 600; }
+.run-progress-failure-reasons { flex-basis: 100%; color: #c99a9a; font-size: 11px; line-height: 1.4; word-break: break-all; }
+.run-progress-badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: rgba(56, 217, 194, 0.12); color: #6fe3d4; border: 1px solid rgba(56, 217, 194, 0.35); }
+.run-progress-retry {
+  display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;
+  font-size: 11px; padding: 3px 9px; border-radius: 7px; cursor: pointer;
+  border: 1px solid rgba(248, 113, 113, 0.5); background: rgba(248, 113, 113, 0.12); color: #ffb4b4;
+}
+.run-progress-retry:hover { background: rgba(248, 113, 113, 0.2); }
+
 /* 密钥与额度面板 */
 .keys-modal { max-width: 860px; }
 .keys-list { display: flex; flex-direction: column; gap: 14px; overflow-y: auto; max-height: 62vh; padding-right: 4px; }

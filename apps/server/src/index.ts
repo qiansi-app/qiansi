@@ -78,7 +78,7 @@ import { substituteExhausted } from './quota-plan.js';
 import { orderByStrategy, performanceOf } from './routing.js';
 import { buildHandoffPack } from './handoff.js';
 import { part, summarize, type HealthPart, type StatusReport } from './status.js';
-import { RunStore, type RunEnvelope } from './store.js';
+import { RunStore, type RunEnvelope, type RunFailureSummary, type RunRecord } from './store.js';
 import { buildNodeToolbox } from './node-tools.js';
 import { TakeoverWatcher } from './takeover-watcher.js';
 import {
@@ -174,8 +174,118 @@ function redactRunEvent<T extends { type: string }>(event: T): T {
   return (changed ? next : record) as unknown as T;
 }
 
-const approvalsFile = () => join(stateDir, 'approvals.json');
+/**
+ * 失败归因：把一堆 task.failed 事件压成用户看得懂的几类原因，
+ * 并带上「第几次尝试 / 还会不会自动重试」。
+ */
+function classifyRunError(error: string): string {
+  if (/budget exceeded/i.test(error)) return '预算用尽';
+  if (/upstream dependency/i.test(error)) return '上游任务失败';
+  if (/\b(401|403|429)\b|suspended|unauthorized|api key|no usable key|invalid.*key/i.test(error)) {
+    return '模型额度或密钥不可用';
+  }
+  if (/network|aborted|timeout|ECONN|fetch failed|socket/i.test(error)) {
+    return '网络中断或请求超时';
+  }
+  if (/验收|未通过|产出为空|过短|acceptance/i.test(error)) return '验收未通过';
+  return '任务执行失败';
+}
 
+function buildFailureSummary(input: {
+  record: RunRecord;
+  plan: { subtasks?: Array<{ id: string; title?: string }> };
+  status: 'failed' | 'aborted';
+  retryScheduled: boolean;
+}): RunFailureSummary {
+  const failedEvents = input.record.events
+    .filter((envelope) => envelope.event.type === 'task.failed')
+    .map((envelope) => envelope.event as { taskId: string; error: string });
+  const byTask = new Map<string, string>();
+  for (const event of failedEvents) byTask.set(event.taskId, event.error);
+  const subtasks = input.plan.subtasks ?? [];
+  const roots = [...byTask.entries()].filter(
+    ([, error]) => !/upstream dependency/i.test(error)
+  );
+  const failedTasks = roots.map(([id, error]) => ({
+    id,
+    title: String(subtasks.find((task) => task.id === id)?.title ?? id),
+    error: String(error).slice(0, 300),
+  }));
+  const counts = new Map<string, number>();
+  for (const task of failedTasks) {
+    const label = classifyRunError(task.error);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const reasons = [...counts.entries()].map(([label, count]) => `${label} ×${count}`);
+  for (const task of failedTasks.slice(0, 3)) {
+    reasons.push(`${task.id}「${task.title}」：${task.error.slice(0, 180)}`);
+  }
+  if (failedTasks.length === 0) {
+    reasons.push(
+      input.status === 'aborted' ? '运行被中断（没有任务级错误）' : '运行失败（没有任务级错误）'
+    );
+  }
+  return {
+    headline:
+      failedTasks.length > 0
+        ? `${failedTasks.length} 个任务失败`
+        : input.status === 'aborted'
+          ? '运行被中断'
+          : '运行失败',
+    reasons,
+    failedTasks,
+    attempt: (input.record.resumeDepth ?? 0) + 1,
+    maxAttempts: input.record.autoResume ? 3 : 1,
+    retryScheduled: input.retryScheduled,
+    at: Date.now(),
+  };
+}
+
+/**
+ * 把失败总结写成画布上的一张卡片（固定 id，多次失败时原地更新）。
+ */
+function publishFailureSummaryNode(workspaceId: string, summary: RunFailureSummary): void {
+  try {
+    const store = canvasFor(workspaceId);
+    const document = store.read();
+    const id = 'run-failure-summary';
+    const patch = {
+      kind: 'artifact',
+      name: `失败总结 · 第 ${summary.attempt}/${summary.maxAttempts} 次`,
+      role: summary.retryScheduled ? '已排队自动重试' : '未自动重试',
+      provider: 'local',
+      model: 'local',
+      effort: 'off',
+      status: 'failed',
+      accent: '#f87171',
+      taskId: 'run-failure-summary',
+      output: [
+        `结论：${summary.headline}`,
+        ...summary.reasons,
+        summary.retryScheduled
+          ? '下一次重试：当前运行结束后自动开始。'
+          : '重试：在运行条或「需要人工」面板点「重试」，会从断点继续。',
+      ]
+        .join('\n')
+        .slice(0, 4000),
+      artifact: summary.headline,
+      metric: summary.retryScheduled ? '自动重试中' : '可手动重试',
+    };
+    const ops = document.nodes.some((node) => node.id === id)
+      ? [{ op: 'update_node' as const, id, patch }]
+      : [
+          {
+            op: 'add_node' as const,
+            node: { id, type: 'artifact' as const, position: { x: 80, y: 520 }, data: patch },
+          },
+        ];
+    store.apply(ops);
+  } catch {
+    // 展示失败不影响运行记录
+  }
+}
+
+const approvalsFile = () => join(stateDir, 'approvals.json');
 /** Approvals must survive a restart: an agent may still be waiting on one. */
 function persistApprovals(): void {
   try {
@@ -1111,10 +1221,14 @@ function scheduleAutoResume(runId: string, delayMs = 5000): void {
   const timer = setTimeout(() => {
     if (existsSync(manualStopPath)) return;
     const port = boundPort ?? Number(process.env.QIANSI_PORT ?? 8787);
+    const source = store.get(runId);
     const requestHeaders: Record<string, string> = {
       'x-qiansi-token': token,
       'content-type': 'application/json',
       'x-qiansi-agent': 'auto-resume',
+      // 续跑必须回到原工作区：少了这个头，workspaceOf 会落到「当前画布」，
+      // 服务端就会以 resume_workspace_mismatch 拒绝——自动重试永远不会发生。
+      ...(source?.workspaceId ? { 'x-qiansi-workspace': source.workspaceId } : {}),
     };
     void fetch(`http://127.0.0.1:${port}/api/commands`, {
       method: 'POST',
@@ -2387,7 +2501,7 @@ async function drainRunQueue(): Promise<void> {
         body: JSON.stringify({
           commandId: `queued-run-${randomUUID()}`,
           type: 'run.start',
-          payload: { mode: 'live', goal: next.goal },
+          payload: { mode: 'live', goal: next.goal, autoResume: true },
         }),
       });
       const body = (await response.json().catch(() => null)) as {
@@ -2733,7 +2847,8 @@ app.post('/api/handoff', async (context) => {
         body: JSON.stringify({
           commandId: `handoff-run-${randomUUID()}`,
           type: 'run.start',
-          payload: { mode: 'live', goal: runGoal },
+          // 接管失败自动重试（断点续跑，最多 2 次），失败原因必须让用户看见。
+          payload: { mode: 'live', goal: runGoal, autoResume: true },
         }),
       });
       const startedBody = (await started.json().catch(() => null)) as {
@@ -4416,6 +4531,40 @@ app.post('/api/commands', async (context) => {
         target: runId,
         detail: { ...gateCounts, router: routerPick?.model ?? null },
       });
+      // 失败归因与自动重试计划：先算清楚「为什么失败、还会不会重试」，
+      // 再决定回写画布（授权被撤销时只记录、不写画布）。
+      const finishedRecord = store.get(runId);
+      let pendingCount = 0;
+      let willRetry = false;
+      if (finishedRecord?.autoResume && !finishedRecord.manualStop && event.status !== 'done') {
+        const outputsNow = store.snapshot(runId)?.outputs ?? {};
+        pendingCount = planToRun.subtasks.filter(
+          (task) => !String(outputsNow[task.id] ?? '').trim()
+        ).length;
+        willRetry = pendingCount > 0 && (finishedRecord.resumeDepth ?? 0) < 2;
+      }
+      let failureSummary: RunFailureSummary | null = null;
+      if (finishedRecord && event.status !== 'done') {
+        failureSummary = buildFailureSummary({
+          record: finishedRecord,
+          plan: planToRun,
+          status: event.status,
+          retryScheduled: willRetry,
+        });
+        store.setFailureSummary(runId, failureSummary);
+        audit.record({
+          actor: 'server',
+          action: 'run.failure_summary',
+          target: runId,
+          detail: {
+            headline: failureSummary.headline,
+            reasons: failureSummary.reasons.slice(0, 3),
+            attempt: failureSummary.attempt,
+            maxAttempts: failureSummary.maxAttempts,
+            retryScheduled: willRetry,
+          },
+        });
+      }
       if (planSource !== 'canvas') {
         // 没有画布回写可做：记账为已处理，启动补投时不再考虑它。
         effects.mark(runId, 'writeback');
@@ -4456,6 +4605,8 @@ app.post('/api/commands', async (context) => {
           detail: { nodes: applied, status: event.status },
         });
       }
+      // 失败总结也放回画布：用户不用翻运行记录就能看到为什么失败、还会不会重试。
+      if (failureSummary) publishFailureSummaryNode(runWorkspace, failureSummary);
       // 每个任务的完整产出落成 .md 文件：弹窗看过就没了，文件才是交付物。
       try {
         const saved = saveRunDeliverables({
@@ -4633,28 +4784,23 @@ app.post('/api/commands', async (context) => {
       })();
 
       // 自动续跑（长期项目）：失败或中断且还有没产出的任务 → 排下一次续跑，
-      // 上限 2 轮，避免在注定失败的任务上无限烧钱。跨重启由启动补排负责。
-      const finishedRecord = store.get(runId);
+      // 上限 2 轮（首跑 + 2 次重试），避免在注定失败的任务上无限烧钱。
+      // 跨重启由启动补排负责；retryScheduled 已写进失败总结。
       if (finishedRecord?.autoResume && !finishedRecord.manualStop && event.status !== 'done') {
-        const outputsNow = snapshot?.outputs ?? {};
-        const pendingTasks = planToRun.subtasks.filter(
-          (task) => !String(outputsNow[task.id] ?? '').trim()
-        );
-        const depth = finishedRecord.resumeDepth ?? 0;
-        if (pendingTasks.length > 0 && depth < 2) {
+        if (willRetry) {
           audit.record({
             actor: 'server',
             action: 'run.auto_resume_scheduled',
             target: runId,
-            detail: { depth: depth + 1, pending: pendingTasks.length },
+            detail: { depth: (finishedRecord.resumeDepth ?? 0) + 1, pending: pendingCount },
           });
           scheduleAutoResume(runId);
-        } else if (pendingTasks.length > 0) {
+        } else if (pendingCount > 0) {
           audit.record({
             actor: 'server',
             action: 'run.auto_resume_exhausted',
             target: runId,
-            detail: { depth, pending: pendingTasks.length },
+            detail: { depth: finishedRecord.resumeDepth ?? 0, pending: pendingCount },
           });
         }
       }
@@ -4817,6 +4963,9 @@ app.get('/api/runs/active', (context) => {
         finishedAt: finished.finishedAt ?? Date.now(),
         tokens: finished.usage?.total ?? 0,
         tasks: fold(finished),
+        failureSummary: finished.failureSummary ?? null,
+        attempt: (finished.resumeDepth ?? 0) + 1,
+        maxAttempts: finished.autoResume ? 3 : 1,
       },
     });
   }
@@ -4879,6 +5028,12 @@ app.get('/api/runs/:id/result', (context) => {
     usage: snapshot.usage,
     mandate: snapshot.mandate ?? null,
     review: snapshot.review ?? null,
+    // 失败原因、第几次尝试、还会不会自动重试：界面用它在运行条上给出重试入口。
+    failureSummary: snapshot.failureSummary ?? null,
+    attempt: (snapshot.resumeDepth ?? 0) + 1,
+    maxAttempts: snapshot.autoResume ? 3 : 1,
+    autoResume: Boolean(snapshot.autoResume),
+    resumedFrom: snapshot.resumedFrom ?? null,
     tasks,
     canvasUrl: `/api/runs/${runId}/events`,
   });

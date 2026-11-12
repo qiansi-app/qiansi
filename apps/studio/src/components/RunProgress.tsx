@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Check, ChevronRight, Loader2, X } from 'lucide-react';
-import type { RunTaskView } from '../types';
+import { Check, ChevronRight, Loader2, RotateCcw, X } from 'lucide-react';
+import type { RunFailureInfo, RunTaskView } from '../types';
 
 interface RunProgressProps {
   tasks: RunTaskView[];
@@ -9,6 +9,9 @@ interface RunProgressProps {
   /** 补显完成态时的真实结束时间；缺省按当前时刻，避免定格在 0.0s。 */
   endedAt?: number;
   tokens: number;
+  /** 失败归因与重试进度：展示原因，并提供重试入口。 */
+  failure?: RunFailureInfo | null;
+  onRetry?: () => void;
   onOpenReport?: () => void;
 }
 
@@ -32,7 +35,7 @@ const STATUS_LABEL: Record<RunTaskView['status'], string> = {
  * This strip answers that in one glance: 3/6 done, who is working now, how long
  * it has taken and what it has cost.
  */
-export function RunProgress({ tasks, running, startedAt, endedAt, tokens, onOpenReport }: RunProgressProps) {
+export function RunProgress({ tasks, running, startedAt, endedAt, tokens, failure, onRetry, onOpenReport }: RunProgressProps) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -107,6 +110,25 @@ export function RunProgress({ tasks, running, startedAt, endedAt, tokens, onOpen
       <div className="run-progress-track">
         <div className="run-progress-fill" style={{ width: `${percent}%` }} />
       </div>
+
+      {!running && failure && (
+        <div className="run-progress-failure">
+          <div className="run-progress-failure-text">
+            <b>失败：{failure.headline}</b>
+            <span className="run-progress-sep">·</span>
+            <span>第 {failure.attempt}/{failure.maxAttempts} 次</span>
+            {failure.retryScheduled && <span className="run-progress-badge">已排队自动重试</span>}
+            <div className="run-progress-failure-reasons" title={failure.reasons.join('\n')}>
+              {failure.reasons.slice(0, 3).join('；')}
+            </div>
+          </div>
+          {onRetry && !failure.retryScheduled && (
+            <button className="run-progress-retry" onClick={onRetry} title="从断点续跑：只重跑没有产出的任务">
+              <RotateCcw size={12} /> 重试
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

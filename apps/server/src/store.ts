@@ -16,6 +16,22 @@ export interface RunEnvelope {
   event: RunEvent;
 }
 
+/**
+ * 失败归因：给用户看的「为什么失败」+ 自动重试进度 + 是否已排下一次重试。
+ * 重试上限固定为 1 次首跑 + 2 次自动续跑。
+ */
+export interface RunFailureSummary {
+  headline: string;
+  reasons: string[];
+  failedTasks: Array<{ id: string; title: string; error: string }>;
+  /** 这是第几次尝试（1 = 首跑）。 */
+  attempt: number;
+  maxAttempts: number;
+  /** 是否已经排了下一次自动重试。 */
+  retryScheduled: boolean;
+  at: number;
+}
+
 export type RunStatus = 'running' | 'done' | 'failed' | 'aborted';
 
 export interface RunRecord {
@@ -42,6 +58,8 @@ export interface RunRecord {
   mandate?: Mandate;
   /** 领导层复盘结论（旗舰模型对整轮成果的检验与建议）。 */
   review?: RunReview;
+  /** 失败归因与重试进度（只在失败/中断时存在）。 */
+  failureSummary?: RunFailureSummary;
   events: RunEnvelope[];
   seq: number;
   startedAt: number;
@@ -277,6 +295,18 @@ export class RunStore {
     }
   }
 
+  /** 失败归因：随运行记录持久化，界面与自动重试都用它。 */
+  setFailureSummary(runId: string, summary: RunFailureSummary): void {
+    const record = this.runs.get(runId);
+    if (!record) return;
+    record.failureSummary = summary;
+    try {
+      this.persist(record);
+    } catch {
+      // 写不进去不影响失败本身
+    }
+  }
+
   /** 人为停止：记录后，自动续跑与启动补排都不再接手这一轮。 */
   markManualStop(runId: string): void {
     const record = this.runs.get(runId);
@@ -334,6 +364,7 @@ export class RunStore {
       usage: record.usage,
       mandate: record.mandate,
       review: record.review,
+      failureSummary: record.failureSummary,
       lastSeq: record.seq,
       startedAt: record.startedAt,
       finishedAt: record.finishedAt,

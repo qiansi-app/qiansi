@@ -46,6 +46,7 @@ import {
 import type {
   ChatMessage,
   ExternalCallEvent,
+  RunFailureInfo,
   RunSummary,
   RunTaskView,
   Selection,
@@ -194,6 +195,8 @@ export function App() {
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [runTasks, setRunTasks] = useState<Record<string, RunTaskView>>({});
   const [runSummary, setRunSummary] = useState<RunSummary | null>(null);
+  /** 失败原因与重试进度：运行条上展示，并提供重试入口。 */
+  const [failureInfo, setFailureInfo] = useState<RunFailureInfo | null>(null);
   const [runTokens, setRunTokens] = useState(0);
   /** 补显完成态时用真实结束时间算耗时，而不是定格在 0.0s。 */
   const [recentEndedAt, setRecentEndedAt] = useState(0);
@@ -595,6 +598,9 @@ export function App() {
             startedAt: number;
             finishedAt: number;
             tokens: number;
+            failureSummary?: RunFailureInfo | null;
+            attempt?: number;
+            maxAttempts?: number;
             tasks: Array<{
               taskId: string;
               nodeId: string | null;
@@ -619,6 +625,8 @@ export function App() {
           runTasksRef.current = tasks;
           setRunTasks(tasks);
           setRunTokens(data.run.tokens);
+          // 正在重试/运行：上一次的失败总结先撤下，避免看起来还在失败。
+          setFailureInfo(null);
           runStartedAt.current = data.run.startedAt;
           if (!externalRunRef.current) {
             externalRunRef.current = true;
@@ -648,6 +656,24 @@ export function App() {
           setRecentEndedAt(data.recent.finishedAt);
           recentOnlyRef.current = true;
           setExternalRun(false);
+          setFailureInfo(data.recent.failureSummary ?? null);
+          // 补显的完成态也要能点「本轮结果」和「重试」：runSummary 是它们的依据。
+          const recentValues = Object.values(tasks);
+          setRunSummary({
+            runId: data.recent.runId,
+            status:
+              data.recent.status === 'done'
+                ? 'done'
+                : data.recent.status === 'failed'
+                  ? 'failed'
+                  : 'aborted',
+            total: recentValues.length,
+            passed: recentValues.filter((task) => task.status === 'done').length,
+            needsHuman: 0,
+            events: 0,
+            durationMs: Math.max(0, (data.recent.finishedAt ?? 0) - (data.recent.startedAt ?? 0)),
+            tokens: data.recent.tokens,
+          });
           setToast(
             data.recent.status === 'done'
               ? '上一轮运行刚刚完成'
@@ -2786,6 +2812,17 @@ export function App() {
         tokens: runTokensRef.current,
       };
       setRunSummary(summary);
+      // 失败时拉取归因与重试进度：运行条上必须看得见为什么失败、还能不能重试。
+      if (payload.event.status !== 'done') {
+        void fetch(`/api/runs/${runId}/result`)
+          .then((response) => (response.ok ? response.json() : null))
+          .then((body: { failureSummary?: RunFailureInfo | null } | null) => {
+            if (body?.failureSummary) setFailureInfo(body.failureSummary);
+          })
+          .catch(() => undefined);
+      } else {
+        setFailureInfo(null);
+      }
       decorateArtifacts();
 
       const text =
@@ -2808,6 +2845,49 @@ export function App() {
     source.onerror = () => {
       push(orchestratorId, 'assistant', '事件流中断，正在自动重连…');
     };
+  };
+
+  /**
+   * 手动重试：从失败的运行断点续跑（只重跑没产出的任务），
+   * 与自动续跑共用同一套服务端逻辑；重试次数上限仍由服务端控制。
+   */
+  const retryRun = async () => {
+    const previous = runSummary?.runId;
+    if (!previous) {
+      setToast('找不到可续跑的运行');
+      return;
+    }
+    setRunning(true);
+    setFailureInfo(null);
+    runTasksRef.current = {};
+    setRunTasks({});
+    setRunTokens(0);
+    runEventCount.current = 0;
+    runStartedAt.current = Date.now();
+    setRecentEndedAt(0);
+    try {
+      const response = await fetch('/api/commands', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          commandId: `ui-retry-${previous}-${Date.now()}`,
+          type: 'run.start',
+          payload: { mode: 'live', resumeOf: previous, autoResume: true },
+        }),
+      });
+      const data = (await response.json().catch(() => null)) as
+        | { runId?: string; error?: string }
+        | null;
+      if (!response.ok || !data?.runId) {
+        setRunning(false);
+        setToast(`重试失败：${data?.error ?? `HTTP ${response.status}`}`);
+        return;
+      }
+      subscribeToRun(data.runId);
+    } catch {
+      setRunning(false);
+      setToast('重试请求失败');
+    }
   };
 
   /**
@@ -2987,6 +3067,7 @@ export function App() {
           usage?: { total?: number };
           tasks?: Array<{ taskId?: string; id?: string; nodeId?: string; title?: string; status: string; output?: string }>;
           events?: number;
+          failureSummary?: RunFailureInfo | null;
         };
         if (runningRef.current || runTasksRef.current && Object.keys(runTasksRef.current).length > 0) return;
         const tasks: Record<string, RunTaskView> = {};
@@ -3014,6 +3095,7 @@ export function App() {
         });
         runTasksRef.current = tasks;
         setRunTasks(tasks);
+        setFailureInfo(result.failureSummary ?? null);
       } catch {
         // 历史恢复失败不影响当前界面
       }
@@ -3345,6 +3427,8 @@ export function App() {
             startedAt={runStartedAt.current}
             endedAt={recentEndedAt}
             tokens={runTokens}
+            failure={failureInfo}
+            onRetry={() => void retryRun()}
             onOpenReport={running || externalRun ? undefined : () => setReportOpen(true)}
           />
           {brushMode && (
