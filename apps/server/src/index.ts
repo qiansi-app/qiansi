@@ -15,7 +15,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import {
   AnthropicMessagesAdapter,
@@ -2201,7 +2201,9 @@ app.post('/api/handoff', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
   // 留空 = 接管「最近真正活跃」的那个 agent 会话（全局最新），
   // 而不是服务端启动目录下的旧会话；项目事实跟会话的 cwd 走。
-  const cwd = String(body?.cwd ?? '').trim();
+  // 显式目录先归一化：尾部分隔符会让编码目录对不上，静默落到别的项目。
+  const rawCwd = String(body?.cwd ?? '').trim();
+  const cwd = rawCwd ? resolve(rawCwd) : '';
   const source =
     body?.source === 'codex' || body?.source === 'claude-code' ? body.source : 'auto';
   const autoArrange = body?.autoArrange !== false;
@@ -2324,9 +2326,10 @@ app.post('/api/handoff', async (context) => {
         order.indexOf(familyOf(b.model)?.slot ?? 'relay')
     );
 
+    // 有明确任务原文时以它为准：会话结论只是背景，不能把目标带偏。
     const goalParts = [
       taskOverride || pack.session?.userAsks.at(-1) || '',
-      pack.session?.conclusions.at(-1) ?? '',
+      taskOverride ? '' : pack.session?.conclusions.at(-1) ?? '',
     ].filter(Boolean);
     const goal = (goalParts.join('\n') || `接续 ${pack.session?.source ?? 'agent'} 会话的工作`).slice(0, 1200);
     console.log(`[handoff] available models: ${available.length}`, available.map((m) => m.connectionId).join(','));
@@ -2475,6 +2478,7 @@ app.post('/api/handoff', async (context) => {
   });
 
   let runId: string | null = null;
+  let runError = '';
   if (autoRun && arranged.nodes > 0) {
     try {
       const origin = new URL(context.req.url).origin;
@@ -2494,11 +2498,28 @@ app.post('/api/handoff', async (context) => {
       const startedBody = (await started.json().catch(() => null)) as {
         runId?: string;
         ok?: boolean;
+        error?: string;
+        hint?: string;
+        reasons?: unknown[];
       } | null;
-      if (started.ok && startedBody?.runId) runId = startedBody.runId;
-    } catch {
-      // 运行没起也不影响已写入的上下文
+      if (started.ok && startedBody?.runId) {
+        runId = startedBody.runId;
+      } else {
+        // 「勾了立即运行却没跑」必须说清楚原因（互斥、策略、缺凭证、不可运行）。
+        runError = startedBody?.error ?? `HTTP ${started.status}`;
+        const reasons = Array.isArray(startedBody?.reasons) ? startedBody.reasons : [];
+        if (reasons.length > 0) {
+          runError += ` · ${reasons.map((item) => String(item)).slice(0, 3).join('；')}`;
+        }
+        if (startedBody?.hint) runError += ` · ${startedBody.hint}`;
+        pack.notes.push(`运行没有启动：${runError.slice(0, 300)}`);
+      }
+    } catch (error) {
+      runError = error instanceof Error ? error.message : String(error);
+      pack.notes.push(`运行没有启动：${runError.slice(0, 300)}`);
     }
+  } else if (autoRun) {
+    pack.notes.push('没有可运行的节点：自动编排未开启或没有产出，本次没有启动运行。');
   }
   if (arranged.nodes === 0) {
     // 编排没产出：新画布只有一张资料库，归档进历史别占标签栏。
@@ -2526,6 +2547,7 @@ app.post('/api/handoff', async (context) => {
     pack: { bytes: pack.bytes, fileId, name: fileName },
     arranged,
     runId,
+    runError: runError || null,
     notes: pack.notes,
   });
 });
@@ -2637,7 +2659,8 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
 目标怎么定（先读这里）：
 - 对结果负责，不对字面动作负责：「帮我回客户邮件」背后往往是「让这个客户续约」。先判断用户真正要达成的结果，验收标准对着结果写（如「客户看完愿意约下一次通话」），流程围绕结果设计；
 - 但交付形态绝不改变：用户要邮件就交付邮件，要 PPT 就交付 PPT。「做一份PPT」可以升级为「让忙碌的决策者 30 分钟内看懂并拍板」，可最后一步的交付物仍然是那份 PPT——把它换成 Word、文档或口头汇报就是失败；
-- role 不写「扮演资深专家」这类角色扮演（已被行业证明不能提升质量），写这个环节实际用的资料、工具与方法，例如「逐条对照官方文档核实」「按 MECE 拆分」。
+- role 不写「扮演资深专家」这类角色扮演（已被行业证明不能提升质量），写这个环节实际用的资料、工具与方法，例如「逐条对照官方文档核实」「按 MECE 拆分」；
+- 用户上传的文件与接续资料只是**参考资料**：用来补充事实与约束，不能把总目标替换成资料里的议题；资料与明确目标无关时直接忽略并在 summary 里说明。
 
 规模怎么定：
 - 只有一个交付物、一条路走到底：2–3 个节点；

@@ -21,7 +21,9 @@ interface HandoffResult {
   project?: { cwd: string; branch: string; files: number } | null;
   pack?: { bytes: number; name: string };
   arranged?: { nodes: number; edges: number };
+  archived?: boolean;
   runId?: string | null;
+  runError?: string | null;
   workspaceId?: string;
   workspaceName?: string;
   notes?: string[];
@@ -142,7 +144,12 @@ export function HandoffModal({ open, onClose, defaultSource }: HandoffModalProps
             <input
               type="checkbox"
               checked={autoArrange}
-              onChange={(event) => setAutoArrange(event.target.checked)}
+              onChange={(event) => {
+                const checked = event.target.checked;
+                setAutoArrange(checked);
+                // 不编排就没有可运行的节点：立即运行必须跟着关掉，避免静默跳过。
+                if (!checked) setAutoRun(false);
+              }}
             />
             自动编排工作流（让主控拆解并连线）
           </label>
@@ -150,6 +157,8 @@ export function HandoffModal({ open, onClose, defaultSource }: HandoffModalProps
             <input
               type="checkbox"
               checked={autoRun}
+              disabled={!autoArrange}
+              title={autoArrange ? undefined : '需要先勾选自动编排，画布才有可运行的节点'}
               onChange={(event) => setAutoRun(event.target.checked)}
             />
             写入后立即运行（会消耗模型额度）
@@ -187,19 +196,25 @@ export function HandoffModal({ open, onClose, defaultSource }: HandoffModalProps
                 自动编排：新增 {result.arranged.nodes} 个节点、{result.arranged.edges} 条连线
               </div>
             )}
-            {result.workspaceName && (
-              <div className="handoff-meta">
-                已写入新画布「{result.workspaceName}」
-                {result.workspaceId && (
-                  <button
-                    className="keys-mini"
-                    style={{ marginLeft: 8 }}
-                    onClick={() => result.workspaceId && switchWorkspace(result.workspaceId)}
-                  >
-                    去新画布看进度
-                  </button>
-                )}
+            {result.archived ? (
+              <div className="handoff-meta warn">
+                自动编排没有产出，资料已保存到「{result.workspaceName ?? '历史画布'}」，可在历史画布里恢复后手动补节点。
               </div>
+            ) : (
+              result.workspaceName && (
+                <div className="handoff-meta">
+                  已写入新画布「{result.workspaceName}」
+                  {result.workspaceId && (
+                    <button
+                      className="keys-mini"
+                      style={{ marginLeft: 8 }}
+                      onClick={() => result.workspaceId && switchWorkspace(result.workspaceId)}
+                    >
+                      去新画布看进度
+                    </button>
+                  )}
+                </div>
+              )
             )}
             {result.runId && (
               <div className="handoff-meta">

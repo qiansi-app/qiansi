@@ -48,7 +48,12 @@ export interface HandoffPack {
 
 /** Claude Code encodes a project path by replacing every non-alphanumeric with '-'. */
 export function encodeProjectDir(cwd: string): string {
-  return cwd.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
+  // 尾部分隔符会让编码结果多一个 '-'，和真实目录名对不上，静默落到别的项目。
+  return String(cwd ?? '')
+    .trim()
+    .replace(/[\\/]+$/, '')
+    .replace(/[^a-zA-Z0-9]/g, '-')
+    .toLowerCase();
 }
 
 function newestJsonl(dir: string, depth = 0): string | null {
@@ -213,14 +218,15 @@ const USER_ROLE_MARK = String.fromCharCode(34) + "role" + String.fromCharCode(34
 /**
  * 读最近一段 Claude Code 会话。
  *
- * 指定 cwd 时优先读该项目的会话；没有指定时读**全局最新**的那个——
- * 用户刚在别的项目里和 agent 说话，服务端的 cwd 却还停在启动目录，
- * 按 cwd 找会接管到几周前的旧会话（这正是「接了但没接上」的原因）。
+ * 指定 cwd 时只读该项目的会话（没有就说明没有，不拿别的项目顶替）；
+ * 没有指定时读**全局最新**的那个——用户刚在别的项目里和 agent 说话，
+ * 服务端的 cwd 却还停在启动目录，按 cwd 找会接管到几周前的旧会话。
  */
 export function readClaudeSession(cwd?: string): HandoffSession | null {
   const projectsRoot = join(homedir(), '.claude', 'projects');
-  const preferred = cwd ? newestJsonl(join(projectsRoot, encodeProjectDir(cwd))) : null;
-  const file = preferred ?? newestJsonl(projectsRoot);
+  const file = cwd
+    ? newestJsonl(join(projectsRoot, encodeProjectDir(cwd)))
+    : newestJsonl(projectsRoot);
   if (!file) return null;
 
   let raw = '';
@@ -292,6 +298,7 @@ export function readCodexSession(): HandoffSession | null {
   const tools = new Set<string>();
   let messageCount = 0;
   let hasErrors = false;
+  let projectCwd = '';
 
   for (const line of raw.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -303,6 +310,9 @@ export function readCodexSession(): HandoffSession | null {
     }
     messageCount += 1;
     const payload = (entry.payload ?? entry) as Record<string, unknown>;
+    // Codex 的会话记录也带 cwd；有的话项目事实就跟着它会话走。
+    if (typeof payload.cwd === 'string' && payload.cwd) projectCwd = payload.cwd;
+    else if (typeof entry.cwd === 'string' && entry.cwd) projectCwd = entry.cwd;
     const type = String(payload.type ?? entry.type ?? '');
     const role = String(payload.role ?? '');
     const text = asText(payload.content ?? payload.text ?? payload.message).trim();
@@ -318,6 +328,7 @@ export function readCodexSession(): HandoffSession | null {
     source: 'codex',
     file,
     sessionId: file.split(/[\\/]/).pop()?.replace('.jsonl', '') ?? '',
+    projectCwd: projectCwd || undefined,
     updatedAt: info.mtimeMs,
     messageCount,
     userAsks: userAsks.slice(-6),
@@ -390,11 +401,17 @@ export function buildHandoffPack(input: {
         ? readCodexSession()
         : input.source === 'claude-code'
           ? readClaudeSession(input.cwd)
-          : readClaudeSession(input.cwd) ?? readCodexSession();
+          : // 指定了项目目录就不拿别的项目/来源的会话顶替；留空才全局找最新的。
+            input.cwd
+            ? readClaudeSession(input.cwd)
+            : readClaudeSession() ?? readCodexSession();
     if (!session) notes.push('没有找到可读的 agent 会话记录（Claude Code 或 Codex）。');
   }
   // 会话来自哪个项目，就以哪个项目为「项目事实」；调用方显式指定的 cwd 优先。
   const projectCwd = input.cwd || session?.projectCwd || process.cwd();
+  if (!input.cwd && !session?.projectCwd) {
+    notes.push(`无法从会话确定项目目录，项目事实按服务端目录 ${process.cwd()} 读取。`);
+  }
   const project = input.project ?? readProject(projectCwd);
   if (input.cwd && session?.projectCwd && session.projectCwd !== input.cwd) {
     notes.push(`会话来自 ${session.projectCwd}；项目事实按你指定的 ${input.cwd} 读取。`);

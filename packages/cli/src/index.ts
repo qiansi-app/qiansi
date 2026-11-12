@@ -179,6 +179,8 @@ async function commandStart(): Promise<number> {
     cwd: repoRoot(),
     detached: true,
     stdio: 'ignore',
+    // detached 的控制台子进程会自己开一个窗口；stdio:'ignore' 不隐藏它。
+    windowsHide: true,
     env: { ...process.env, QIANSI_DETACHED: '1' },
   });
   child.unref();
