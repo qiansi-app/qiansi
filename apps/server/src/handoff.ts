@@ -149,6 +149,8 @@ export function isRealUserText(entry: Record<string, unknown>, text: string): bo
   if (stripped.length < 8) return false;
   // 系统注入与命令回显不是用户的话
   if (/^<[^>]+>|^Caveat:/.test(stripped)) return false;
+  // 整行都是方括号标记的也是系统噪音：[Request interrupted by user …] 等
+  if (/^\[[^\]]+\]$/.test(stripped)) return false;
   if (stripped.startsWith('[command-name]')) return false;
   // 纯 ASCII 短词（Tool loaded. / (no content)）不是需求
   if (!/[一-龥]|[a-zA-Z]{4,}/.test(stripped)) return false;
@@ -180,7 +182,7 @@ function collectRecentAsks(file: string, wantAsks = 4, maxBytes = 256 * 1024 * 1
           ? content
           : "";
       const stripped = text.trim();
-      if (stripped.length < 8 || stripped.startsWith("<")) return null;
+      if (stripped.length < 8 || stripped.startsWith("<") || /^\[[^\]]+\]$/.test(stripped)) return null;
       return stripped;
     } catch {
       return null;

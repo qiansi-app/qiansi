@@ -703,14 +703,19 @@ const takeoverWatcher = new TakeoverWatcher({
       error?: string;
       archived?: boolean;
       runId?: string | null;
+      queued?: boolean;
       runError?: string | null;
       workspaceId?: string;
     } | null;
     if (!response.ok || !body?.ok) {
       throw new Error(body?.error ?? `handoff HTTP ${response.status}`);
     }
-    if (body.archived || !body.runId) {
-      throw new Error(body.runError ?? '自动编排没有产出可运行的节点');
+    if (body.archived) {
+      throw new Error('自动编排没有产出可运行的节点');
+    }
+    // 排队也算接管成功：画布已建好，等当前运行结束自动开跑。
+    if (!body.runId && !body.queued) {
+      throw new Error(body.runError ?? '运行没有启动');
     }
     audit.record({
       actor: 'takeover',
@@ -2343,6 +2348,76 @@ app.post('/api/delegate-task', async (context) => {
  * 接续外部 agent 的会话：读最近一段真实对话 + 项目事实，合成资料包挂到画布上，
  * 可选自动编排（让主控生成工作流）与立即运行。读取全部在本地完成，注入前脱敏。
  */
+/**
+ * 排队运行：托管建好了画布却撞上「已有运行」时，不再报错放弃，
+ * 而是排进队列，当前运行一结束就自动开跑。这是「建了画布却没动静」的根因。
+ */
+interface QueuedRun {
+  workspaceId: string;
+  goal: string;
+  queuedAt: number;
+}
+const runQueue: QueuedRun[] = [];
+let drainingQueue = false;
+
+function queueRun(workspaceId: string, goal: string): boolean {
+  if (runQueue.some((item) => item.workspaceId === workspaceId)) return false;
+  if (runQueue.length >= 10) return false;
+  runQueue.push({ workspaceId, goal, queuedAt: Date.now() });
+  return true;
+}
+
+function serverOrigin(): string {
+  return `http://127.0.0.1:${boundPort ?? Number(process.env.QIANSI_PORT ?? 8787)}`;
+}
+
+async function drainRunQueue(): Promise<void> {
+  if (drainingQueue) return;
+  drainingQueue = true;
+  try {
+    while (runQueue.length > 0) {
+      const next = runQueue[0]!;
+      const response = await fetch(`${serverOrigin()}/api/commands`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-qiansi-token': token,
+          'x-qiansi-workspace': next.workspaceId,
+        },
+        body: JSON.stringify({
+          commandId: `queued-run-${randomUUID()}`,
+          type: 'run.start',
+          payload: { mode: 'live', goal: next.goal },
+        }),
+      });
+      const body = (await response.json().catch(() => null)) as {
+        runId?: string;
+        error?: string;
+      } | null;
+      if (response.ok && body?.runId) {
+        runQueue.shift();
+        audit.record({
+          actor: 'server',
+          action: 'run.queued.start',
+          target: next.workspaceId,
+          detail: { runId: body.runId, goal: next.goal.slice(0, 120) },
+        });
+        continue;
+      }
+      if (body?.error === 'run_in_progress') return; // 等下一次 run.finished 再来
+      runQueue.shift();
+      audit.record({
+        actor: 'server',
+        action: 'run.queued.failed',
+        target: next.workspaceId,
+        detail: { error: body?.error ?? `HTTP ${response.status}` },
+      });
+    }
+  } finally {
+    drainingQueue = false;
+  }
+}
+
 app.post('/api/handoff', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
   // 留空 = 接管「最近真正活跃」的那个 agent 会话（全局最新），
@@ -2646,6 +2721,8 @@ app.post('/api/handoff', async (context) => {
 
   let runId: string | null = null;
   let runError = '';
+  let runQueued = false;
+  const runGoal = (taskOverride || pack.session?.userAsks.at(-1) || '接续 agent 会话继续工作').slice(0, 500);
   if (autoRun && arranged.nodes > 0) {
     try {
       const origin = new URL(context.req.url).origin;
@@ -2656,10 +2733,7 @@ app.post('/api/handoff', async (context) => {
         body: JSON.stringify({
           commandId: `handoff-run-${randomUUID()}`,
           type: 'run.start',
-          payload: {
-            mode: 'live',
-            goal: (taskOverride || pack.session?.userAsks.at(-1) || '接续 agent 会话继续工作').slice(0, 500),
-          },
+          payload: { mode: 'live', goal: runGoal },
         }),
       });
       const startedBody = (await started.json().catch(() => null)) as {
@@ -2671,6 +2745,15 @@ app.post('/api/handoff', async (context) => {
       } | null;
       if (started.ok && startedBody?.runId) {
         runId = startedBody.runId;
+      } else if (startedBody?.error === 'run_in_progress') {
+        // 上一轮还没跑完：排队，等它结束后自动开跑，而不是把画布晾在一边。
+        runQueued = queueRun(handoffWsId, runGoal);
+        if (runQueued) {
+          pack.notes.push('已有运行在跑：本画布已排队，当前运行结束后自动开跑。');
+        } else {
+          runError = 'run_in_progress · 排队已满（10 条），请稍后再试';
+          pack.notes.push(`运行没有启动：${runError}`);
+        }
       } else {
         // 「勾了立即运行却没跑」必须说清楚原因（互斥、策略、缺凭证、不可运行）。
         runError = startedBody?.error ?? `HTTP ${started.status}`;
@@ -2714,6 +2797,7 @@ app.post('/api/handoff', async (context) => {
     pack: { bytes: pack.bytes, fileId, name: fileName },
     arranged,
     runId,
+    queued: runQueued,
     runError: runError || null,
     notes: pack.notes,
   });
@@ -4324,6 +4408,8 @@ app.post('/api/commands', async (context) => {
       if (event.type !== 'run.finished') return;
       runAborts.delete(runId);
       if (activeLiveRunId === runId) activeLiveRunId = null;
+      // 当前运行结束了：把排队中的托管画布拉起来跑。
+      void drainRunQueue();
       audit.record({
         actor: 'server',
         action: 'run.gates',

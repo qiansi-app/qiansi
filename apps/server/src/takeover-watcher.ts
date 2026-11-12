@@ -45,6 +45,8 @@ const TRIVIAL = /^(继续|好的?|可以|行|嗯+|ok|okay|yes|好滴|收到)[。
 function isActionable(text: string): boolean {
   const trimmed = text.trim();
   if (trimmed.length < 6) return false;
+  // 整行都是方括号的行（如 [Request interrupted by user …]）是转录噪音，不是需求。
+  if (/^\[[^\]]+\]$/.test(trimmed)) return false;
   return !TRIVIAL.test(trimmed);
 }
 
