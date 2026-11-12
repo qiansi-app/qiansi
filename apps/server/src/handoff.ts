@@ -18,6 +18,8 @@ export interface HandoffSession {
   source: HandoffSource;
   file: string;
   sessionId: string;
+  /** 会话所属项目目录（从会话记录里的 cwd 读出来）。 */
+  projectCwd?: string;
   updatedAt: number;
   messageCount: number;
   userAsks: string[];
@@ -208,9 +210,17 @@ const LINE_BREAK = String.fromCharCode(10);
 const NEWLINE = String.fromCharCode(10);
 const USER_ROLE_MARK = String.fromCharCode(34) + "role" + String.fromCharCode(34) + ":" + String.fromCharCode(34) + "user" + String.fromCharCode(34);
 
-export function readClaudeSession(cwd: string): HandoffSession | null {
-  const projectDir = join(homedir(), '.claude', 'projects', encodeProjectDir(cwd));
-  const file = newestJsonl(projectDir) ?? newestJsonl(join(homedir(), '.claude', 'projects'));
+/**
+ * 读最近一段 Claude Code 会话。
+ *
+ * 指定 cwd 时优先读该项目的会话；没有指定时读**全局最新**的那个——
+ * 用户刚在别的项目里和 agent 说话，服务端的 cwd 却还停在启动目录，
+ * 按 cwd 找会接管到几周前的旧会话（这正是「接了但没接上」的原因）。
+ */
+export function readClaudeSession(cwd?: string): HandoffSession | null {
+  const projectsRoot = join(homedir(), '.claude', 'projects');
+  const preferred = cwd ? newestJsonl(join(projectsRoot, encodeProjectDir(cwd))) : null;
+  const file = preferred ?? newestJsonl(projectsRoot);
   if (!file) return null;
 
   let raw = '';
@@ -227,6 +237,7 @@ export function readClaudeSession(cwd: string): HandoffSession | null {
   let messageCount = 0;
   let hasErrors = false;
   let sessionId = '';
+  let projectCwd = '';
 
   for (const line of raw.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -237,6 +248,7 @@ export function readClaudeSession(cwd: string): HandoffSession | null {
       continue;
     }
     if (typeof entry.sessionId === 'string' && entry.sessionId) sessionId = entry.sessionId;
+    if (typeof entry.cwd === 'string' && entry.cwd) projectCwd = entry.cwd;
     const message = entry.message as { role?: string; content?: unknown } | undefined;
     const role = message?.role ?? (typeof entry.type === 'string' ? entry.type : '');
     if (!message && !entry.type) continue;
@@ -255,6 +267,7 @@ export function readClaudeSession(cwd: string): HandoffSession | null {
     source: 'claude-code',
     file,
     sessionId: sessionId || file.split(/[\\/]/).pop()?.replace('.jsonl', '') || '',
+    projectCwd: projectCwd || undefined,
     updatedAt: info.mtimeMs,
     messageCount,
     userAsks: userAsks.slice(-6),
@@ -316,7 +329,9 @@ export function readCodexSession(): HandoffSession | null {
 
 function git(cwd: string, args: string[]): string {
   try {
-    return execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 4000 }).trim();
+    // 接续可能从 VS Code 扩展宿主（无控制台）里发起：不隐藏的话每个 git
+    // 调用都会在 Windows 上闪一个黑色控制台窗口。
+    return execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 4000, windowsHide: true }).trim();
   } catch {
     return '';
   }
@@ -378,7 +393,12 @@ export function buildHandoffPack(input: {
           : readClaudeSession(input.cwd) ?? readCodexSession();
     if (!session) notes.push('没有找到可读的 agent 会话记录（Claude Code 或 Codex）。');
   }
-  const project = input.project ?? readProject(input.cwd);
+  // 会话来自哪个项目，就以哪个项目为「项目事实」；调用方显式指定的 cwd 优先。
+  const projectCwd = input.cwd || session?.projectCwd || process.cwd();
+  const project = input.project ?? readProject(projectCwd);
+  if (input.cwd && session?.projectCwd && session.projectCwd !== input.cwd) {
+    notes.push(`会话来自 ${session.projectCwd}；项目事实按你指定的 ${input.cwd} 读取。`);
+  }
 
   const ageMinutes = session ? Math.round((Date.now() - session.updatedAt) / 60000) : null;
 

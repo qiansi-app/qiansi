@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link2, Loader2, X } from 'lucide-react';
 import { switchWorkspace } from '../workspace';
 
@@ -47,12 +47,24 @@ export function HandoffModal({ open, onClose, defaultSource }: HandoffModalProps
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<HandoffResult | null>(null);
   const [error, setError] = useState('');
+  /** 运行已启动时自动跳到新画布：接管 = 直接看着它跑，而不是留在旧画布。 */
+  const jumped = useRef(false);
 
   useEffect(() => {
     if (!open) return;
     setResult(null);
     setError('');
+    jumped.current = false;
   }, [open]);
+
+  useEffect(() => {
+    if (!result?.runId || !result.workspaceId || jumped.current) return;
+    jumped.current = true;
+    const timer = window.setTimeout(() => {
+      switchWorkspace(result.workspaceId as string);
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [result]);
 
   if (!open) return null;
 
@@ -189,7 +201,11 @@ export function HandoffModal({ open, onClose, defaultSource }: HandoffModalProps
                 )}
               </div>
             )}
-            {result.runId && <div className="handoff-meta">已启动运行：{result.runId.slice(0, 8)}</div>}
+            {result.runId && (
+              <div className="handoff-meta">
+                已启动运行：{result.runId.slice(0, 8)} · 正在跳转到新画布看进度…
+              </div>
+            )}
             {(result.notes ?? []).map((note) => (
               <div key={note} className="handoff-meta warn">
                 {note}

@@ -2199,7 +2199,9 @@ app.post('/api/delegate-task', async (context) => {
  */
 app.post('/api/handoff', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
-  const cwd = String(body?.cwd ?? process.cwd());
+  // 留空 = 接管「最近真正活跃」的那个 agent 会话（全局最新），
+  // 而不是服务端启动目录下的旧会话；项目事实跟会话的 cwd 走。
+  const cwd = String(body?.cwd ?? '').trim();
   const source =
     body?.source === 'codex' || body?.source === 'claude-code' ? body.source : 'auto';
   const autoArrange = body?.autoArrange !== false;
@@ -2656,7 +2658,8 @@ ${fileContext ? `\n用户上传的文件（名称与内容预览）：\n${fileCo
 10. effort 按任务复杂度选择；
 11. 分工不要重叠：两个节点不能产出同一份交付物；也不要留空档——总目标里明确要求的每一块，都要有节点负责；
 12. 最终交付节点（把成果交给用户的那一步）的 acceptance 里要有一条形态标准：交付物形态与用户要求的形态一致；
-13. 目标保真是红线：允许提升目标层级（对结果负责），不允许更换交付物形态。`,
+13. 目标保真是红线：允许提升目标层级（对结果负责），不允许更换交付物形态；
+14. 每个工作节点都是纯文本模型：能读文件预览与上游产出，能联网搜索，但**不能调用 MCP 工具、终端或读写本地文件**。目标里要求这类操作时（如「调用 mcp__…」「修改仓库代码」「运行测试」），不要把动作原样写成工单；把能产出的部分落成文本交付（方案、补丁全文、命令清单），并把需要工具执行的步骤单列成一份「待执行清单」作为交付物之一，验收针对文本产物判定。`,
       },
     ];
 
