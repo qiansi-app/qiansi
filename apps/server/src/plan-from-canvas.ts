@@ -178,6 +178,7 @@ export function buildPlanFromCanvas(
       effort: asEffort(data.effort),
       acceptanceCriteria,
       autonomy: member?.autonomy ?? asAutonomy(data.autonomy),
+      toolAllow: member?.tools,
       style: isConversationStyle(data.style)
         ? data.style
         : suggestStyle(`${String(data.name ?? "")} ${String(data.role ?? "")}`),

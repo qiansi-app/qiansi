@@ -142,6 +142,8 @@ export interface TeamMember {
   job: string;
   model?: string;
   autonomy: TeamAutonomy;
+  /** 允许使用的工具白名单；不填表示沿用档位限制。 */
+  tools?: string[];
   memory: string;
   createdAt?: number;
 }

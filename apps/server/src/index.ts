@@ -58,6 +58,7 @@ import {
   resolveModelRoute,
   routerChoice,
   type KeySlot,
+  type ModelFamily,
 } from './model-catalog.js';
 import { PolicyStore, scopeForRequest, type Mandate } from './policy.js';
 import { checkWorkspaceName, WorkspaceStore } from './workspaces.js';
@@ -78,6 +79,7 @@ import { substituteExhausted } from './quota-plan.js';
 import { orderByStrategy, performanceOf } from './routing.js';
 import { buildHandoffPack } from './handoff.js';
 import { buildRunDiagnosis } from './run-diagnosis.js';
+import { runStreamingMeeting, type MeetingSpeaker } from './team-meeting.js';
 import {
   AUTONOMY_LABEL,
   TEAM_MEMBER_CAP,
@@ -3524,6 +3526,113 @@ app.put('/api/team', async (context) => {
   });
 });
 
+/**
+ * 团队会议：流式返回每个成员的「开始 / 发言完成 / 失败」，界面据此显示
+ * 谁在说、谁已说完。成员可以提出工具申请，由用户决定是否批准。
+ */
+app.post('/api/team/meeting', async (context) => {
+  const workspaceId = workspaceOf(context);
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const topic = String(body?.topic ?? '').trim().slice(0, 1200);
+  if (!topic) return context.json({ ok: false, error: 'topic_required' }, 400);
+  const doc = teamFor(workspaceId);
+  const requestedIds = Array.isArray(body?.memberIds)
+    ? new Set(body.memberIds.map((id: unknown) => String(id)))
+    : null;
+  const chosen = doc.members
+    .filter((member) => (requestedIds ? requestedIds.has(member.id) : true))
+    .slice(0, 5);
+
+  interface ResolvedSpeaker {
+    speaker: MeetingSpeaker;
+    family: ModelFamily;
+    model: string;
+  }
+  const resolved: ResolvedSpeaker[] = [];
+  const unavailable: string[] = [];
+  for (const member of chosen) {
+    if (!member.name.trim() || !member.job.trim()) continue;
+    const candidates = member.model
+      ? [member.model]
+      : modelFamilies().map((family) => preferredModel(family.models)).filter(Boolean);
+    let picked: ResolvedSpeaker | null = null;
+    for (const candidate of candidates) {
+      const family = familyOf(candidate);
+      if (!family) continue;
+      if (readDisabledSlots().has(family.slot)) continue;
+      const credential = await slotCredential(family.slot);
+      if (!credential) continue;
+      picked = {
+        speaker: { id: member.id, name: member.name, job: member.job, model: candidate },
+        family,
+        model: candidate,
+      };
+      break;
+    }
+    if (picked) resolved.push(picked);
+    else unavailable.push(member.name);
+  }
+  if (resolved.length < 2) {
+    return context.json(
+      {
+        ok: false,
+        error: 'not_enough_available_members',
+        unavailable,
+        hint:
+          unavailable.length > 0
+            ? `这些成员没有可用模型：${unavailable.join('、')}。给成员指定可用模型，或在密钥里启用对应厂商。`
+            : '至少需要两个有名字和职责的成员才能开会。',
+      },
+      400
+    );
+  }
+
+  const speakers = resolved.map((item) => item.speaker);
+  const byMember = new Map(resolved.map((item) => [item.speaker.id, item]));
+  let proposalCount = 0;
+
+  return streamSSE(context, async (stream) => {
+    await runStreamingMeeting({
+      topic,
+      styleId: 'peer',
+      speakers,
+      emit: async (event) => {
+        if (event.type === 'meeting.finished') proposalCount = event.proposals.length;
+        await stream.writeSSE({ event: event.type, data: JSON.stringify(event) });
+      },
+      speak: async (speaker, system, user) => {
+        const target = byMember.get(speaker.id);
+        if (!target) throw new Error('speaker_not_resolved');
+        const result = await completeChat(
+          vault,
+          {
+            connectionId: target.family.vaultRef,
+            baseUrl: target.family.baseUrl,
+            protocol: target.family.protocol,
+            model: target.model,
+          },
+          [
+            { role: 'system', content: system },
+            { role: 'user', content: user },
+          ],
+          { maxTokens: 1600, timeoutMs: 60000 }
+        );
+        return result.text;
+      },
+    });
+    audit.record({
+      actor: actorOf(context),
+      action: 'team.meeting',
+      target: workspaceId,
+      detail: {
+        topic: topic.slice(0, 120),
+        members: speakers.map((speaker) => speaker.name),
+        proposals: proposalCount,
+      },
+    });
+  });
+});
+
 app.post('/api/workspaces', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
   const raw = typeof body?.name === 'string' ? body.name : '';
@@ -4597,11 +4706,11 @@ app.post('/api/commands', async (context) => {
               }),
           });
 
-    // 团队自治档位：调查/草稿只能用只读工具。工具列表和实际执行两层都收紧，
-    // 模型即使硬要写文件也会被拒绝，而不是靠提示词自觉。
+    // 团队自治档位与成员能力：只读档位只能读，成员还可以再关掉某些工具。
+    // 工具列表和实际执行两层都收紧，模型即使硬要调用也会被拒绝。
     const toolboxFor = nodeToolbox
-      ? (task: { autonomy?: 'investigate' | 'draft' | 'auto' | 'full' }) =>
-          restrictToolbox(nodeToolbox, task.autonomy ?? 'auto')
+      ? (task: { autonomy?: 'investigate' | 'draft' | 'auto' | 'full'; toolAllow?: string[] }) =>
+          restrictToolbox(nodeToolbox, task.autonomy ?? 'auto', task.toolAllow)
       : undefined;
 
     const orchestrator = new Orchestrator({

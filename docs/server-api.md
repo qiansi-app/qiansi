@@ -351,7 +351,7 @@ OpenAI 兼容调用，支持 `stream: true`（SSE）与非流式。模型由服�
   "ok": true,
   "team": {
     "playbook": "交付必须附证据……",
-    "members": [{ "id": "...", "name": "小核", "job": "核实事实与来源", "autonomy": "investigate", "model": "deepseek-flash", "memory": "只信官方文档" }],
+    "members": [{ "id": "...", "name": "小核", "job": "核实事实与来源", "autonomy": "investigate", "tools": ["read_file", "web_search"], "model": "deepseek-flash", "memory": "只信官方文档" }],
     "warnings": ["团队手册是空的……"],
     "cap": 12
   }
@@ -359,13 +359,29 @@ OpenAI 兼容调用，支持 `stream: true`（SSE）与非流式。模型由服�
 ```
 
 `PUT` 请求 `{ "members": [...], "playbook": "..." }`。校验规则：称呼唯一、职责非空、
-职责不能完全相同（包含关系只提醒）、成员上限 12（超过 8 提醒）。失败返回 400 与
-`error` / `hint`；成功返回规范化后的团队。
+职责不能完全相同（包含关系只提醒）、成员上限 12（超过 8 提醒）；`tools` 只接受已知工具名，
+未知项会被丢弃，缺省表示沿用档位。失败返回 400 与 `error` / `hint`；成功返回规范化后的团队。
 
 名册的用途：自动编排优先按职责把任务分给成员（节点带 `memberId` / `memberName`），
-运行时把成员身份、自治档位（调查/草稿=只读工具，执行/全权=全部工具）和记忆注入任务提示。
+运行时把成员身份、自治档位（调查/草稿=只读工具，执行/全权=全部工具）、
+能力白名单（`tools`，与档位同时生效）和记忆注入任务提示。
 `/api/workflow` 接受可选的 `team`（`[{id,name,job,model}]`）与 `playbook`；
-`/api/discuss` 的参与者接受可选的 `role`，用于团队会议。详见 [team.md](team.md)。
+`/api/discuss` 的参与者接受可选的 `role`（通用讨论）。
+
+### `POST /api/team/meeting`
+
+团队会议，返回 **SSE 流**。请求 `{ "topic": "...", "memberIds"?: ["..."] }`，
+最多 5 名成员；成员模型从密钥目录解析。事件：
+
+- `meeting.started`：`{ topic, style, members: [{ id, name, job, model }] }`
+- `member.started`：`{ memberId, name, at }`
+- `member.finished`：`{ memberId, name, model, content, ms, proposals }`
+- `member.failed`：`{ memberId, name, error, ms }`（单个成员失败不中断会议）
+- `meeting.finished`：`{ proposals, messages }`
+
+成员可以在发言末尾用 `TOOL_REQUEST: <工具名>[, <工具名>] | <理由>` 申请工具；
+服务端解析成 `proposals`（`memberId` / `memberName` / `tool` / `toolLabel` / `reason`），
+由用户决定是否通过 `PUT /api/team` 写入该成员的 `tools`。详见 [team.md](team.md)。
 
 ### `POST /api/runs/:id/rerun`
 

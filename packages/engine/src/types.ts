@@ -252,6 +252,8 @@ export interface Subtask {
   style?: import("./styles.js").ConversationStyle;
   /** 团队自治档位：调查/草稿只能用只读工具，执行/全权才允许改动。 */
   autonomy?: TaskAutonomy;
+  /** 团队成员被允许的工具白名单；缺省表示沿用档位限制。 */
+  toolAllow?: string[];
   machineCheckable: boolean;
   dependsOn: string[];
   status: TaskStatus;

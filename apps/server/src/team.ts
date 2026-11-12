@@ -40,10 +40,31 @@ export interface TeamMember {
   /** 默认模型（可空：按节点或画布决定）。 */
   model?: string;
   autonomy: Autonomy;
+  /** 这个成员被允许使用的工具；不填表示不额外限制（沿用档位）。 */
+  tools?: string[];
   /** 这个成员的长期记忆：偏好、约定、踩过的坑。 */
   memory: string;
   createdAt: number;
 }
+
+/** 运行时工具目录：给界面做能力开关，也用来校验成员申请。 */
+export const TEAM_TOOLS: Array<{ name: string; label: string; group: 'read' | 'write' | 'shell' | 'canvas' | 'web'; readOnly: boolean }> = [
+  { name: 'read_file', label: '读文件', group: 'read', readOnly: true },
+  { name: 'list_dir', label: '看目录', group: 'read', readOnly: true },
+  { name: 'write_file', label: '写文件', group: 'write', readOnly: false },
+  { name: 'run_command', label: '运行命令', group: 'shell', readOnly: false },
+  { name: 'describe_canvas', label: '看画布', group: 'canvas', readOnly: true },
+  { name: 'get_canvas', label: '读画布内容', group: 'canvas', readOnly: true },
+  { name: 'list_workspaces', label: '列画布', group: 'canvas', readOnly: true },
+  { name: 'list_runs', label: '看运行记录', group: 'canvas', readOnly: true },
+  { name: 'get_run_result', label: '读运行结果', group: 'canvas', readOnly: true },
+  { name: 'web_search', label: '联网搜索', group: 'web', readOnly: true },
+];
+
+export const TEAM_TOOL_NAMES = new Set(TEAM_TOOLS.map((tool) => tool.name));
+export const TEAM_TOOL_LABELS: Record<string, string> = Object.fromEntries(
+  TEAM_TOOLS.map((tool) => [tool.name, tool.label])
+);
 
 export interface TeamDoc {
   version: 1;
@@ -159,12 +180,17 @@ export function normalizeTeamInput(input: unknown): TeamValidation {
       warnings.push(`「${name}」与「${overlapping.name}」的职责描述有重叠，确认他们真的各管一段。`);
     }
     jobs.push({ name, normalized: normalizedJob });
+    const rawTools = Array.isArray(member.tools) ? member.tools : null;
+    const tools = rawTools
+      ? [...new Set(rawTools.map((tool) => String(tool)).filter((tool) => TEAM_TOOL_NAMES.has(tool)))]
+      : undefined;
     members.push({
       id: String(member.id ?? '').trim() || randomUUID(),
       name,
       job,
       model: String(member.model ?? '').trim().slice(0, MODEL_MAX) || undefined,
       autonomy: asAutonomy(member.autonomy),
+      tools,
       memory: String(member.memory ?? '').slice(0, MEMORY_MAX),
       createdAt: Number(member.createdAt ?? Date.now()) || Date.now(),
     });
@@ -197,12 +223,18 @@ export function teamWarnings(doc: TeamDoc): string[] {
   return warnings;
 }
 
-/** 注入任务提示的成员身份块：名字、唯一职责、档位、记忆。 */
+/** 注入任务提示的成员身份块：名字、唯一职责、档位、可用工具、记忆。 */
 export function memberPrompt(member: TeamMember): string {
+  const tools = member.tools
+    ? member.tools.length
+      ? member.tools.map((tool) => TEAM_TOOL_LABELS[tool] ?? tool).join('、')
+      : '（没有可用工具，只能纯文本交付）'
+    : '';
   return [
     `团队成员：${member.name}`,
     `唯一职责：${member.job}`,
     `自治档位：${AUTONOMY_LABEL[member.autonomy]}——${AUTONOMY_DESCRIPTION[member.autonomy]}`,
+    tools ? `可用工具：${tools}。缺少工具时在团队会议里申请，不要假装用过。` : '',
     member.memory.trim() ? `你的团队记忆（以前的经验与约定）：\n${member.memory.trim().slice(0, 1500)}` : '',
   ]
     .filter(Boolean)
@@ -222,22 +254,34 @@ export const READ_ONLY_TOOL_NAMES = new Set([
 ]);
 
 /**
- * 按自治档位收紧工具箱：调查/草稿只拿到只读工具，并且执行层再拒绝一次——
- * 模型即使硬要写文件，也不会真的动到磁盘。提示词约束和代码约束各一层。
+ * 按自治档位与成员能力收紧工具箱：调查/草稿只拿到只读工具，成员还可以再关掉
+ * 某些能力；执行层再拒一次——模型即使硬要调用，也不会真的执行。
  */
 export function restrictToolbox(
   toolbox: ToolboxOptions | undefined,
-  autonomy: Autonomy
+  autonomy: Autonomy,
+  allowedTools?: string[]
 ): ToolboxOptions | undefined {
   if (!toolbox) return undefined;
-  if (autonomy === 'auto' || autonomy === 'full') return toolbox;
+  const autonomyAllows = (name: string) =>
+    autonomy === 'auto' || autonomy === 'full' ? true : READ_ONLY_TOOL_NAMES.has(name);
+  const memberAllows = (name: string) =>
+    allowedTools === undefined ? true : allowedTools.includes(name);
+  const allowed = toolbox.tools.filter(
+    (tool) => autonomyAllows(tool.name) && memberAllows(tool.name)
+  );
+  if (allowed.length === toolbox.tools.length) return toolbox;
   return {
     ...toolbox,
-    tools: toolbox.tools.filter((tool) => READ_ONLY_TOOL_NAMES.has(tool.name)),
+    tools: allowed,
     execute: async (call) => {
-      if (!READ_ONLY_TOOL_NAMES.has(call.name)) {
+      const autonomyBlocked = !autonomyAllows(call.name);
+      const capabilityBlocked = !memberAllows(call.name);
+      if (autonomyBlocked || capabilityBlocked) {
         return {
-          content: `档位「${AUTONOMY_LABEL[autonomy]}」不允许调用 ${call.name}：请给出结论或修改提案，不要直接改动。`,
+          content: autonomyBlocked
+            ? `档位「${AUTONOMY_LABEL[autonomy]}」不允许调用 ${call.name}：请给出结论或修改提案，不要直接改动。`
+            : `成员没有开通「${TEAM_TOOL_LABELS[call.name] ?? call.name}」能力：请在团队会议里提出工具申请，由用户批准。`,
           isError: true,
         };
       }
