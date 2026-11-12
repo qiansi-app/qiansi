@@ -47,6 +47,78 @@ export interface RunFailureInfo {
   retryScheduled: boolean;
 }
 
+/** 失败运行的环境诊断：工作目录、模型 Key、可用的重跑方式。 */
+export interface RunDiagnosisModel {
+  nodeId: string;
+  name: string;
+  model: string;
+  slot: string;
+  disabled: boolean;
+  ready: boolean;
+  note: string;
+}
+
+export interface RunDiagnosis {
+  ok: boolean;
+  runId: string;
+  workspaceId: string;
+  status: string;
+  goal: string;
+  hasPlan: boolean;
+  failure: RunFailureInfo | null;
+  attempt: number;
+  maxAttempts: number;
+  tasks: Array<{
+    id: string;
+    title: string;
+    nodeId: string;
+    status: 'done' | 'failed' | 'pending';
+    error?: string;
+  }>;
+  environment: {
+    rootDir: {
+      path: string;
+      exists: boolean;
+      writable: boolean;
+      source: 'workspace' | 'server';
+    } | null;
+    models: RunDiagnosisModel[];
+    missing: string[];
+    hints: string[];
+  };
+  actions: {
+    resume: { available: boolean; reason?: string; pending: number };
+    fresh: { available: boolean; reason?: string };
+    userView: { available: boolean; reason?: string };
+  };
+  activeRunId: string | null;
+}
+
+/** 用户视角验收：真实跑起来、截图、逐项检查。 */
+export interface UserViewCheck {
+  name: string;
+  label: string;
+  ok: boolean;
+  soft?: boolean;
+  detail?: string;
+}
+
+export interface UserViewReport {
+  id: string;
+  at: number;
+  verdict: 'pass' | 'fail' | 'blocked';
+  ok: boolean;
+  summary: string;
+  kind: string;
+  url: string;
+  rootDir: string;
+  durationMs: number;
+  checks: UserViewCheck[];
+  shots: Array<{ label: string; file: string; bytes: number; width: number; height: number }>;
+  pageText?: string;
+  error?: string;
+}
+
 export interface ExternalCallEvent {
   type: 'external.call';
   runId: string;

@@ -114,10 +114,11 @@ async function judgeOnce(
 /** Catches the failures that need no model at all. */
 function structuralCheck(output: string, evidence?: ToolEvidence): GatedResult | null {
   const text = output.trim();
-  // 真的调用过工具（写文件、跑命令）时，短答复可能是「已完成」，交给评委判断；
-  // 纯文本任务仍然按长度拦空答案。
+  // 真的调用过工具（写文件、跑命令）时，短答复可能是「已完成」，交给评委判断。
+  // 纯文本任务只拦「几乎没有内容」的占位答案：一句话交付物是合法的，
+  // 是否满足验收标准由后面的评委判断，不再用字数代替判断。
   const didWork = (evidence?.tools ?? []).some((tool) => tool.ok);
-  if (text.length < 20 && !didWork) {
+  if (text.length < 8 && !didWork) {
     return {
       pass: false,
       score: 0,

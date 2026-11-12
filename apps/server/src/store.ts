@@ -79,6 +79,29 @@ export class RunStore {
     return join(this.runsDir, `${runId}.json`);
   }
 
+  /** 某次运行有没有已经起了续跑子运行：用来判断「已排队重试」是不是旧消息。 */
+  hasResumedChild(runId: string): boolean {
+    for (const record of this.runs.values()) {
+      if (record.resumedFrom === runId) return true;
+    }
+    try {
+      for (const file of readdirSync(this.runsDir)) {
+        if (!file.endsWith('.json')) continue;
+        try {
+          const data = JSON.parse(readFileSync(join(this.runsDir, file), 'utf8')) as {
+            snapshot?: { resumedFrom?: string };
+          };
+          if (data.snapshot?.resumedFrom === runId) return true;
+        } catch {
+          // 单个坏文件不影响判断
+        }
+      }
+    } catch {
+      // 运行目录读不了：当作没有子运行
+    }
+    return false;
+  }
+
   private readPersisted(runId: string): { snapshot: any; events: RunEnvelope[] } | undefined {
     const file = this.fileFor(runId);
     if (!existsSync(file)) return undefined;

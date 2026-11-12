@@ -134,6 +134,17 @@ function toolNames(content: unknown): string[] {
 }
 
 /**
+ * 系统注入到 user 角色的文本——上下文压缩摘要、system-reminder、粘贴占位——
+ * 不是用户提的需求。把它们交给编排器会白跑一整轮，还会暴露无关上下文。
+ */
+const INJECTED_TEXT =
+  /^This session is being continued\b|^以下(是|为).{0,20}(摘要|总结)|^<system-reminder>|^<pasted_content>/i;
+
+export function isInjectedText(text: string): boolean {
+  return INJECTED_TEXT.test(text.trim());
+}
+
+/**
  * 真用户消息的判定：Claude Code 的 jsonl 里 tool_result 也挂着 role=user，
  * 不滤掉的话，「Tool loaded.」这类工具返回会被当成用户需求交给编排器。
  */
@@ -147,6 +158,8 @@ export function isRealUserText(entry: Record<string, unknown>, text: string): bo
   }
   const stripped = text.trim();
   if (stripped.length < 8) return false;
+  // 压缩摘要 / 系统注入不是用户的话
+  if (isInjectedText(stripped)) return false;
   // 系统注入与命令回显不是用户的话
   if (/^<[^>]+>|^Caveat:/.test(stripped)) return false;
   // 整行都是方括号标记的也是系统噪音：[Request interrupted by user …] 等
@@ -182,7 +195,14 @@ function collectRecentAsks(file: string, wantAsks = 4, maxBytes = 256 * 1024 * 1
           ? content
           : "";
       const stripped = text.trim();
-      if (stripped.length < 8 || stripped.startsWith("<") || /^\[[^\]]+\]$/.test(stripped)) return null;
+      if (
+        stripped.length < 8 ||
+        stripped.startsWith("<") ||
+        /^\[[^\]]+\]$/.test(stripped) ||
+        INJECTED_TEXT.test(stripped)
+      ) {
+        return null;
+      }
       return stripped;
     } catch {
       return null;

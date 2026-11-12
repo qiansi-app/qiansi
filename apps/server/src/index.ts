@@ -77,6 +77,15 @@ import { QuotaStore } from './quota.js';
 import { substituteExhausted } from './quota-plan.js';
 import { orderByStrategy, performanceOf } from './routing.js';
 import { buildHandoffPack } from './handoff.js';
+import { buildRunDiagnosis } from './run-diagnosis.js';
+import {
+  detectProject,
+  latestUserView,
+  readUserView,
+  runUserView,
+  userViewShotFile,
+  type UserViewReport,
+} from './user-view.js';
 import { part, summarize, type HealthPart, type StatusReport } from './status.js';
 import { RunStore, type RunEnvelope, type RunFailureSummary, type RunRecord } from './store.js';
 import { buildNodeToolbox } from './node-tools.js';
@@ -251,7 +260,10 @@ function publishFailureSummaryNode(workspaceId: string, summary: RunFailureSumma
     const id = 'run-failure-summary';
     const patch = {
       kind: 'artifact',
-      name: `失败总结 · 第 ${summary.attempt}/${summary.maxAttempts} 次`,
+      name:
+        summary.attempt <= summary.maxAttempts
+          ? `失败总结 · 第 ${summary.attempt}/${summary.maxAttempts} 次`
+          : `失败总结 · 第 ${summary.attempt} 次（自动上限 ${summary.maxAttempts}）`,
       role: summary.retryScheduled ? '已排队自动重试' : '未自动重试',
       provider: 'local',
       model: 'local',
@@ -2470,14 +2482,16 @@ interface QueuedRun {
   workspaceId: string;
   goal: string;
   queuedAt: number;
+  /** 排队的是「续跑」而不是新一轮：轮到时带上原运行 id。 */
+  resumeOf?: string;
 }
 const runQueue: QueuedRun[] = [];
 let drainingQueue = false;
 
-function queueRun(workspaceId: string, goal: string): boolean {
-  if (runQueue.some((item) => item.workspaceId === workspaceId)) return false;
+function queueRun(workspaceId: string, goal: string, resumeOf?: string): boolean {
+  if (runQueue.some((item) => item.workspaceId === workspaceId && item.resumeOf === resumeOf)) return false;
   if (runQueue.length >= 10) return false;
-  runQueue.push({ workspaceId, goal, queuedAt: Date.now() });
+  runQueue.push({ workspaceId, goal, queuedAt: Date.now(), resumeOf });
   return true;
 }
 
@@ -2501,7 +2515,12 @@ async function drainRunQueue(): Promise<void> {
         body: JSON.stringify({
           commandId: `queued-run-${randomUUID()}`,
           type: 'run.start',
-          payload: { mode: 'live', goal: next.goal, autoResume: true },
+          payload: {
+            mode: 'live',
+            goal: next.goal,
+            autoResume: true,
+            ...(next.resumeOf ? { resumeOf: next.resumeOf } : {}),
+          },
         }),
       });
       const body = (await response.json().catch(() => null)) as {
@@ -4607,6 +4626,10 @@ app.post('/api/commands', async (context) => {
       }
       // 失败总结也放回画布：用户不用翻运行记录就能看到为什么失败、还会不会重试。
       if (failureSummary) publishFailureSummaryNode(runWorkspace, failureSummary);
+      // 跑完之后 Qiansi 自己把项目打开看一眼：用户视角验收（可关）。
+      if (event.status === 'done' && body?.payload?.userView !== false) {
+        maybeAutoUserView(runWorkspace, runId);
+      }
       // 每个任务的完整产出落成 .md 文件：弹窗看过就没了，文件才是交付物。
       try {
         const saved = saveRunDeliverables({
@@ -4963,7 +4986,14 @@ app.get('/api/runs/active', (context) => {
         finishedAt: finished.finishedAt ?? Date.now(),
         tokens: finished.usage?.total ?? 0,
         tasks: fold(finished),
-        failureSummary: finished.failureSummary ?? null,
+        failureSummary: finished.failureSummary
+          ? {
+              ...finished.failureSummary,
+              retryScheduled:
+                Boolean(finished.failureSummary.retryScheduled) &&
+                !store.hasResumedChild(finished.runId),
+            }
+          : null,
         attempt: (finished.resumeDepth ?? 0) + 1,
         maxAttempts: finished.autoResume ? 3 : 1,
       },
@@ -5017,6 +5047,15 @@ app.get('/api/runs/:id/result', (context) => {
       };
     }
   );
+  // 失败原因、第几次尝试、还会不会自动重试：界面用它在运行条上给出重试入口。
+  // 失败总结是失败那一刻的快照：已经续跑过之后，「已排队重试」就不成立了。
+  const failureSummary = snapshot.failureSummary
+    ? {
+        ...snapshot.failureSummary,
+        retryScheduled:
+          Boolean(snapshot.failureSummary.retryScheduled) && !store.hasResumedChild(runId),
+      }
+    : null;
   return context.json({
     ok: true,
     runId,
@@ -5028,8 +5067,7 @@ app.get('/api/runs/:id/result', (context) => {
     usage: snapshot.usage,
     mandate: snapshot.mandate ?? null,
     review: snapshot.review ?? null,
-    // 失败原因、第几次尝试、还会不会自动重试：界面用它在运行条上给出重试入口。
-    failureSummary: snapshot.failureSummary ?? null,
+    failureSummary,
     attempt: (snapshot.resumeDepth ?? 0) + 1,
     maxAttempts: snapshot.autoResume ? 3 : 1,
     autoResume: Boolean(snapshot.autoResume),
@@ -5043,6 +5081,269 @@ app.get('/api/runs/:id/snapshot', (context) => {
   const snapshot = store.snapshot(context.req.param('id'));
   if (!snapshot) return context.json({ error: 'not_found' }, 404);
   return context.json(snapshot);
+});
+
+/* ── 失败诊断与主动重跑 ─────────────────────────────────────────────
+ * 运行失败时，用户要能在一个地方看到「为什么失败、环境哪里坏了、现在能不能
+ * 重跑」，并且直接修好环境后重跑。诊断只读；重跑走原有 /api/commands，
+ * 与自动续跑共用一套次数上限和排队机制。
+ */
+
+function workspaceRootFor(workspaceId: string): { rootDir: string; source: 'workspace' | 'server' } {
+  const configured = workspaces.get(workspaceId)?.rootDir?.trim();
+  return configured
+    ? { rootDir: resolve(configured), source: 'workspace' }
+    : { rootDir: process.cwd(), source: 'server' };
+}
+
+/** 用户视角验收结果写成画布卡片：固定 id，多次验收原地更新。 */
+function publishUserViewNode(workspaceId: string, report: UserViewReport): void {
+  try {
+    const store = canvasFor(workspaceId);
+    const document = store.read();
+    const id = 'user-view-report';
+    const lines = [
+      `结论：${report.summary}`,
+      `项目：${report.kind} · ${report.url || report.rootDir}`,
+      ...report.checks.map(
+        (check) => `${check.ok ? '✓' : '✗'} ${check.label}${check.detail ? `：${check.detail}` : ''}`
+      ),
+      report.shots.length
+        ? `截图：${report.shots.map((shot) => `${shot.label} ${shot.file}`).join('；')}`
+        : '',
+      '在运行条下方点「用户视角」可以看截图和逐项结果。',
+    ].filter(Boolean);
+    const patch = {
+      kind: 'artifact',
+      name: '用户视角验收',
+      role: report.verdict === 'pass' ? '通过' : report.verdict === 'fail' ? '未通过' : '无法验收',
+      provider: 'local',
+      model: 'local',
+      effort: 'off',
+      status: report.verdict === 'pass' ? 'done' : 'failed',
+      accent: report.verdict === 'pass' ? '#4ade80' : '#f87171',
+      taskId: 'user-view',
+      output: lines.join('\n').slice(0, 4000),
+      artifact: report.summary,
+      metric: report.verdict === 'pass' ? '通过' : '未通过',
+    };
+    const ops = document.nodes.some((node) => node.id === id)
+      ? [{ op: 'update_node' as const, id, patch }]
+      : [
+          {
+            op: 'add_node' as const,
+            node: { id, type: 'artifact' as const, position: { x: 80, y: 640 }, data: patch },
+          },
+        ];
+    store.apply(ops);
+  } catch {
+    // 展示失败不影响验收结果本身
+  }
+}
+
+/**
+ * 运行成功后自动做一次用户视角验收：项目能自动启动且画布设置了工作目录时，
+ * 真的把项目跑起来看画面。payload.userView === false 可关闭。
+ */
+function maybeAutoUserView(workspaceId: string, runId: string): void {
+  const root = workspaceRootFor(workspaceId);
+  if (root.source !== 'workspace') return;
+  const probe = detectProject(root.rootDir);
+  if (!probe.runnable || probe.kind === 'electron') return;
+  void runUserView({ rootDir: root.rootDir, workspaceId, runId, timeoutMs: 120000 })
+    .then((report) => {
+      publishUserViewNode(workspaceId, report);
+      audit.record({
+        actor: 'server',
+        action: 'user-view.auto',
+        target: runId,
+        detail: {
+          verdict: report.verdict,
+          kind: report.kind,
+          url: report.url,
+          failed: report.checks.filter((check) => !check.ok).map((check) => check.name),
+        },
+      });
+    })
+    .catch(() => undefined);
+}
+
+app.get('/api/runs/:id/diagnosis', async (context) => {
+  const runId = context.req.param('id');
+  const record = store.get(runId);
+  if (!record) return context.json({ ok: false, error: 'not_found' }, 404);
+  const workspaceId = record.workspaceId ?? 'main';
+  const root = workspaceRootFor(workspaceId);
+  const probe = detectProject(root.rootDir);
+  const diagnosis = await buildRunDiagnosis({
+    record,
+    workspaceId,
+    rootDir: root.rootDir,
+    rootDirSource: root.source,
+    disabledSlots: readDisabledSlots(),
+    keyReady: async (slot) => Boolean(await slotCredential(slot)),
+    userViewAvailable: probe.runnable && probe.kind !== 'electron',
+    activeRunId: activeLiveRunId,
+    hasResumedChild: store.hasResumedChild(runId),
+  });
+  return context.json(diagnosis);
+});
+
+app.post('/api/runs/:id/rerun', async (context) => {
+  const runId = context.req.param('id');
+  const record = store.get(runId);
+  if (!record) return context.json({ ok: false, error: 'run_not_found' }, 404);
+  if (record.status === 'running') {
+    return context.json({ ok: false, error: 'run_still_running' }, 409);
+  }
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const mode = body?.mode === 'fresh' ? 'fresh' : 'resume';
+  const workspaceId = record.workspaceId ?? workspaceOf(context);
+
+  // 顺手修环境：给了 rootDir 就先存到画布上，重跑直接用新目录。
+  if (body && typeof body.rootDir === 'string' && body.rootDir.trim()) {
+    const updated = workspaces.setRootDir(workspaceId, body.rootDir.trim());
+    if (!updated) return context.json({ ok: false, error: 'root_dir_invalid' }, 400);
+  }
+  if (!record.plan?.subtasks?.length) {
+    return context.json(
+      { ok: false, error: 'no_plan', hint: '这轮运行没有计划记录；请回到画布重新运行。' },
+      400
+    );
+  }
+
+  const payload: Record<string, unknown> = { mode: 'live', autoResume: true };
+  if (mode === 'resume') payload.resumeOf = runId;
+  else payload.goal = record.goal;
+
+  let response: Response;
+  try {
+    response = await fetch(`${serverOrigin()}/api/commands`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-qiansi-token': token,
+        'x-qiansi-workspace': workspaceId,
+      },
+      body: JSON.stringify({
+        commandId: `rerun-${mode}-${runId}-${randomUUID()}`,
+        type: 'run.start',
+        payload,
+      }),
+    });
+  } catch (error) {
+    return context.json(
+      { ok: false, error: 'rerun_request_failed', hint: error instanceof Error ? error.message : String(error) },
+      502
+    );
+  }
+  const data = (await response.json().catch(() => null)) as Record<string, any> | null;
+
+  if (response.ok && data?.runId) {
+    audit.record({
+      actor: actorOf(context),
+      action: 'run.rerun',
+      target: runId,
+      detail: { mode, newRunId: data.runId, workspaceId },
+    });
+    return context.json({ ok: true, runId: data.runId, mode, workspaceId });
+  }
+
+  // 已有运行在跑：排队，当前运行一结束自动开始。不让「重跑」本身也失败。
+  if (data?.error === 'run_in_progress') {
+    const queued = queueRun(workspaceId, record.goal, mode === 'resume' ? runId : undefined);
+    audit.record({
+      actor: actorOf(context),
+      action: 'run.rerun.queued',
+      target: runId,
+      detail: { mode, queued },
+    });
+    return context.json({
+      ok: true,
+      queued,
+      runId: null,
+      mode,
+      workspaceId,
+      hint: queued ? '已排队：当前运行结束后自动开始。' : '同一种重跑已经在队列里了。',
+    });
+  }
+
+  const missing = Array.isArray(data?.missing) ? data.missing : undefined;
+  return context.json(
+    {
+      ok: false,
+      error: data?.error ?? `HTTP ${response.status}`,
+      missing,
+      hint: data?.hint ?? undefined,
+      reasons: data?.reasons ?? undefined,
+    },
+    (response.status >= 400 ? response.status : 502) as 502
+  );
+});
+
+app.post('/api/user-view', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
+  const runId = typeof body?.runId === 'string' && body.runId ? body.runId : null;
+  const record = runId ? store.get(runId) : null;
+  const workspaceId = record?.workspaceId ?? workspaceOf(context);
+  const root = workspaceRootFor(workspaceId);
+  const rootDir =
+    typeof body?.rootDir === 'string' && body.rootDir.trim()
+      ? resolve(body.rootDir.trim())
+      : root.rootDir;
+  const url = typeof body?.url === 'string' && body.url.trim() ? body.url.trim() : undefined;
+  const probe = detectProject(rootDir);
+  if (!probe.runnable && !url) {
+    return context.json(
+      {
+        ok: false,
+        error: 'project_not_runnable',
+        kind: probe.kind,
+        reason: probe.reason,
+        rootDir,
+        hint: '给画布设置一个能启动的工作目录，或传入已经在运行的 url。',
+      },
+      422
+    );
+  }
+  const report = await runUserView({ rootDir, workspaceId, runId, url });
+  publishUserViewNode(workspaceId, report);
+  audit.record({
+    actor: actorOf(context),
+    action: 'user-view.check',
+    target: workspaceId,
+    detail: {
+      verdict: report.verdict,
+      kind: report.kind,
+      rootDir: report.rootDir,
+      failed: report.checks.filter((check) => !check.ok).map((check) => check.name),
+    },
+  });
+  return context.json({ ok: report.ok, report });
+});
+
+app.get('/api/user-view/latest', (context) => {
+  const wanted = context.req.header('x-qiansi-workspace') ?? context.req.query('ws');
+  const workspaceId = wanted ? workspaces.resolve(wanted).id : null;
+  return context.json({ ok: true, report: latestUserView(workspaceId) });
+});
+
+app.get('/api/user-view/:id', (context) => {
+  const report = readUserView(context.req.param('id'));
+  if (!report) return context.json({ ok: false, error: 'not_found' }, 404);
+  return context.json({ ok: true, report });
+});
+
+app.get('/api/user-view/:id/shot/:label', (context) => {
+  const id = context.req.param('id');
+  const label = context.req.param('label');
+  if (!/^[0-9a-f-]{8,64}$/i.test(id)) return context.json({ error: 'bad_id' }, 400);
+  if (label !== 'desktop' && label !== 'mobile') return context.json({ error: 'bad_label' }, 400);
+  const file = userViewShotFile(id, label);
+  if (!existsSync(file)) return context.json({ error: 'not_found' }, 404);
+  return new Response(new Uint8Array(readFileSync(file)), {
+    headers: { 'content-type': 'image/png', 'cache-control': 'no-store' },
+  });
 });
 
 app.get('/api/runs/:id/events', async (context) => {

@@ -24,6 +24,7 @@ import { ArtifactModal } from './components/ArtifactModal';
 import { ExternalModal } from './components/ExternalModal';
 import { RunProgress } from './components/RunProgress';
 import { RunReport } from './components/RunReport';
+import { UserViewModal } from './components/UserViewModal';
 import { SettingsModal } from './components/SettingsModal';
 import { Toolbar } from './components/Toolbar';
 import { WorkspaceSwitcher } from './components/WorkspaceSwitcher';
@@ -46,10 +47,12 @@ import {
 import type {
   ChatMessage,
   ExternalCallEvent,
+  RunDiagnosis,
   RunFailureInfo,
   RunSummary,
   RunTaskView,
   Selection,
+  UserViewReport,
 } from './types';
 
 interface ChoiceOption {
@@ -197,6 +200,14 @@ export function App() {
   const [runSummary, setRunSummary] = useState<RunSummary | null>(null);
   /** 失败原因与重试进度：运行条上展示，并提供重试入口。 */
   const [failureInfo, setFailureInfo] = useState<RunFailureInfo | null>(null);
+  /** 失败环境诊断：工作目录、模型 Key、可选的重跑方式。 */
+  const [diagnosis, setDiagnosis] = useState<RunDiagnosis | null>(null);
+  const [diagnosisBusy, setDiagnosisBusy] = useState(false);
+  const [rerunBusy, setRerunBusy] = useState(false);
+  /** 用户视角验收：真实启动项目后的截图与检查结果。 */
+  const [userView, setUserView] = useState<UserViewReport | null>(null);
+  const [userViewBusy, setUserViewBusy] = useState(false);
+  const [userViewOpen, setUserViewOpen] = useState(false);
   const [runTokens, setRunTokens] = useState(0);
   /** 补显完成态时用真实结束时间算耗时，而不是定格在 0.0s。 */
   const [recentEndedAt, setRecentEndedAt] = useState(0);
@@ -657,6 +668,12 @@ export function App() {
           recentOnlyRef.current = true;
           setExternalRun(false);
           setFailureInfo(data.recent.failureSummary ?? null);
+          if (data.recent.failureSummary) {
+            const recentId = data.recent.runId;
+            window.setTimeout(() => void loadDiagnosis(recentId), 300);
+          } else if (data.recent.status === 'done') {
+            void refreshUserView();
+          }
           // 补显的完成态也要能点「本轮结果」和「重试」：runSummary 是它们的依据。
           const recentValues = Object.values(tasks);
           setRunSummary({
@@ -837,6 +854,8 @@ export function App() {
     runTasksRef.current = {};
     setRunTasks({});
     setRunSummary(null);
+    setFailureInfo(null);
+    setDiagnosis(null);
     runEventCount.current = 0;
     runStartedAt.current = 0;
     runTokensRef.current = 0;
@@ -2820,8 +2839,15 @@ export function App() {
             if (body?.failureSummary) setFailureInfo(body.failureSummary);
           })
           .catch(() => undefined);
+        // 顺便把环境诊断拉下来：工作目录、模型 Key、可用的重跑方式。
+        window.setTimeout(() => void loadDiagnosis(runId), 600);
       } else {
         setFailureInfo(null);
+        setDiagnosis(null);
+        // 跑完后服务端会把项目真的启动一次做用户视角验收；结果稍后到。
+        for (const delay of [6000, 20000, 45000, 80000]) {
+          window.setTimeout(() => void refreshUserView(), delay);
+        }
       }
       decorateArtifacts();
 
@@ -2847,46 +2873,162 @@ export function App() {
     };
   };
 
+  /** 读一次失败运行的环境诊断：失败原因和「怎么重跑」都从这一个接口来。 */
+  const loadDiagnosis = async (runId: string) => {
+    setDiagnosisBusy(true);
+    try {
+      const response = await fetch(`/api/runs/${runId}/diagnosis`, {
+        headers: { 'x-qiansi-workspace': currentWorkspace() },
+      });
+      if (!response.ok) return;
+      const body = (await response.json()) as RunDiagnosis;
+      if (body?.ok) setDiagnosis(body);
+    } catch {
+      // 诊断失败不影响失败总结本身
+    } finally {
+      setDiagnosisBusy(false);
+    }
+  };
+
   /**
-   * 手动重试：从失败的运行断点续跑（只重跑没产出的任务），
-   * 与自动续跑共用同一套服务端逻辑；重试次数上限仍由服务端控制。
+   * 主动重跑：resume 断点续跑（只跑没产出的任务），fresh 按当前画布整轮重跑。
+   * 已有运行在跑时服务端会排队，这里照常把结果说清楚。
    */
-  const retryRun = async () => {
-    const previous = runSummary?.runId;
+  const rerunRun = async (mode: 'resume' | 'fresh') => {
+    const previous = diagnosis?.runId ?? runSummary?.runId;
     if (!previous) {
-      setToast('找不到可续跑的运行');
+      setToast('找不到可重跑的运行');
       return;
     }
-    setRunning(true);
-    setFailureInfo(null);
-    runTasksRef.current = {};
-    setRunTasks({});
-    setRunTokens(0);
-    runEventCount.current = 0;
-    runStartedAt.current = Date.now();
-    setRecentEndedAt(0);
+    setRerunBusy(true);
     try {
-      const response = await fetch('/api/commands', {
+      const response = await fetch(`/api/runs/${previous}/rerun`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          commandId: `ui-retry-${previous}-${Date.now()}`,
-          type: 'run.start',
-          payload: { mode: 'live', resumeOf: previous, autoResume: true },
-        }),
+        headers: {
+          'content-type': 'application/json',
+          'x-qiansi-workspace': currentWorkspace(),
+        },
+        body: JSON.stringify({ mode }),
       });
       const data = (await response.json().catch(() => null)) as
-        | { runId?: string; error?: string }
+        | { ok?: boolean; runId?: string | null; queued?: boolean; hint?: string; error?: string; missing?: string[] }
         | null;
-      if (!response.ok || !data?.runId) {
-        setRunning(false);
-        setToast(`重试失败：${data?.error ?? `HTTP ${response.status}`}`);
+      if (!response.ok || !data?.ok) {
+        setToast(
+          `重跑失败：${data?.error ?? `HTTP ${response.status}`}${
+            data?.missing?.length ? `（缺 Key：${data.missing.join('、')}）` : ''
+          }`
+        );
         return;
       }
+      if (!data.runId) {
+        // 排队：当前运行结束后自动开跑，不清掉界面上的失败信息。
+        setToast(data.hint ?? '已排队，等当前运行结束后自动开始');
+        return;
+      }
+      setFailureInfo(null);
+      setDiagnosis(null);
+      setRunning(true);
+      runTasksRef.current = {};
+      setRunTasks({});
+      setRunTokens(0);
+      runEventCount.current = 0;
+      runStartedAt.current = Date.now();
+      setRecentEndedAt(0);
       subscribeToRun(data.runId);
     } catch {
-      setRunning(false);
-      setToast('重试请求失败');
+      setToast('重跑请求失败');
+    } finally {
+      setRerunBusy(false);
+    }
+  };
+
+  /** 修环境：启用一个被停用的厂商，然后刷新诊断。 */
+  const enableModelSlot = async (slot: string) => {
+    try {
+      const policyResponse = await fetch('/api/model-policy');
+      const policy = (await policyResponse.json().catch(() => null)) as
+        | { disabledSlots?: string[] }
+        | null;
+      const disabledSlots = (policy?.disabledSlots ?? []).filter((item) => item !== slot);
+      const saved = await fetch('/api/model-policy', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ disabledSlots }),
+      });
+      if (!saved.ok) {
+        setToast('启用失败');
+        return;
+      }
+      setToast(`已启用 ${slot}；重跑会使用它`);
+      if (diagnosis) void loadDiagnosis(diagnosis.runId);
+    } catch {
+      setToast('启用请求失败');
+    }
+  };
+
+  /** 修环境：把画布工作目录改到一个存在的目录。 */
+  const fixRootDir = async (path: string) => {
+    try {
+      const response = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspace())}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ rootDir: path }),
+      });
+      if (!response.ok) {
+        setToast('工作目录无效：目录不存在或写不进去');
+        return;
+      }
+      setToast('工作目录已更新');
+      if (diagnosis) void loadDiagnosis(diagnosis.runId);
+    } catch {
+      setToast('保存工作目录失败');
+    }
+  };
+
+  /** 现在就跑一次用户视角验收：真实启动项目、截图、逐项检查。 */
+  const runUserViewNow = async () => {
+    setUserViewBusy(true);
+    try {
+      const response = await fetch('/api/user-view', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-qiansi-workspace': currentWorkspace(),
+        },
+        body: JSON.stringify({ runId: runSummary?.runId ?? diagnosis?.runId ?? undefined }),
+      });
+      const body = (await response.json().catch(() => null)) as
+        | { ok?: boolean; report?: UserViewReport; error?: string; reason?: string }
+        | null;
+      if (!response.ok || !body?.report) {
+        setToast(`用户视角验收失败：${body?.reason ?? body?.error ?? `HTTP ${response.status}`}`);
+        return;
+      }
+      setUserView(body.report);
+      setUserViewOpen(true);
+      setToast(body.report.summary);
+    } catch {
+      setToast('用户视角验收请求失败');
+    } finally {
+      setUserViewBusy(false);
+    }
+  };
+
+  /** 运行成功后服务端会自动验收：轮询最新结果，不打断用户。 */
+  const refreshUserView = async () => {
+    try {
+      const response = await fetch(
+        `/api/user-view/latest?ws=${encodeURIComponent(currentWorkspace())}`
+      );
+      if (!response.ok) return;
+      const body = (await response.json()) as { report?: UserViewReport | null };
+      if (body.report) {
+        const report = body.report;
+        setUserView((current) => (!current || report.at >= current.at ? report : current));
+      }
+    } catch {
+      // 没验收结果不影响运行条
     }
   };
 
@@ -3096,10 +3238,19 @@ export function App() {
         runTasksRef.current = tasks;
         setRunTasks(tasks);
         setFailureInfo(result.failureSummary ?? null);
+        if (result.failureSummary) void loadDiagnosis(latest.runId);
       } catch {
         // 历史恢复失败不影响当前界面
       }
     })();
+  }, []);
+
+  /**
+   * 打开面板或刷新后，把这张画布最近一次用户视角验收显示出来：
+   * 服务端在运行结束后会自动补一次，刷新不该让证据消失。
+   */
+  useEffect(() => {
+    void refreshUserView();
   }, []);
 
   const send = async (nodeId: string, text: string) => {
@@ -3428,7 +3579,21 @@ export function App() {
             endedAt={recentEndedAt}
             tokens={runTokens}
             failure={failureInfo}
-            onRetry={() => void retryRun()}
+            diagnosis={diagnosis}
+            diagnosisBusy={diagnosisBusy}
+            rerunBusy={rerunBusy}
+            userViewBusy={userViewBusy}
+            userView={userView}
+            onRetry={() => void rerunRun('resume')}
+            onRerun={(mode) => void rerunRun(mode)}
+            onDiagnose={() => {
+              const id = diagnosis?.runId ?? runSummary?.runId;
+              if (id) void loadDiagnosis(id);
+            }}
+            onEnableModel={(slot) => void enableModelSlot(slot)}
+            onFixRootDir={(path) => void fixRootDir(path)}
+            onUserView={() => void runUserViewNow()}
+            onOpenUserView={() => setUserViewOpen(true)}
             onOpenReport={running || externalRun ? undefined : () => setReportOpen(true)}
           />
           {brushMode && (
@@ -3602,6 +3767,14 @@ export function App() {
         onClose={() => setReportOpen(false)}
         onMaterializeTask={materializeTask}
         onMaterializeArtifact={materializeArtifact}
+      />
+
+      <UserViewModal
+        open={userViewOpen}
+        report={userView}
+        busy={userViewBusy}
+        onClose={() => setUserViewOpen(false)}
+        onRecheck={() => void runUserViewNow()}
       />
 
       <ApprovalsModal open={approvalsOpen} onClose={() => setApprovalsOpen(false)} />

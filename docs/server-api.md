@@ -308,6 +308,60 @@ OpenAI 兼容调用，支持 `stream: true`（SSE）与非流式。模型由服�
 
 可选 `"web_search": true`（或 `qiansi_web_search`）给这次请求挂服务端搜索工具，行为与 `/api/chat` 的 `webSearch` 相同；默认关闭。
 
+### `GET /api/runs/:id/diagnosis`
+
+失败运行的环境诊断：为什么失败、哪些任务没产出、工作目录与模型 Key 现在是否可用、
+有哪几种重跑方式。返回：
+
+```json
+{
+  "ok": true,
+  "runId": "...",
+  "status": "failed",
+  "attempt": 1, "maxAttempts": 1,
+  "failure": { "headline": "1 个任务失败", "reasons": ["验收未通过 ×1", "C1「…」：产出为空或过短"], "retryScheduled": false, "attempt": 1, "maxAttempts": 1 },
+  "tasks": [{ "id": "C1", "title": "写确认句", "status": "failed", "error": "产出为空或过短" }],
+  "environment": {
+    "rootDir": { "path": "E:\\proj", "exists": true, "writable": true, "source": "workspace" },
+    "models": [{ "nodeId": "n1", "name": "写确认句", "model": "deepseek-flash", "slot": "deepseek", "disabled": false, "ready": true, "note": "可用" }],
+    "missing": [],
+    "hints": ["自动重试已用尽（3/3）。下面的重跑是手动发起的，不占自动额度。"]
+  },
+  "actions": {
+    "resume": { "available": true, "pending": 1 },
+    "fresh": { "available": true },
+    "userView": { "available": true }
+  },
+  "activeRunId": null
+}
+```
+
+`failure.retryScheduled` 会在已经有续跑子运行之后自动变为 `false`，避免旧快照误导。
+工作目录来自画布的 `rootDir`；没设置时用服务端目录并标注 `source: "server"`。
+厂商被停用或没有 Key 时 `models[].note` 会写清楚，界面据此给出「启用」按钮。
+
+### `POST /api/runs/:id/rerun`
+
+主动重跑。请求 `{ "mode": "resume" | "fresh", "rootDir": "可选，顺手修正工作目录" }`。
+
+- `resume`：断点续跑，只重跑没有产出的任务（走 `/api/commands` 的 `resumeOf`）；
+- `fresh`：按当前画布重新规划、整轮重跑；
+- 已有运行在跑时返回 `{ ok: true, queued: true, runId: null }`，当前运行结束后自动开始；
+- 返回 `{ ok, runId?, mode, workspaceId }`，失败时带 `error` / `missing` / `hint`。
+
+### `POST /api/user-view`
+
+用户视角验收：把项目真的启动起来，用无头 Edge/Chrome 打开页面、截图、逐项检查。
+请求 `{ "runId"?: "...", "rootDir"?: "...", "url"?: "..." }`。
+给了 `url` 只验收已有地址；否则按画布工作目录启动项目。
+返回 `{ ok, report }`；项目无法识别时 422，带 `kind` / `reason` / `hint`。
+检查项、自动触发条件与限制见 [user-view.md](user-view.md)。
+
+### `GET /api/user-view/latest?ws=` / `GET /api/user-view/:id` / `GET /api/user-view/:id/shot/desktop|mobile`
+
+最近一次报告（按画布过滤后再取最新）、完整报告、截图 PNG。
+`<img>` 同源请求会带会话 Cookie，界面可直接显示。
+
 ### `GET /api/runs/:id/snapshot`
 
 返回 `{ runId, status, goal, plan, outputs, lastSeq, startedAt, finishedAt }`。重连时先读它，再接收事件。
