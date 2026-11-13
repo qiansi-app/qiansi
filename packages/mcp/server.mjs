@@ -612,6 +612,8 @@ async function callTool(name, args = {}) {
       body: JSON.stringify({
         source: args.source,
         cwd: args.cwd,
+        // 同一任务重试时由调用方带上稳定键，服务端复用同一张画布。
+        dedupeKey: args.dedupeKey,
         autoArrange: args.autoArrange !== false,
         autoRun: args.autoRun === true,
       }),

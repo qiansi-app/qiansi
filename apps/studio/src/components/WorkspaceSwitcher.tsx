@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { Clock, FileCog, History, Plus, RotateCcw, Trash2, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Clock, FileCog, History, Layers, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
 import { currentWorkspace, setCurrentWorkspace, switchWorkspace } from '../workspace';
 
@@ -48,6 +48,7 @@ export function WorkspaceSwitcher({ onCanvasStarted }: { onCanvasStarted?: (name
   /** 待关闭的标签：确认/取消都用它，绝不改正在看的 current。 */
   const [pendingClose, setPendingClose] = useState<string | null>(null);
   const [confirmPurge, setConfirmPurge] = useState<string | null>(null);
+  const [confirmDedupe, setConfirmDedupe] = useState(false);
   const [purging, setPurging] = useState<string | null>(null);
   const [archiveError, setArchiveError] = useState("");
   const knownIds = useRef<Set<string> | null>(null);
@@ -121,6 +122,40 @@ export function WorkspaceSwitcher({ onCanvasStarted }: { onCanvasStarted?: (name
   }, [editorOpen, items, current]);
 
   const active = items.find((item) => item.id === current);
+
+  /**
+   * 同名重复画布：接管重试、重复生成工作流都会留下同名标签页。
+   * 这里按名字分组，给用户一键归档「每组只留最新」，历史里随时能恢复。
+   */
+  const duplicateGroups = useMemo(() => {
+    const groups = new Map<string, WorkspaceMeta[]>();
+    for (const item of items) {
+      const key = item.name.trim();
+      const list = groups.get(key);
+      if (list) list.push(item);
+      else groups.set(key, [item]);
+    }
+    return [...groups.values()].filter((group) => group.length > 1);
+  }, [items]);
+  const duplicateCount = duplicateGroups.reduce((sum, group) => sum + group.length - 1, 0);
+
+  const cleanupDuplicates = async () => {
+    setBusy(true);
+    setConfirmDedupe(false);
+    try {
+      const keep = currentWorkspace();
+      for (const group of duplicateGroups) {
+        // 每组保留最新一张（items 按创建时间排序）；当前正在看的绝不归档。
+        for (const item of group.slice(0, -1)) {
+          if (item.id === keep) continue;
+          await fetch(`/api/workspaces/${item.id}/archive`, { method: 'POST' });
+        }
+      }
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const createAndSwitch = async () => {
     setBusy(true);
@@ -294,6 +329,17 @@ export function WorkspaceSwitcher({ onCanvasStarted }: { onCanvasStarted?: (name
             </div>
           )}
         </div>
+        {duplicateCount > 0 && (
+          <button
+            className="icon-tool workspace-dedupe"
+            onClick={() => setConfirmDedupe(true)}
+            disabled={busy}
+            title={`发现 ${duplicateCount} 张同名画布：一键归档，每组只留最新（可在历史里恢复）`}
+          >
+            <Layers size={14} />
+            <span className="workspace-dedupe-count">{duplicateCount}</span>
+          </button>
+        )}
         <button
           className={`icon-tool ${editorOpen ? 'active' : ''}`}
           onClick={() => setEditorOpen((open) => !open)}
@@ -336,6 +382,14 @@ export function WorkspaceSwitcher({ onCanvasStarted }: { onCanvasStarted?: (name
         confirmLabel="关闭并进历史"
         onConfirm={() => void archiveCurrent()}
         onCancel={() => setConfirmArchive(false)}
+      />
+      <ConfirmDialog
+        open={confirmDedupe}
+        title={`归档 ${duplicateCount} 张同名重复画布？`}
+        detail="每组同名画布保留最新一张，其余移入「历史画布」；正在看的这张不动。历史里可随时恢复或彻底删除。"
+        confirmLabel="归档重复画布"
+        onConfirm={() => void cleanupDuplicates()}
+        onCancel={() => setConfirmDedupe(false)}
       />
       <ConfirmDialog
         open={Boolean(confirmPurge)}

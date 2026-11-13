@@ -100,7 +100,7 @@ import {
 import { part, summarize, type HealthPart, type StatusReport } from './status.js';
 import { RunStore, type RunEnvelope, type RunFailureSummary, type RunRecord } from './store.js';
 import { buildNodeToolbox } from './node-tools.js';
-import { TakeoverWatcher } from './takeover-watcher.js';
+import { TakeoverWatcher, hashText } from './takeover-watcher.js';
 import {
   SelfOptEngine,
   describeSelfOpt,
@@ -844,6 +844,8 @@ const takeoverWatcher = new TakeoverWatcher({
         autoArrange: true,
         autoRun: true,
         sessionFile: info.file,
+        // 同一条需求的重试落在同一张画布上，重试不再制造同名标签页。
+        dedupeKey: hashText(ask),
       }),
       // 编排可能要一分钟；但挂死时不能让 busy 永远为真。
       signal: AbortSignal.timeout(180_000),
@@ -2593,6 +2595,39 @@ async function drainRunQueue(): Promise<void> {
   }
 }
 
+/**
+ * 同一条接管需求的重试索引：dedupeKey → 上次落到的画布。
+ * 落盘到 stateDir：服务重启（VS Code 重载、开发热重启）后同一需求仍然复用，
+ * 不会因为进程换了一个就再建一张同名画布。
+ */
+const handoffAttemptsFile = join(stateDir, 'handoff-attempts.json');
+const handoffAttempts = new Map<string, { workspaceId: string; at: number; arranged: number }>();
+try {
+  const saved = JSON.parse(readFileSync(handoffAttemptsFile, 'utf8')) as Record<
+    string,
+    { workspaceId?: string; at?: number; arranged?: number }
+  >;
+  for (const [key, value] of Object.entries(saved)) {
+    if (!value?.workspaceId || !value.at) continue;
+    if (Date.now() - value.at > 30 * 60_000) continue;
+    handoffAttempts.set(key, {
+      workspaceId: String(value.workspaceId),
+      at: Number(value.at),
+      arranged: Number(value.arranged ?? 0),
+    });
+  }
+} catch {
+  // 没有或损坏：从空表开始，最多多建一张画布
+}
+
+function persistHandoffAttempts(): void {
+  try {
+    writeFileSync(handoffAttemptsFile, JSON.stringify(Object.fromEntries(handoffAttempts)), 'utf8');
+  } catch {
+    // 落盘失败不影响本次复用
+  }
+}
+
 app.post('/api/handoff', async (context) => {
   const body = (await context.req.json().catch(() => null)) as Record<string, any> | null;
   // 留空 = 接管「最近真正活跃」的那个 agent 会话（全局最新），
@@ -2613,85 +2648,106 @@ app.post('/api/handoff', async (context) => {
   const pack = buildHandoffPack({ cwd, source, sessionFile: sessionFile || undefined });
 
   // 一个工作流一张画布：接续新建一张，不碰你正在看的。
+  // 但同一条需求的重试必须复用同一张：否则接管每失败一次就多一张标签页
+  // （曾出现一句需求重试 10 次留下 10 张同名画布）。键由调用方给。
+  const dedupeKey = String(body?.dedupeKey ?? '').trim().slice(0, 120);
+  const previousAttempt = dedupeKey ? handoffAttempts.get(dedupeKey) : undefined;
+  const previousMeta = previousAttempt ? workspaces.get(previousAttempt.workspaceId) : undefined;
+  const reuse =
+    previousAttempt && previousMeta && Date.now() - previousAttempt.at < 30 * 60_000
+      ? previousAttempt
+      : undefined;
+  if (reuse && previousMeta?.archivedAt) workspaces.restore(reuse.workspaceId);
   const goalGuess = (taskOverride || pack.session?.userAsks.at(-1) || '').split(/[。；;\n]/)[0]?.slice(0, 24) ?? '';
   const wsName = checkWorkspaceName(goalGuess || '接续会话');
-  const createdWs = workspaces.create(wsName.ok ? wsName.name : '接续会话');
+  const createdWs = reuse
+    ? previousMeta ?? workspaces.create('接续会话')
+    : workspaces.create(wsName.ok ? wsName.name : '接续会话');
   const handoffWsId = createdWs.id;
-  copyTeam(workspaceOf(context), handoffWsId);
+  if (!reuse) copyTeam(workspaceOf(context), handoffWsId);
   const handoffStore = canvasFor(handoffWsId);
   // 节点工具的工作目录 = 会话项目目录：worker 可以在里面读写与跑命令。
   if (pack.project?.cwd) workspaces.setRootDir(handoffWsId, pack.project.cwd);
 
-  const fileId = randomUUID();
-  const filesDir = join(stateDir, 'files');
-  mkdirSync(filesDir, { recursive: true });
-  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '');
-  const fileName = `接续上下文-${pack.session?.source ?? 'project'}-${stamp}.md`;
-  try {
-    writeFileSync(join(filesDir, `${fileId}-${fileName}`), pack.markdown, 'utf8');
-  } catch (error) {
-    return context.json(
-      {
-        ok: false,
-        error: `无法保存资料包：${error instanceof Error ? error.message : String(error)}`,
-      },
-      500
-    );
-  }
-
-  // 接续画布天生是空的：优先沿用当前画布的主控；没有、或主控属于已停用厂商，
-  // 就按计费策略合成一个——否则新画布会带着一个注定调不通的主控。
-  const handoffOrchestratorSource = canvasFor(workspaceOf(context)).read();
-  const sourceOrchestrator = handoffOrchestratorSource.nodes.find(
-    (node) => node.id === handoffOrchestratorSource.orchestratorId
-  );
-  const handoffOrchestratorNode =
-    (sourceOrchestrator &&
-    !readDisabledSlots().has(familyOf(String(sourceOrchestrator.data?.model ?? ''))?.slot ?? '')
-      ? sourceOrchestrator
-      : undefined) ?? (await synthesizedOrchestratorNode());
-  const document = handoffStore.read();
-  const ops: CanvasOp[] = [];
-  if (handoffOrchestratorNode) {
-    ops.push({ op: 'add_node', node: handoffOrchestratorNode });
-    // orchestratorId 必须落盘，否则这张画布判定不可运行。
-    ops.push({ op: 'set_orchestrator', id: handoffOrchestratorNode.id });
-  }
-  const library = document.nodes.find((node) => node.data?.name === '接续上下文');
-  const metric = `${pack.session?.source ?? 'project'} · ${pack.session?.messageCount ?? 0} 条`;
-  if (library) {
-    ops.push({
-      op: 'update_node',
-      id: library.id,
-      patch: { libraryFiles: [{ id: fileId, name: fileName, size: pack.bytes }], metric },
-    });
-  } else {
-    ops.push({
-      op: 'add_node',
-      node: {
-        id: `handoff-${fileId.slice(0, 8)}`,
-        type: 'library',
-        position: { x: 80, y: 80 },
-        data: {
-          kind: 'library',
-          name: '接续上下文',
-          role: '从 agent 会话与项目自动提取，运行时会注入各节点',
-          provider: 'local',
-          model: 'library',
-          effort: 'off',
-          status: 'idle',
-          accent: '#38d9c2',
-          isPublic: true,
-          metric,
-          libraryFiles: [{ id: fileId, name: fileName, size: pack.bytes }],
+  // 重试复用同一张画布：资料包、主控、资料库都已经在上面，不再重复写一遍。
+  const existingLibrary = reuse
+    ? handoffStore.read().nodes.find((node) => node.data?.name === '接续上下文')
+    : undefined;
+  const existingFiles = (existingLibrary?.data?.libraryFiles ?? []) as Array<{ id?: string; name?: string }>;
+  let fileId = reuse ? String(existingFiles[0]?.id ?? '') : randomUUID();
+  let fileName = reuse ? String(existingFiles[0]?.name ?? '') : '';
+  if (!reuse) {
+    const filesDir = join(stateDir, 'files');
+    mkdirSync(filesDir, { recursive: true });
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '');
+    fileName = `接续上下文-${pack.session?.source ?? 'project'}-${stamp}.md`;
+    try {
+      writeFileSync(join(filesDir, `${fileId}-${fileName}`), pack.markdown, 'utf8');
+    } catch (error) {
+      return context.json(
+        {
+          ok: false,
+          error: `无法保存资料包：${error instanceof Error ? error.message : String(error)}`,
         },
-      },
-    });
+        500
+      );
+    }
+
+    // 接续画布天生是空的：优先沿用当前画布的主控；没有、或主控属于已停用厂商，
+    // 就按计费策略合成一个——否则新画布会带着一个注定调不通的主控。
+    const handoffOrchestratorSource = canvasFor(workspaceOf(context)).read();
+    const sourceOrchestrator = handoffOrchestratorSource.nodes.find(
+      (node) => node.id === handoffOrchestratorSource.orchestratorId
+    );
+    const handoffOrchestratorNode =
+      (sourceOrchestrator &&
+      !readDisabledSlots().has(familyOf(String(sourceOrchestrator.data?.model ?? ''))?.slot ?? '')
+        ? sourceOrchestrator
+        : undefined) ?? (await synthesizedOrchestratorNode());
+    const document = handoffStore.read();
+    const ops: CanvasOp[] = [];
+    if (handoffOrchestratorNode) {
+      ops.push({ op: 'add_node', node: handoffOrchestratorNode });
+      // orchestratorId 必须落盘，否则这张画布判定不可运行。
+      ops.push({ op: 'set_orchestrator', id: handoffOrchestratorNode.id });
+    }
+    const library = document.nodes.find((node) => node.data?.name === '接续上下文');
+    const metric = `${pack.session?.source ?? 'project'} · ${pack.session?.messageCount ?? 0} 条`;
+    if (library) {
+      ops.push({
+        op: 'update_node',
+        id: library.id,
+        patch: { libraryFiles: [{ id: fileId, name: fileName, size: pack.bytes }], metric },
+      });
+    } else {
+      ops.push({
+        op: 'add_node',
+        node: {
+          id: `handoff-${fileId.slice(0, 8)}`,
+          type: 'library',
+          position: { x: 80, y: 80 },
+          data: {
+            kind: 'library',
+            name: '接续上下文',
+            role: '从 agent 会话与项目自动提取，运行时会注入各节点',
+            provider: 'local',
+            model: 'library',
+            effort: 'off',
+            status: 'idle',
+            accent: '#38d9c2',
+            isPublic: true,
+            metric,
+            libraryFiles: [{ id: fileId, name: fileName, size: pack.bytes }],
+          },
+        },
+      });
+    }
+    handoffStore.apply(ops);
   }
-  handoffStore.apply(ops);
 
   const arranged: { nodes: number; edges: number } = { nodes: 0, edges: 0 };
-  if (autoArrange && pack.session) {
+  // 复用且已经编排过：直接重试运行，不重复往画布里加节点。
+  if (autoArrange && pack.session && !(reuse && reuse.arranged > 0)) {
     // 复用已有的工作流生成器，而不是写第二套：它已经会说画布图格式，也按计划选模型。
     const origin = new URL(context.req.url).origin;
     const available: Array<{
@@ -2957,14 +3013,24 @@ app.post('/api/handoff', async (context) => {
   } else if (autoRun) {
     pack.notes.push('没有可运行的节点：自动编排未开启或没有产出，本次没有启动运行。');
   }
-  if (arranged.nodes === 0) {
+  const arrangedTotal = arranged.nodes > 0 ? arranged.nodes : reuse?.arranged ?? 0;
+  if (dedupeKey) {
+    handoffAttempts.set(dedupeKey, {
+      workspaceId: handoffWsId,
+      at: Date.now(),
+      arranged: arrangedTotal,
+    });
+    persistHandoffAttempts();
+  }
+  if (arrangedTotal === 0) {
     // 编排没产出：新画布只有一张资料库，归档进历史别占标签栏。
     workspaces.archive(handoffWsId);
   }
 
   return context.json({
     ok: true,
-    archived: arranged.nodes === 0,
+    archived: arrangedTotal === 0,
+    reused: Boolean(reuse),
     workspaceId: handoffWsId,
     workspaceName: createdWs.name,
     session: pack.session
@@ -4547,17 +4613,39 @@ app.post('/api/commands', async (context) => {
           ? { ...basePlan, rationale: baseRationale }
           : basePlan;
 
-    // relay is always required: the acceptance judge runs on it even when every
-    // worker node is served by another key.
-    const needed = new Set<KeySlot>(canvasPlan ? ['relay'] : ['deepseek', 'minimax', 'relay']);
+    // 准入只要求「真正会用到的槽位」：worker 的槽位 + 实际能当评委的槽位。
+    // 曾经一律要求 relay，导致 relay 停用后接管的画布全部以
+    // live_mode_missing_credentials 失败——画布编排好了却一张也跑不起来。
+    // 评委优先级与下面的 judgeCandidates 一致：显式指定 > 主控模型 > deepseek-v4-pro。
+    const judgeReady = [
+      String(body?.payload?.judgeModel ?? '').trim(),
+      orchestratorModel,
+      'deepseek-v4-pro',
+    ]
+      .filter(Boolean)
+      .some((candidate) => {
+        const family = familyOf(candidate);
+        return Boolean(family && keyBySlot[family.slot]);
+      });
+    const needed = new Set<KeySlot>(canvasPlan ? [] : ['deepseek', 'minimax', 'relay']);
     for (const slot of slotByProfile.values()) needed.add(slot);
+    if (!judgeReady) needed.add('relay');
 
     const missing: string[] = [];
     for (const slot of needed) {
       if (!keyBySlot[slot]) missing.push(slot);
     }
     if (missing.length > 0) {
-      return context.json({ error: 'live_mode_missing_credentials', missing }, 503);
+      return context.json(
+        {
+          error: 'live_mode_missing_credentials',
+          missing,
+          hint: missing.includes('relay')
+            ? 'relay 已停用且没有可用评委：在密钥面板配置 relay，或给运行指定一个可用的 judgeModel。'
+            : `缺少这些家族的 Key：${missing.join('、')}`,
+        },
+        503
+      );
     }
 
     if (activeLiveRunId) {

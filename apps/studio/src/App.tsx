@@ -1275,7 +1275,24 @@ export function App() {
     const positions = layeredLayout(nodes, edges, 'orchestrator');
     const laidOut = nodes.map((node) => ({ ...node, position: positions[node.id] ?? node.position }));
     // 一个工作流一张画布：生成的工作流落到新画布，不覆盖你正在看的这张。
+    // 但当前画布还是空的（只有主控/资料库）就直接用它——重复生成不该堆同名标签页。
+    const hasExistingWork = nodes.some(
+      (node) =>
+        node.type !== 'region' &&
+        !node.data?.hidden &&
+        node.data?.kind !== 'orchestrator' &&
+        node.data?.kind !== 'library'
+    );
     void (async () => {
+      if (!hasExistingWork) {
+        setNodes(laidOut);
+        setEdges(edges);
+        setOrchestratorId('orchestrator');
+        fitCanvas();
+        setWorkflowOpen(false);
+        setToast(`工作流已生成：${plan.summary}`);
+        return;
+      }
       try {
         const created = await fetch('/api/workspaces', {
           method: 'POST',
@@ -3684,10 +3701,6 @@ export function App() {
               <div className="brush-tip">拖拽划出分项目区域 · 方向在顶栏选择 · Esc 退出</div>
             </div>
           )}
-          <div className="canvas-hint">
-            Ctrl/⌘ 或 Shift 多选模型发起讨论 · 拖拽端口连线 · 画笔划出分项目区域
-          </div>
-
           {choice && (
             <div className="choice-card">
               <h4>{choice.title}</h4>

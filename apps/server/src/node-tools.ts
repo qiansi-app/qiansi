@@ -111,7 +111,11 @@ export function buildNodeToolbox(deps: NodeToolboxDeps): ToolboxOptions {
     ),
     schema(
       'run_command',
-      '在工作目录内执行一条 shell 命令并返回 stdout/stderr 与退出码。适合运行测试、类型检查、git 查询。危险命令（格式化、关机、git reset --hard 等）会被拒绝。',
+      `在工作目录内执行一条 shell 命令并返回 stdout/stderr 与退出码。适合运行测试、类型检查、git 查询。危险命令（格式化、关机、git reset --hard 等）会被拒绝。${
+        process.platform === 'win32'
+          ? '当前是 Windows，命令由 cmd.exe 执行：用 dir 而不是 ls；路径写成 C:\\dir 或 .\\file；不要用 bash 语法（for x in ...、<<HEREDOC、2>/dev/null 会报错），需要串联用 & 或 &&，丢弃错误输出用 2>nul。'
+          : '当前是 POSIX shell（sh）：用 ls、管道与 && 串联。'
+      }`,
       {
         type: 'object',
         properties: {
@@ -339,6 +343,22 @@ interface ShellOutcome {
   timedOut: boolean;
 }
 
+/**
+ * Windows 控制台多半是 GBK：按 UTF-8 解码中文错误信息会变成乱码，
+ * 模型会把乱码当成环境损坏然后空转。先按 UTF-8 严格解码，失败再按 GBK。
+ */
+function decodeConsole(buffer: Buffer): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+  } catch {
+    try {
+      return new TextDecoder('gbk').decode(buffer);
+    } catch {
+      return buffer.toString('utf8');
+    }
+  }
+}
+
 function runShell(command: string, cwd: string, timeoutMs: number): Promise<ShellOutcome> {
   return new Promise((resolvePromise) => {
     const child = spawn(command, {
@@ -347,8 +367,8 @@ function runShell(command: string, cwd: string, timeoutMs: number): Promise<Shel
       windowsHide: true,
       env: process.env,
     });
-    let stdout = '';
-    let stderr = '';
+    const outChunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -358,19 +378,31 @@ function runShell(command: string, cwd: string, timeoutMs: number): Promise<Shel
         // 进程可能已经退出
       }
     }, timeoutMs);
-    child.stdout?.on('data', (chunk) => {
-      if (stdout.length < MAX_OUTPUT * 2) stdout += String(chunk);
+    child.stdout?.on('data', (chunk: Buffer) => {
+      const size = outChunks.reduce((sum, item) => sum + item.length, 0);
+      if (size < MAX_OUTPUT * 2) outChunks.push(chunk);
     });
-    child.stderr?.on('data', (chunk) => {
-      if (stderr.length < MAX_OUTPUT) stderr += String(chunk);
+    child.stderr?.on('data', (chunk: Buffer) => {
+      const size = errChunks.reduce((sum, item) => sum + item.length, 0);
+      if (size < MAX_OUTPUT) errChunks.push(chunk);
     });
     child.on('error', (error) => {
       clearTimeout(timer);
-      resolvePromise({ code: -1, stdout, stderr: `${stderr}\n${String(error)}`, timedOut });
+      resolvePromise({
+        code: -1,
+        stdout: decodeConsole(Buffer.concat(outChunks)),
+        stderr: `${decodeConsole(Buffer.concat(errChunks))}\n${String(error)}`,
+        timedOut,
+      });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      resolvePromise({ code: code ?? -1, stdout, stderr, timedOut });
+      resolvePromise({
+        code: code ?? -1,
+        stdout: decodeConsole(Buffer.concat(outChunks)),
+        stderr: decodeConsole(Buffer.concat(errChunks)),
+        timedOut,
+      });
     });
   });
 }

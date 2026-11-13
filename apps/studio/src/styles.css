@@ -193,39 +193,82 @@ textarea {
   display: none;
 }
 
-.canvas-hint {
-  position: absolute;
-  left: 18px;
-  bottom: 14px;
-  color: var(--muted-2);
-  font-size: 11px;
-  pointer-events: none;
-  letter-spacing: 0.02em;
-}
-
 .canvas-legend {
-  display: flex;
-  gap: 12px;
+  display: inline-flex;  flex-wrap: wrap;
+  gap: 6px 12px;
   align-items: center;
-  padding: 7px 10px;
+  max-width: min(520px, 60vw);
+  padding: 5px 9px;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
-  background: rgba(14, 19, 24, 0.82);
+  background: rgba(14, 19, 24, 0.78);
   backdrop-filter: blur(8px);
   font-size: 11px;
   color: var(--muted);
+}
+
+.canvas-legend.collapsed {
+  padding: 3px 7px;
+  opacity: 0.72;
+}
+
+.legend-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 2px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.legend-toggle:hover {
+  color: #dce6f2;
+}
+
+.legend-items {
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
 }
 
 .legend-item {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  font-size: 10.5px;
+  color: var(--muted);
 }
 
 .legend-line {
   width: 14px;
   height: 2px;
   border-radius: 2px;
+}
+
+.legend-hint {
+  flex-basis: 100%;
+  font-size: 10px;
+  color: var(--muted-2);
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+/* 右下角：缩放控件叠在小地图上方，别互相压盖（库默认两者同偏移）。 */
+.react-flow__controls.react-flow__panel {
+  bottom: 142px;
+}
+
+@media (max-width: 720px) {
+  .react-flow__minimap {
+    display: none;
+  }
+  .react-flow__controls.react-flow__panel {
+    bottom: 15px;
+  }
 }
 
 /* ---------- nodes ---------- */
@@ -1733,6 +1776,13 @@ textarea {
 @keyframes tab-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 .workspace-tab-close { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 4px; background: transparent; border: none; color: #7f8fa3; cursor: pointer; }
 .workspace-tab-close:hover { background: rgba(239, 68, 68, 0.18); color: #f87171; }
+.workspace-dedupe { color: #e0a458; }
+.workspace-dedupe:hover:not(:disabled) { border-color: rgba(224, 164, 88, 0.55); color: #f2c078; }
+.workspace-dedupe-count {
+  min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px;
+  background: rgba(224, 164, 88, 0.22); color: #f2c078;
+  font-size: 9.5px; font-weight: 700; line-height: 14px; text-align: center;
+}
 .workspace-history-anchor { position: relative; display: inline-flex; }
 .workspace-history { position: fixed; top: 98px; right: 12px; z-index: 60; width: 330px; max-height: 46vh; overflow-y: auto; background: #101923; border: 1px solid rgba(147,164,187,0.25); border-radius: 10px; padding: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.45); display: flex; flex-direction: column; gap: 8px; }
 .workspace-history-title { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #e6edf6; }
@@ -1756,7 +1806,7 @@ textarea {
 
 /* 工作区公共指令编辑 */
 .workspace-switcher { position: relative; }
-.workspace-instructions { position: absolute; top: calc(100% + 8px); left: 0; z-index: 50; width: 380px; background: #101923; border: 1px solid rgba(147,164,187,0.25); border-radius: 10px; padding: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.45); display: flex; flex-direction: column; gap: 8px; }
+.workspace-instructions { position: fixed; top: 96px; right: 12px; z-index: 60; width: 380px; max-height: 60vh; overflow-y: auto; background: #101923; border: 1px solid rgba(147,164,187,0.25); border-radius: 10px; padding: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.45); display: flex; flex-direction: column; gap: 8px; }
 .workspace-instructions-title { font-size: 12px; color: #e6edf6; display: flex; flex-direction: column; gap: 2px; }
 .workspace-instructions-title small { color: #7f8fa3; font-size: 11px; }
 .workspace-instructions textarea { width: 100%; resize: vertical; font-size: 12px; padding: 8px; background: rgba(14,19,24,0.7); color: #dce6f2; border: 1px solid rgba(147,164,187,0.25); border-radius: 8px; }

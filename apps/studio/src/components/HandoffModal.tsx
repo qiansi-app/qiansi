@@ -139,6 +139,9 @@ export function HandoffModal({ open, onClose, defaultSource }: HandoffModalProps
           task: task.trim() || undefined,
           autoArrange,
           autoRun,
+          // 同一份「来源 + 目录 + 任务」重复提交时复用同一张画布，
+          // 避免反复点接管在标签栏堆出同名画布。
+          dedupeKey: `${source}:${cwd.trim()}:${task.trim()}`.slice(0, 120),
         }),
       });
       const data = (await response.json().catch(() => null)) as HandoffResult | null;

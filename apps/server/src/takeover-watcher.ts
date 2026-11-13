@@ -28,6 +28,8 @@ export interface TakeoverDeps {
   intervalMs?: number;
   /** 需求写入后稳定多久才触发，默认 4 秒。 */
   stableMs?: number;
+  /** 同一条需求最多自动重试几次，超过就停下来等用户，默认 3。 */
+  maxFailures?: number;
 }
 
 export interface TakeoverStatus {
@@ -43,6 +45,18 @@ export interface TakeoverStatus {
 
 const TRIVIAL = /^(继续|好的?|可以|行|嗯+|ok|okay|yes|好滴|收到)[。！!.\s]*$/i;
 
+/**
+ * 提问不是工单。一句「qiansi的git仓库在哪」曾被当成任务反复接管，
+ * 一晚上开出十几张同名画布。带动作动词的仍然按任务处理
+ * （「为什么失败，请修复」里有「修复」）。
+ */
+const QUESTION_HINT = /[？?]|为什么|怎么|怎样|如何|在哪|哪里|哪儿|是什么|什么|是否|能不能|可不可以|有没有|多少|多久|谁/;
+const ACTION_HINT = /(改|做|写|生成|运行|跑|修复|检查|调研|优化|增加|加一下|删|移除|部署|实现|配置|安装|整理|总结|重构|测试|排查|分析|翻译|设计|导出|截图|验收|接管|继续做)/;
+
+function looksLikeQuestion(text: string): boolean {
+  return QUESTION_HINT.test(text) && !ACTION_HINT.test(text);
+}
+
 function isActionable(text: string): boolean {
   const trimmed = text.trim();
   if (trimmed.length < 6) return false;
@@ -50,10 +64,11 @@ function isActionable(text: string): boolean {
   if (isInjectedText(trimmed)) return false;
   // 整行都是方括号的行（如 [Request interrupted by user …]）是转录噪音，不是需求。
   if (/^\[[^\]]+\]$/.test(trimmed)) return false;
+  if (looksLikeQuestion(trimmed)) return false;
   return !TRIVIAL.test(trimmed);
 }
 
-function hashText(text: string): string {
+export function hashText(text: string): string {
   return createHash('sha1').update(text).digest('hex').slice(0, 16);
 }
 
@@ -70,14 +85,18 @@ export class TakeoverWatcher {
   private firedAt?: number;
   private error?: string;
   private failures = 0;
+  /** 失败计数属于哪条需求：换一条需求要从头计数，不能继承上一条的退避。 */
+  private failureHash = '';
   /** 失败退避：已有运行在跑时不要每 4 秒重试一遍。 */
   private cooldownUntil = 0;
   private readonly intervalMs: number;
   private readonly stableMs: number;
+  private readonly maxFailures: number;
 
   constructor(private readonly deps: TakeoverDeps) {
     this.intervalMs = Math.max(1000, deps.intervalMs ?? 4000);
     this.stableMs = Math.max(1000, deps.stableMs ?? 4000);
+    this.maxFailures = Math.max(1, deps.maxFailures ?? 3);
   }
 
   status(): TakeoverStatus {
@@ -97,6 +116,9 @@ export class TakeoverWatcher {
     this.overrideFile = String(sessionFile ?? '').trim();
     this.enabled = true;
     this.error = undefined;
+    this.failures = 0;
+    this.failureHash = '';
+    this.cooldownUntil = 0;
     this.baseline();
     if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => this.tick(), this.intervalMs);
@@ -181,6 +203,9 @@ export class TakeoverWatcher {
       const stable = Date.now() - mtime > 1500 && Date.now() - this.pending.since >= this.stableMs;
       if (!stable || this.busy) return;
       if (!isActionable(latest)) {
+        if (looksLikeQuestion(latest)) {
+          this.deps.log?.(`识别为提问，不建画布：${latest.slice(0, 60)}`);
+        }
         this.markSeen(hash);
         this.pending = null;
         return;
@@ -196,16 +221,35 @@ export class TakeoverWatcher {
           this.lastAsk = ask;
           this.markSeen(pendingHash);
           this.failures = 0;
+          this.failureHash = '';
           this.cooldownUntil = 0;
           this.error = undefined;
           this.deps.log?.(`已接管新需求：${ask.slice(0, 60)}`);
         })
         .catch((cause) => {
-          // 不记为已处理：等已有运行结束后会再试一次；指数退避，避免 4 秒一撞。
+          const message = cause instanceof Error ? cause.message : String(cause);
+          if (this.failureHash !== pendingHash) {
+            this.failureHash = pendingHash;
+            this.failures = 0;
+          }
           this.failures += 1;
-          this.error = cause instanceof Error ? cause.message : String(cause);
+          this.error = message;
+          if (this.failures >= this.maxFailures) {
+            // 同一条需求连续失败：停下来交给用户，绝不无限重试——
+            // 每次重试都会新建一张画布，重试越多标签栏越脏。
+            this.markSeen(pendingHash);
+            this.pending = null;
+            this.failures = 0;
+            this.cooldownUntil = 0;
+            this.error = `接管失败 ${this.maxFailures} 次，已停止自动重试：${message}`;
+            this.deps.log?.(
+              `接管放弃（连续 ${this.maxFailures} 次失败）：${message.slice(0, 160)}`
+            );
+            return;
+          }
+          // 不记为已处理：等已有运行结束后会再试一次；指数退避，避免 4 秒一撞。
           this.cooldownUntil = Date.now() + Math.min(120000, 15000 * 2 ** (this.failures - 1));
-          this.deps.log?.(`接管失败（第 ${this.failures} 次），稍后重试：${this.error.slice(0, 160)}`);
+          this.deps.log?.(`接管失败（第 ${this.failures} 次），稍后重试：${message.slice(0, 160)}`);
         })
         .finally(() => {
           this.busy = false;

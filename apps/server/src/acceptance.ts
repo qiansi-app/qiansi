@@ -118,11 +118,14 @@ function structuralCheck(output: string, evidence?: ToolEvidence): GatedResult |
   // 纯文本任务只拦「几乎没有内容」的占位答案：一句话交付物是合法的，
   // 是否满足验收标准由后面的评委判断，不再用字数代替判断。
   const didWork = (evidence?.tools ?? []).some((tool) => tool.ok);
-  if (text.length < 8 && !didWork) {
+  // 只拦「只有标点/空白」的占位答案，不按字数误杀短而正确的回答：
+  // 「1+1=2」「已完成」都是合法交付物，是否满足验收标准交给评委判断。
+  const meaningful = text.replace(/[\s。，、；：!?！？.,;:…\-—_*#`~"'()（）《》\[\]【】]/g, '');
+  if (meaningful.length < 2 && !didWork) {
     return {
       pass: false,
       score: 0,
-      reasons: ['产出为空或过短'],
+      reasons: ['产出为空或只有占位符'],
       suggestedFix: '写出满足验收标准的完整答案，不要只返回占位符。',
       gate: 'structural',
     };
@@ -239,7 +242,8 @@ export function createRoutedJudge(options: RoutedJudgeOptions) {
       ]
         .filter(Boolean)
         .join('\n'),
-      { maxTokens: 1024, timeoutMs: fullTimeoutMs }
+      // 评委常带思考过程：预算太小会被推理吃光，只吐出半截 JSON。
+      { maxTokens: 2048, timeoutMs: fullTimeoutMs }
     );
 
     if (full.input || full.output) {
@@ -274,11 +278,48 @@ export function createRoutedJudge(options: RoutedJudgeOptions) {
 
     const verdict = extractJson(full.text);
     if (!verdict) {
+      // 评委偶尔夹带解释或半截 JSON：带上它的原文重问一次，只要 JSON。
+      const repaired = await judgeOnce(
+        options.full,
+        '你只输出一个 JSON 对象，不要任何解释、不要代码围栏。',
+        [
+          '下面是你上一次的输出，它无法被解析为 JSON：',
+          full.text.slice(0, 1500) || '（空输出）',
+          '',
+          '请把它改写成只包含这些字段的 JSON：',
+          '{"pass":true|false,"score":0到1,"reasons":["..."],"suggested_fix":"..."}',
+        ].join('\n'),
+        { maxTokens: 512, timeoutMs: Math.min(fullTimeoutMs, 30_000) }
+      );
+      if (repaired.input || repaired.output) {
+        options.onUsage?.({
+          stage: 'full',
+          input: repaired.input,
+          output: repaired.output,
+          model: options.full.profile.model,
+        });
+      }
+      const repairedVerdict =
+        repaired.aborted || repaired.failed ? null : extractJson(repaired.text);
+      if (repairedVerdict) {
+        return {
+          pass: Boolean(repairedVerdict.pass),
+          score: Number(repairedVerdict.score ?? 0),
+          reasons: Array.isArray(repairedVerdict.reasons)
+            ? repairedVerdict.reasons.map(String)
+            : [],
+          suggestedFix:
+            typeof repairedVerdict.suggested_fix === 'string'
+              ? repairedVerdict.suggested_fix
+              : undefined,
+          gate: 'full',
+        };
+      }
       return {
         pass: true,
         score: 0.6,
         needsHuman: true,
-        reasons: ['评委返回无法解析，已标记为需人工确认'],
+        reasons: ['评委返回无法解析，重问一次仍未通过，已标记为需人工确认'],
         gate: 'full',
       };
     }
