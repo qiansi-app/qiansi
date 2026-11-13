@@ -1861,6 +1861,47 @@ textarea {
 .selfopt-diff { margin-top: 10px; }
 .selfopt-diff pre { max-height: 240px; overflow: auto; margin: 6px 0 0; padding: 8px; border-radius: 6px; background: rgba(0,0,0,0.3); font-size: 10px; line-height: 1.5; white-space: pre; }
 
+/* 自我优化：失败横幅、逐条证据、历史轮次、落地核验、报告 */
+.selfopt-failure {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 10px 0; padding: 9px 11px; border-radius: 8px;
+  border: 1px solid rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.1);
+  color: #fca5a5; font-size: 11.5px;
+}
+.selfopt-failure b { color: #fecaca; }
+.selfopt-failure span { flex: 1; min-width: 180px; color: #fca5a5; }
+.selfopt-evidence { margin-top: 6px; }
+.selfopt-evidence pre {
+  max-height: 240px; overflow: auto; margin: 4px 0 0; padding: 8px;
+  border-radius: 6px; background: rgba(0, 0, 0, 0.32);
+  font-size: 10px; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+}
+.selfopt-history { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.selfopt-history-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 10px; border: 1px solid rgba(147, 164, 187, 0.14); border-radius: 8px;
+}
+.selfopt-history-item > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.selfopt-history-item b { font-size: 11.5px; color: #dce6f2; }
+.selfopt-history-item span { font-size: 10px; color: #7f8fa3; }
+.selfopt-history-item.failed b { color: #fca5a5; }
+.selfopt-landing { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.selfopt-landing-list { display: flex; flex-direction: column; gap: 5px; }
+.selfopt-landing-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 6px 9px; border-radius: 7px; font-size: 11px;
+  border: 1px solid rgba(147, 164, 187, 0.14);
+}
+.selfopt-landing-item.ok { border-color: rgba(16, 185, 129, 0.4); color: #a7f3d0; }
+.selfopt-landing-item.missing { border-color: rgba(239, 68, 68, 0.35); color: #fca5a5; }
+.selfopt-landing-item em { font-style: normal; font-size: 10px; opacity: 0.8; flex: none; }
+.selfopt-report { margin-top: 12px; }
+.selfopt-report pre {
+  max-height: 320px; overflow: auto; margin: 6px 0 0; padding: 10px;
+  border-radius: 8px; background: rgba(0, 0, 0, 0.32);
+  font-size: 10.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+}
+
 
 /* 画布标签独立一行：VS Code 侧栏很窄，不能和操作区挤在同一行 */
 .workspace-row {

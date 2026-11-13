@@ -41,8 +41,13 @@ interface Finding {
   status: 'proposed' | 'applied' | 'skipped' | 'failed';
   note?: string;
   commit?: string;
+  files?: string[];
   proposedBy?: string;
   reviews?: Array<{ by: string; verdict: 'confirm' | 'revise' | 'refute'; note?: string }>;
+  checks?: Array<{ cmd: string; ok: boolean; detail?: string }>;
+  review?: { ok: boolean; by?: string; note?: string };
+  diffStat?: string;
+  diff?: string;
 }
 
 interface Forecast {
@@ -57,6 +62,7 @@ interface Forecast {
 
 interface Session {
   id: string;
+  rootDir?: string;
   mode: string;
   level: string;
   status: 'running' | 'done' | 'failed' | 'stopped';
@@ -106,6 +112,33 @@ interface VersionsPayload {
   error?: string;
 }
 
+interface SessionSummary {
+  id: string;
+  mode: string;
+  level: string;
+  status: string;
+  tokens: number;
+  findings: number;
+  applied: number;
+  failed: number;
+  versions: number;
+  error?: string;
+  hasReport?: boolean;
+  startedAt: number;
+  finishedAt?: number;
+}
+
+interface LandingItem {
+  id: string;
+  title: string;
+  short: string;
+  files: string[];
+  createdAt: number;
+  exists: boolean;
+  landed: boolean;
+  subject?: string;
+}
+
 interface SelfOptModalProps {
   open: boolean;
   onClose: () => void;
@@ -143,6 +176,11 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
   const [busy, setBusy] = useState(false);
   const [watch, setWatch] = useState<{ id: string; stat: string; diff: string } | null>(null);
   const [toast, setToast] = useState('');
+  const [history, setHistory] = useState<SessionSummary[]>([]);
+  const [report, setReport] = useState<{ id: string; text: string } | null>(null);
+  const [landing, setLanding] = useState<{ branch: string; head: string; items: LandingItem[] } | null>(null);
+  /** 展开证据（校验/复核/diff）的那条问题。 */
+  const [evidence, setEvidence] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
 
   const loadStatus = async () => {
@@ -158,9 +196,16 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
     }
   };
 
+  /** 历史/报告/核验/版本都要落在「被优化的那个仓库」上，不能默认成牵丝自己。 */
+  const scopeRoot = () => (rootDir.trim() || session?.rootDir || '').trim();
+  const scopeQuery = () => {
+    const scope = scopeRoot();
+    return scope ? `?rootDir=${encodeURIComponent(scope)}` : '';
+  };
+
   const loadVersions = async () => {
     try {
-      const response = await fetch('/api/selfopt/versions');
+      const response = await fetch(`/api/selfopt/versions${scopeQuery()}`);
       const body = (await response.json()) as VersionsPayload;
       setVersions(body);
     } catch {
@@ -168,8 +213,64 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
     }
   };
 
-  const loadForecast = async (nextMode = mode, nextLevel = level, nextBudget = budget) => {
+  const loadHistory = async () => {
     try {
+      const scope = scopeRoot();
+      const response = await fetch(
+        `/api/selfopt/sessions${scope ? `?rootDir=${encodeURIComponent(scope)}` : ''}`
+      );
+      const body = (await response.json()) as { ok?: boolean; sessions?: SessionSummary[] };
+      setHistory(body.sessions ?? []);
+    } catch {
+      // 历史加载失败不影响当前轮
+    }
+  };
+
+  /** 每条优化做过什么、验过什么、有没有提交，都在报告里。 */
+  const showReport = async (id: string) => {
+    try {
+      const scope = scopeRoot();
+      const response = await fetch(
+        `/api/selfopt/sessions/${encodeURIComponent(id)}/report${scope ? `?rootDir=${encodeURIComponent(scope)}` : ''}`
+      );
+      const body = (await response.json()) as { ok?: boolean; report?: string; error?: string };
+      if (!body.ok || !body.report) {
+        setError(body.error === 'report_not_found' ? '这轮还没有生成报告（可能是旧版本跑的）。' : body.error ?? '报告读取失败');
+        return;
+      }
+      setError('');
+      setReport({ id, text: body.report });
+    } catch {
+      setError('报告读取失败');
+    }
+  };
+
+  /** 只信 git：版本记录里的提交是否仍在当前分支上。 */
+  const checkLanding = async () => {
+    try {
+      const scope = scopeRoot();
+      const response = await fetch(
+        `/api/selfopt/landing${scope ? `?rootDir=${encodeURIComponent(scope)}` : ''}`
+      );
+      const body = (await response.json()) as {
+        ok?: boolean;
+        branch?: string;
+        head?: string;
+        items?: LandingItem[];
+        error?: string;
+      };
+      if (!body.ok) {
+        setError(body.error ?? '落地核验失败');
+        return;
+      }
+      setError('');
+      setLanding({ branch: body.branch ?? '', head: body.head ?? '', items: body.items ?? [] });
+    } catch {
+      setError('落地核验失败');
+    }
+  };
+
+  const loadForecast = async (nextMode = mode, nextLevel = level, nextBudget = budget) => {    try {
       const response = await fetch(
         `/api/selfopt/forecast?mode=${nextMode}&level=${nextLevel}&budget=${Math.max(1000, nextBudget)}`
       );
@@ -183,7 +284,6 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
   useEffect(() => {
     if (!open) return;
     void loadStatus();
-    void loadVersions();
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
       pollRef.current = null;
@@ -204,6 +304,14 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
 
   useEffect(() => {
     if (!open) return;
+    if (session?.status === 'running') return;
+    // 换了被优化的仓库：版本、历史、落地都跟着换，不能继续显示上一个仓库的。
+    void loadVersions();
+    void loadHistory();
+  }, [open, rootDir, session?.rootDir]);
+
+  useEffect(() => {
+    if (!open) return;
     if (pollRef.current) window.clearInterval(pollRef.current);
     pollRef.current = null;
     if (session?.status !== 'running') return;
@@ -213,6 +321,7 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
         if (pollRef.current) window.clearInterval(pollRef.current);
         pollRef.current = null;
         void loadVersions();
+        void loadHistory();
       }
     }, 2000);
     return () => {
@@ -221,15 +330,27 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
     };
   }, [open, session?.status]);
 
-  const start = async () => {
+  const start = async (overrides?: { mode?: string; level?: string; budget?: number; rootDir?: string }) => {
+    const useMode = overrides?.mode ?? mode;
+    const useLevel = overrides?.level ?? level;
+    const useBudget = overrides?.budget ?? budget;
+    const useRootDir = overrides?.rootDir ?? rootDir;
     setBusy(true);
     setError('');
     setToast('');
+    setReport(null);
+    setLanding(null);
     try {
       const response = await fetch('/api/selfopt/start', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ mode, level, maxTokens: budget, maxRounds, rootDir: rootDir.trim() || undefined }),
+        body: JSON.stringify({
+          mode: useMode,
+          level: useLevel,
+          maxTokens: useBudget,
+          maxRounds,
+          rootDir: useRootDir.trim() || undefined,
+        }),
       });
       const body = (await response.json().catch(() => null)) as
         | { ok?: boolean; session?: Session; error?: string }
@@ -267,7 +388,9 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
 
   const viewDiff = async (version: Version) => {
     try {
-      const response = await fetch(`/api/selfopt/versions/${encodeURIComponent(version.id)}/diff`);
+      const response = await fetch(
+        `/api/selfopt/versions/${encodeURIComponent(version.id)}/diff${scopeQuery()}`
+      );
       const body = (await response.json()) as { ok?: boolean; stat?: string; diff?: string };
       if (!body.ok) {
         setError('拿不到这个版本的差异');
@@ -281,9 +404,10 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
 
   const switchTo = async (version: Version) => {
     try {
-      const response = await fetch(`/api/selfopt/versions/${encodeURIComponent(version.id)}/switch`, {
-        method: 'POST',
-      });
+      const response = await fetch(
+        `/api/selfopt/versions/${encodeURIComponent(version.id)}/switch${scopeQuery()}`,
+        { method: 'POST' }
+      );
       const body = (await response.json()) as { ok?: boolean; branch?: string; error?: string };
       if (!body.ok) {
         setError(body.error === 'worktree_dirty' ? '工作区有未提交改动，先提交或 stash 再切换。' : body.error ?? '切换失败');
@@ -298,7 +422,7 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
 
   const restore = async () => {
     try {
-      const response = await fetch('/api/selfopt/restore', { method: 'POST' });
+      const response = await fetch(`/api/selfopt/restore${scopeQuery()}`, { method: 'POST' });
       const body = (await response.json()) as { ok?: boolean; branch?: string; error?: string };
       if (!body.ok) {
         setError(body.error === 'worktree_dirty' ? '工作区有未提交改动，先提交或 stash。' : body.error ?? '恢复失败');
@@ -472,35 +596,84 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
               </div>
             </div>
 
+            {session.status === 'failed' && (
+              <div className="selfopt-failure">
+                <b>本轮没有落地任何改动</b>
+                <span>{session.error ?? session.stages.find((stage) => stage.status === 'failed')?.detail ?? '未知错误'}</span>
+                <button
+                  className="keys-mini"
+                  onClick={() =>
+                    void start({
+                      mode: session.mode,
+                      level: session.level,
+                      budget: session.budget.maxTokens,
+                      rootDir: session.rootDir ?? rootDir,
+                    })
+                  }
+                >
+                  按同样设置重试
+                </button>
+              </div>
+            )}
+
             {session.findings.length > 0 && (
               <div className="attention-list">
-                {session.findings.map((finding) => (
-                  <div key={finding.id} className="attention-item">
-                    <b>
-                      [{finding.severity}/{finding.kind}] {finding.title}
-                    </b>
-                    <span>
-                      {finding.status === 'applied'
-                        ? `已提交 ${finding.commit ?? ''}`
-                        : finding.status === 'failed'
-                          ? `失败：${finding.note ?? ''}`
-                          : finding.status === 'skipped'
-                            ? `跳过：${finding.note ?? ''}`
-                            : '待处理'}
-                    </span>
-                    {(finding.proposedBy || (finding.reviews?.length ?? 0) > 0) && (
-                      <span className="attention-hint">
-                        {finding.proposedBy ? `提出：${finding.proposedBy}` : ''}
-                        {(finding.reviews?.length ?? 0) > 0
-                          ? `${finding.proposedBy ? ' · ' : ''}互审：${finding.reviews!
-                              .filter((review) => review.verdict === 'confirm').length} 确认 / ${finding.reviews!
-                              .filter((review) => review.verdict === 'revise').length} 修正 / ${finding.reviews!
-                              .filter((review) => review.verdict === 'refute').length} 驳回`
-                          : ''}
+                {session.findings.map((finding) => {
+                  const open = evidence === finding.id;
+                  return (
+                    <div key={finding.id} className="attention-item">
+                      <b>
+                        [{finding.severity}/{finding.kind}] {finding.title}
+                      </b>
+                      <span>
+                        {finding.status === 'applied'
+                          ? `已提交 ${finding.commit ?? ''}`
+                          : finding.status === 'failed'
+                            ? `失败：${finding.note ?? ''}`
+                            : finding.status === 'skipped'
+                              ? `跳过：${finding.note ?? ''}`
+                              : '待处理'}
                       </span>
-                    )}
-                  </div>
-                ))}
+                      {(finding.checks?.length ?? 0) > 0 && (
+                        <span className="attention-hint">
+                          校验：
+                          {finding.checks!
+                            .map((check) => `${check.cmd} ${check.ok ? '✓' : '✗'}`)
+                            .join(' · ')}
+                          {finding.review ? ` · 复核${finding.review.ok ? '通过' : '驳回'}` : ''}
+                          {finding.commit ? ` · 提交 ${finding.commit}` : ''}
+                        </span>
+                      )}
+                      {(finding.proposedBy || (finding.reviews?.length ?? 0) > 0) && (
+                        <span className="attention-hint">
+                          {finding.proposedBy ? `提出：${finding.proposedBy}` : ''}
+                          {(finding.reviews?.length ?? 0) > 0
+                            ? `${finding.proposedBy ? ' · ' : ''}互审：${finding.reviews!
+                                .filter((review) => review.verdict === 'confirm').length} 确认 / ${finding.reviews!
+                                .filter((review) => review.verdict === 'revise').length} 修正 / ${finding.reviews!
+                                .filter((review) => review.verdict === 'refute').length} 驳回`
+                            : ''}
+                        </span>
+                      )}
+                      {(finding.diffStat || finding.diff) && (
+                        <>
+                          <button
+                            className="keys-mini"
+                            onClick={() => setEvidence(open ? null : finding.id)}
+                          >
+                            {open ? '收起证据' : '查看证据'}
+                          </button>
+                          {open && (
+                            <div className="selfopt-evidence">
+                              {finding.diffStat && <pre>{finding.diffStat}</pre>}
+                              {finding.diff && <pre>{finding.diff}</pre>}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
 
@@ -556,6 +729,67 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
             <button className="keys-mini" onClick={() => void restore()}>
               <RotateCcw size={12} /> 回到原分支
             </button>
+          </div>
+        )}
+
+        {history.length > 0 && (
+          <div className="selfopt-history">
+            <div className="selfopt-label">历史优化（{history.length}）· 点「报告」看每轮改了什么</div>
+            {history.slice(0, 8).map((item) => (
+              <div key={item.id} className={`selfopt-history-item ${item.status}`}>
+                <div>
+                  <b>
+                    {timeLabel(item.startedAt)} · {item.mode}/{item.level} · {item.status}
+                  </b>
+                  <span>
+                    {item.findings} 条问题 · 落地 {item.applied} · 提交 {item.versions} · {k(item.tokens)} tokens
+                    {item.error ? ` · ${item.error.slice(0, 48)}` : ''}
+                  </span>
+                </div>
+                <button
+                  className="keys-mini"
+                  onClick={() => void showReport(item.id)}
+                  disabled={!item.hasReport}
+                  title={item.hasReport ? '查看这轮的报告：改了什么、验过什么、提交在哪' : '这轮没有报告'}
+                >
+                  报告
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="selfopt-landing">
+          <button className="keys-mini" onClick={() => void checkLanding()} title="逐条检查优化提交是否仍在当前分支上">
+            <GitBranch size={12} /> 核验落地（git）
+          </button>
+          {landing && (
+            <div className="selfopt-landing-list">
+              <div className="attention-hint">
+                分支 {landing.branch} @ {landing.head} · {landing.items.filter((item) => item.landed).length}/
+                {landing.items.length} 条优化仍在当前分支
+              </div>
+              {landing.items.map((item) => (
+                <div key={item.id} className={`selfopt-landing-item ${item.landed ? 'ok' : 'missing'}`}>
+                  <span>
+                    {item.landed ? '✓' : '✗'} {item.short} · {item.title}
+                  </span>
+                  <em>{item.landed ? '已落地' : item.exists ? '不在当前分支' : '提交不存在'}</em>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {report && (
+          <div className="selfopt-report">
+            <div className="selfopt-label">
+              优化报告 · {report.id}
+              <button className="keys-mini" onClick={() => setReport(null)}>
+                收起
+              </button>
+            </div>
+            <pre>{report.text}</pre>
           </div>
         )}
 

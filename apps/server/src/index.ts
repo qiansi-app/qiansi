@@ -4040,8 +4040,14 @@ app.post('/api/selfopt/start', async (context) => {
       actor: actorOf(context),
     });
     // 自省过程放到独立画布：体检、问题、改法都成为节点，可随时查看。
+    // 同一个仓库复用同一张自省画布——每跑一次就新建一张，会把标签栏堆满。
     const repoName = basename(session.rootDir) || 'project';
-    const canvasWs = workspaces.create(`自省 · ${repoName}`.slice(0, 40));
+    const canvasName = `自省 · ${repoName}`.slice(0, 40);
+    const existingCanvas = workspaces
+      .list()
+      .find((item) => !item.archivedAt && item.name === canvasName);
+    const canvasWs = existingCanvas ?? workspaces.create(canvasName);
+    if (existingCanvas) workspaces.restore(canvasWs.id);
     selfoptCanvases.clear();
 selfoptSyncAt.clear();
 selfoptCanvases.set(session.id, canvasWs.id);
@@ -4088,6 +4094,25 @@ app.get('/api/selfopt/status', async (context) => {
 app.get('/api/selfopt/versions', async (context) => {
   const rootDir = String(context.req.query('rootDir') ?? '') || defaultSelfOptRoot();
   return context.json(await selfOpt.versions(rootDir));
+});
+
+/** 历史优化会话：回看上一轮到底改了些什么，而不是只认内存里的当前轮。 */
+app.get('/api/selfopt/sessions', async (context) => {
+  const rootDir = String(context.req.query('rootDir') ?? '') || defaultSelfOptRoot();
+  return context.json({ ok: true, sessions: await selfOpt.listSessions(rootDir) });
+});
+
+app.get('/api/selfopt/sessions/:id/report', async (context) => {
+  const rootDir = String(context.req.query('rootDir') ?? '') || defaultSelfOptRoot();
+  const report = selfOpt.report(rootDir, context.req.param('id'));
+  if (!report) return context.json({ ok: false, error: 'report_not_found' }, 404);
+  return context.json({ ok: true, report });
+});
+
+/** 落地核验：逐条检查优化提交是否仍在当前分支上。 */
+app.get('/api/selfopt/landing', async (context) => {
+  const rootDir = String(context.req.query('rootDir') ?? '') || defaultSelfOptRoot();
+  return context.json(await selfOpt.landing(rootDir));
 });
 
 app.get('/api/selfopt/versions/:id/diff', async (context) => {

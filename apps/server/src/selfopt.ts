@@ -445,6 +445,13 @@ export interface SelfOptFinding {
   proposedBy?: string;
   /** 其他模型的互审意见：确认、修正或驳回。 */
   reviews?: Array<{ by: string; verdict: 'confirm' | 'revise' | 'refute'; note?: string }>;
+  /** 落地证据：校验命令及结果。 */
+  checks?: Array<{ cmd: string; ok: boolean; detail?: string }>;
+  /** 落地证据：独立复核结论。 */
+  review?: { ok: boolean; by?: string; note?: string };
+  /** 落地证据：提交的文件清单与 diff 摘要（统一 diff 只留前 4000 字）。 */
+  diffStat?: string;
+  diff?: string;
 }
 
 export interface SelfOptVersion {
@@ -966,14 +973,27 @@ export class SelfOptEngine {
       });
     } finally {
       // 收尾：仍在 running 的阶段统一落定，避免界面出现永远在转的步骤。
+      // 失败时不能标 done——那会把「没改任何东西」显示成「执行完成」。
       for (const stage of session.stages) {
         if (stage.status === 'running') {
-          stage.status = this.stopped ? 'skipped' : 'done';
+          stage.status = this.stopped ? 'skipped' : session.status === 'failed' ? 'failed' : 'done';
+          if (session.status === 'failed' && !stage.detail) {
+            stage.detail = session.error?.slice(0, 200) ?? '本轮中止';
+          }
           stage.finishedAt = Date.now();
+        }
+      }
+      if (level.writes && session.status === 'failed') {
+        for (const finding of session.findings) {
+          if (finding.status === 'proposed') {
+            finding.status = 'failed';
+            finding.note = `未执行：${(session.error ?? '本轮中止').slice(0, 240)}`;
+          }
         }
       }
       session.finishedAt = Date.now();
       this.save(session);
+      this.writeReport(session);
       this.appendJournal(session);
       this.deps.audit({
         actor: 'selfopt',
@@ -1003,6 +1023,139 @@ export class SelfOptEngine {
     } catch {
       // 校准数据丢了不影响本轮
     }
+  }
+
+  private sessionsDir(rootDir: string): string {
+    const dir = join(this.projectDir(rootDir), 'sessions');
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  /**
+   * 每轮结束写一份人读的报告：每条问题改了什么、跑过哪些校验、
+   * 复核结论、diff 摘要、提交 hash。界面只显示标题时，用户没法判断
+   * 「到底优化了什么、有没有落地」，报告就是那份可核对的证据。
+   */
+  private writeReport(session: SelfOptSession): void {
+    try {
+      const applied = session.findings.filter((finding) => finding.status === 'applied');
+      const failed = session.findings.filter((finding) => finding.status === 'failed');
+      const skipped = session.findings.filter((finding) => finding.status === 'skipped');
+      const started = new Date(session.startedAt).toISOString();
+      const finished = session.finishedAt ? new Date(session.finishedAt).toISOString() : '—';
+      const lines: string[] = [
+        `# 自我优化报告 · ${session.id}`,
+        '',
+        `- 仓库：\`${session.rootDir}\``,
+        `- 模式/档位：${session.mode} / ${session.level}`,
+        `- 状态：**${session.status}**${session.error ? `（${session.error}）` : ''}`,
+        `- 时间：${started} → ${finished}`,
+        `- 用量：${session.usedTokens} tokens · ${session.round} 轮`,
+        `- 基线：${session.baseCommit ?? '—'} @ ${session.baseBranch ?? '—'}`,
+        `- 结果：发现 ${session.findings.length} 条 · 落地 ${applied.length} 条 · 失败 ${failed.length} 条 · 跳过 ${skipped.length} 条 · 提交 ${session.versions.length} 个`,
+        '',
+        '## 阶段',
+        '',
+        '| 阶段 | 状态 | 说明 |',
+        '|---|---|---|',
+        ...session.stages.map(
+          (stage) =>
+            `| ${stage.label} | ${stage.status} | ${(stage.detail ?? '').replace(/\|/g, '/').slice(0, 160)} |`
+        ),
+        '',
+        '## 逐条明细',
+        '',
+      ];
+      for (const finding of session.findings) {
+        lines.push(`### [${finding.severity}/${finding.kind}] ${finding.title}`);
+        lines.push('');
+        lines.push(`- 状态：**${finding.status}**${finding.note ? ` — ${finding.note}` : ''}`);
+        if (finding.commit) lines.push(`- 提交：\`${finding.commit}\``);
+        if (finding.files.length) lines.push(`- 目标文件：${finding.files.map((file) => `\`${file}\``).join('、')}`);
+        lines.push(`- 依据：${finding.evidence.replace(/\n/g, ' ').slice(0, 600)}`);
+        lines.push(`- 改法：${finding.proposal.replace(/\n/g, ' ').slice(0, 600)}`);
+        lines.push(`- 验收：${finding.acceptance.replace(/\n/g, ' ').slice(0, 400)}`);
+        if (finding.checks?.length) {
+          lines.push(
+            `- 校验：${finding.checks.map((check) => `${check.cmd} ${check.ok ? '通过' : '失败'}${check.detail ? `（${check.detail.slice(0, 160)}）` : ''}`).join('；')}`
+          );
+        }
+        if (finding.review) {
+          lines.push(
+            `- 独立复核：${finding.review.ok ? '通过' : '驳回'}${finding.review.by ? `（${finding.review.by}）` : ''}${finding.review.note ? ` — ${finding.review.note.slice(0, 240)}` : ''}`
+          );
+        }
+        if (finding.diffStat) {
+          lines.push('', '```', finding.diffStat, '```');
+        }
+        if (finding.diff) {
+          lines.push('', '<details><summary>diff（截断）</summary>', '', '```diff', finding.diff, '```', '', '</details>');
+        }
+        lines.push('');
+      }
+      writeFileSync(join(this.sessionsDir(session.rootDir), `${session.id}.md`), lines.join('\n'), 'utf8');
+    } catch {
+      // 报告写不出来不影响优化本身
+    }
+  }
+
+  /** 报告正文：JSON 里没有的细节（校验、复核、diff）都在这里。 */
+  report(rootDir: string, id: string): string | null {
+    try {
+      return readFileSync(join(this.sessionsDir(rootDir), `${id.replace(/[^\w-]/g, '')}.md`), 'utf8');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 落地核验：版本里记录的提交是否仍在当前分支上。
+   * 只信 git，不信记忆——这样用户能直接看到 n/m 条优化真的存在于代码里。
+   */
+  async landing(rootDir: string): Promise<{
+    ok: boolean;
+    branch: string;
+    head: string;
+    items: Array<{
+      id: string;
+      title: string;
+      short: string;
+      files: string[];
+      createdAt: number;
+      exists: boolean;
+      landed: boolean;
+      subject?: string;
+    }>;
+  }> {
+    const versions = await this.versions(rootDir);
+    const branchResult = await this.git(['rev-parse', '--abbrev-ref', 'HEAD'], rootDir);
+    const headResult = await this.git(['rev-parse', '--short', 'HEAD'], rootDir);
+    const items = [];
+    for (const version of versions.versions ?? []) {
+      const exists = (await this.git(['cat-file', '-e', `${version.commit}^{commit}`], rootDir)).code === 0;
+      const ancestor =
+        exists &&
+        (await this.git(['merge-base', '--is-ancestor', version.commit, 'HEAD'], rootDir)).code === 0;
+      const subject = exists
+        ? (await this.git(['log', '-1', '--format=%s', version.commit], rootDir)).stdout.trim()
+        : undefined;
+      items.push({
+        id: version.id,
+        title: version.title,
+        short: version.short,
+        files: version.files,
+        createdAt: version.createdAt,
+        exists,
+        landed: ancestor,
+        subject,
+      });
+    }
+    return {
+      ok: true,
+      branch: branchResult.stdout.trim(),
+      head: headResult.stdout.trim(),
+      items,
+    };
   }
 
   // -- 体检 ----------------------------------------------------------------
@@ -1684,13 +1837,23 @@ export class SelfOptEngine {
 4. 代码风格与文件保持一致，注释用中文。`,
     ].join('\n\n');
 
-    const proposal = await this.chatJson<{ changes?: Array<Record<string, unknown>>; note?: string }>(
-      session,
-      'apply',
-      system,
-      user.slice(0, 60_000),
-      8000
-    );
+    let proposal: { data: { changes?: Array<Record<string, unknown>>; note?: string } | null; model?: string };
+    try {
+      proposal = await this.chatJson<{ changes?: Array<Record<string, unknown>>; note?: string }>(
+        session,
+        'apply',
+        system,
+        user.slice(0, 60_000),
+        8000
+      );
+    } catch (error) {
+      // 实现模型挂了（空正文/超时）：把当前这条标成失败再向上抛，
+      // 否则界面只看到「待处理」，既没落地也没有原因。
+      finding.status = 'failed';
+      finding.note = `实现模型不可用：${error instanceof Error ? error.message : String(error)}`.slice(0, 400);
+      this.save(session);
+      throw error;
+    }
     const changes = (proposal.data?.changes ?? []).slice(0, level.maxFilesPerFinding);
     if (changes.length === 0) {
       finding.status = 'skipped';
@@ -1729,8 +1892,14 @@ export class SelfOptEngine {
       const checks = survey.checks.length
         ? survey.checks.map((check) => check.cmd)
         : ['npx tsc --noEmit'];
+      finding.checks = [];
       for (const cmd of checks.slice(0, 3)) {
         const check = await this.runShell(cmd, DEFAULT_TIMEOUT, session.rootDir);
+        finding.checks.push({
+          cmd,
+          ok: check.code === 0,
+          detail: check.code === 0 ? undefined : this.summarizeCheck(check).slice(0, 300),
+        });
         if (check.code !== 0) {
           verifyStage.status = 'failed';
           verifyStage.detail = `${cmd} 未通过`;
@@ -1746,6 +1915,9 @@ export class SelfOptEngine {
 
       // 独立复核：换一个模型只看 diff，挡住「检查能过但改错了」的情况。
       const review = await this.reviewChange(session, finding, touched);
+      finding.review = review
+        ? { ok: review.ok, by: review.by, note: review.problems.slice(0, 3).join('；').slice(0, 300) }
+        : { ok: true, note: '单模型评审团：跳过独立复核（校验命令已通过）' };
       if (review && !review.ok) {
         verifyStage.status = 'failed';
         verifyStage.detail = '独立复核驳回';
@@ -1759,7 +1931,10 @@ export class SelfOptEngine {
       // 密钥扫描：提交前最后一道闸。
       const staged = await this.git(['add', '--', ...touched], session.rootDir);
       if (staged.code !== 0) throw new Error(`git_add_failed:${staged.stderr.slice(0, 200)}`);
+      const diffStat = await this.git(['diff', '--cached', '--stat'], session.rootDir);
+      finding.diffStat = diffStat.stdout.trim().slice(0, 1200) || touched.join('、');
       const diff = await this.git(['diff', '--cached', '--unified=0'], session.rootDir);
+      finding.diff = diff.stdout.slice(0, 4000);
       const secrets = scanSecrets(diff.stdout);
       if (secrets.length > 0) {
         await this.git(['reset'], session.rootDir);
@@ -1832,7 +2007,7 @@ export class SelfOptEngine {
     session: SelfOptSession,
     finding: SelfOptFinding,
     files: string[]
-  ): Promise<{ ok: boolean; problems: string[] } | null> {
+  ): Promise<{ ok: boolean; problems: string[]; by?: string } | null> {
     const panel = session.panel ?? [];
     if (panel.length < 2) return null;
     const diff = await this.git(['diff', '--', ...files], session.rootDir);
@@ -1869,7 +2044,7 @@ export class SelfOptEngine {
         session,
         `改动复核（${result.model ?? reviewer}）：${ok ? '通过' : `驳回 ${problems[0] ?? ''}`}`
       );
-      return { ok, problems };
+      return { ok, problems, by: result.model ?? reviewer };
     } catch (error) {
       this.log(
         session,
@@ -1918,7 +2093,8 @@ export class SelfOptEngine {
     };
   }
 
-  private listSessions(rootDir: string) {
+  /** 历史优化会话：界面用它回看「上次优化改了什么」，而不是只认内存里的当前轮。 */
+  listSessions(rootDir: string) {
     const dir = join(this.projectDir(rootDir), 'sessions');
     if (!existsSync(dir)) return [];
     return readdirSync(dir)
@@ -1933,6 +2109,11 @@ export class SelfOptEngine {
             status: data.status,
             tokens: data.usedTokens,
             findings: data.findings?.length ?? 0,
+            applied: (data.findings ?? []).filter((finding) => finding.status === 'applied').length,
+            failed: (data.findings ?? []).filter((finding) => finding.status === 'failed').length,
+            versions: data.versions?.length ?? 0,
+            error: data.error,
+            hasReport: existsSync(join(dir, `${data.id}.md`)),
             startedAt: data.startedAt,
             finishedAt: data.finishedAt,
           };
