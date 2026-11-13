@@ -519,6 +519,8 @@ export interface SelfOptStartOptions {
   findings?: number;
   allowDirty?: boolean;
   actor?: string;
+  /** 团队成员的模型：优先进入评审团，让配置的团队真正参与。 */
+  models?: string[];
 }
 
 interface SurveyReport {
@@ -718,7 +720,7 @@ export class SelfOptEngine {
     }
 
     const maxTokens = Math.max(5_000, Math.round(options.maxTokens ?? 120_000));
-    const panel = await this.resolvePanel(level);
+    const panel = await this.resolvePanel(level, options.models ?? []);
     const session: SelfOptSession = {
       id: `so-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
       rootDir,
@@ -788,7 +790,7 @@ export class SelfOptEngine {
    * 组评审团：优先不同厂商，凑不满再补同厂商的第二个模型。
    * QIANSI_SELFOPT_MODELS 可直接指定（逗号分隔），用于实验与验收。
    */
-  private async resolvePanel(level: LevelSpec): Promise<string[]> {
+  private async resolvePanel(level: LevelSpec, preferred: string[] = []): Promise<string[]> {
     const want = panelSizeFor(level);
     if (want < 2) return [];
     const forced = String(process.env.QIANSI_SELFOPT_MODELS ?? '')
@@ -803,9 +805,15 @@ export class SelfOptEngine {
         roster = [];
       }
     }
+    const rosterModels = roster.map((entry) => String(entry?.model ?? '').trim()).filter(Boolean);
+    const preferredClean = preferred.map((model) => String(model ?? '').trim()).filter(Boolean);
+    const rosterSet = new Set(rosterModels);
+    // 团队成员的模型排在最前（有 key 的才进名单），其余按厂商多样性补齐。
+    const queue = rosterSet.size
+      ? [...preferredClean.filter((model) => rosterSet.has(model)), ...rosterModels]
+      : [...preferredClean, ...rosterModels];
     const unique: string[] = [];
-    for (const entry of roster) {
-      const id = String(entry?.model ?? '').trim();
+    for (const id of queue) {
       if (id && !unique.includes(id)) unique.push(id);
     }
     const picked: string[] = [];

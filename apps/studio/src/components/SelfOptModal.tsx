@@ -101,6 +101,8 @@ interface Meta {
   safety: string[];
   /** 有 key 的模型候选：评审团从这里取。 */
   roster?: string[];
+  /** 当前画布的团队：成员模型优先参与评审。 */
+  team?: Array<{ id: string; name: string; job: string; model: string }>;
 }
 
 interface VersionsPayload {
@@ -480,6 +482,23 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
           </div>
         )}
 
+        {meta?.team && meta.team.length > 0 && (
+          <div className="selfopt-forecast">
+            团队参与：
+            <b>
+              {meta.team
+                .slice(0, 5)
+                .map((member) => `${member.name}（${member.job}）`)
+                .join(' · ')}
+              {meta.team.length > 5 ? ` 等 ${meta.team.length} 人` : ''}
+            </b>
+            <span className="attention-hint">
+              {' '}
+              · 成员模型优先进入评审团；未落地的问题会以成员任务的形式落到自省画布上
+            </span>
+          </div>
+        )}
+
         <div className="selfopt-row">
           <div className="selfopt-label">模式</div>
           <div className="selfopt-grid">
@@ -681,13 +700,13 @@ export function SelfOptModal({ open, onClose }: SelfOptModalProps) {
 
             {session.canvasWorkspaceId && (
               <div className="selfopt-forecast">
-                体检与问题已同步到画布
+                体检、复盘、修复、校验、提交已同步到画布；未落地的问题已变成待运行任务
                 <button
                   className="keys-mini"
                   style={{ marginLeft: 8 }}
                   onClick={() => session.canvasWorkspaceId && switchWorkspace(session.canvasWorkspaceId)}
                 >
-                  去画布看问题
+                  去画布看执行流程
                 </button>
               </div>
             )}

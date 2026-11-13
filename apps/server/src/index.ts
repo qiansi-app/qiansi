@@ -644,7 +644,7 @@ async function availableSelfOptModels(): Promise<string[]> {
   return models;
 }
 
-/** 自省会话 -> 画布：体检与每条问题都成为可读的节点。 */
+/** 自省会话 -> 画布：体检、复盘、问题、修复、校验、提交、结果都成为可读的节点与连线。 */
 const selfoptCanvases = new Map<string, string>();
 const selfoptSyncAt = new Map<string, number>();
 
@@ -657,7 +657,24 @@ function publishSelfOpt(session: {
   usedTokens: number;
   budget: { maxTokens: number };
   stages: Array<{ id: string; label: string; status: string; detail?: string; tokens?: number }>;
-  findings: Array<{ id: string; title: string; kind: string; severity: string; evidence: string; proposal: string; acceptance: string; status: string; note?: string; commit?: string; proposedBy?: string; reviews?: Array<{ verdict: string }> }>;
+  findings: Array<{
+    id: string;
+    title: string;
+    kind: string;
+    severity: string;
+    evidence: string;
+    proposal: string;
+    acceptance: string;
+    status: string;
+    note?: string;
+    commit?: string;
+    proposedBy?: string;
+    files?: string[];
+    reviews?: Array<{ verdict: string }>;
+    checks?: Array<{ cmd: string; ok: boolean; detail?: string }>;
+    review?: { ok: boolean; by?: string; note?: string };
+    diffStat?: string;
+  }>;
   versions: string[];
   panel?: string[];
 }): void {
@@ -676,14 +693,36 @@ function publishSelfOpt(session: {
       else ops.push({ op: 'add_node', node });
     };
     const repo = basename(session.rootDir) || session.rootDir;
+    const stage = (id: string) => session.stages.find((item) => item.id === id);
+    const statusOf = (id: string) => {
+      const value = stage(id)?.status;
+      return value === 'failed' ? ('failed' as const) : value === 'done' ? ('done' as const) : value === 'running' ? ('running' as const) : ('idle' as const);
+    };
+    const team = teamFor(workspaceId);
+    const memberFor = (finding: (typeof session.findings)[number]) => {
+      const hay = `${finding.title} ${finding.evidence} ${(finding.files ?? []).join(' ')}`.toLowerCase();
+      let best: (typeof team.members)[number] | undefined;
+      let bestScore = 0;
+      for (const member of team.members) {
+        const tokens = `${member.job} ${member.name}`.split(/[、,，;；·\s/]+/).filter((token) => token.length >= 2);
+        let score = 0;
+        for (const token of tokens) if (hay.includes(token.toLowerCase())) score += 1;
+        if (score > bestScore) {
+          bestScore = score;
+          best = member;
+        }
+      }
+      return { member: best, score: bestScore };
+    };
+
     upsert({
       id: 'selfopt-root',
       type: 'library',
-      position: { x: 60, y: 60 },
+      position: { x: 40, y: 60 },
       data: {
         kind: 'library',
         name: `自省 · ${repo}`,
-        role: `${session.mode}/${session.level} · 预算 ${session.budget.maxTokens}${session.panel && session.panel.length > 1 ? ` · 评审团 ${session.panel.length} 家` : ''}`,
+        role: `${session.mode}/${session.level} · 预算 ${session.budget.maxTokens}${session.panel && session.panel.length > 1 ? ` · 评审团 ${session.panel.length} 家` : ''} · 团队 ${team.members.length} 人`,
         provider: 'local',
         model: 'library',
         effort: 'off',
@@ -694,12 +733,13 @@ function publishSelfOpt(session: {
         output: session.rootDir,
       },
     });
-    const survey = session.stages.find((stage) => stage.id === 'survey');
+
+    const survey = stage('survey');
     const surveyText = (survey?.detail ?? '') + (survey?.tokens ? ` · ${survey.tokens} tok` : '');
     upsert({
       id: 'selfopt-survey',
       type: 'artifact',
-      position: { x: 420, y: 60 },
+      position: { x: 360, y: 40 },
       data: {
         kind: 'artifact',
         name: '体检',
@@ -707,7 +747,7 @@ function publishSelfOpt(session: {
         provider: '',
         model: '',
         effort: 'off',
-        status: survey?.status === 'failed' ? 'failed' : survey?.status === 'done' ? 'done' : 'running',
+        status: statusOf('survey'),
         accent: '#4d6bfe',
         taskId: '',
         output: surveyText.slice(0, 4000),
@@ -715,6 +755,34 @@ function publishSelfOpt(session: {
         metric: '体检',
       },
     });
+
+    const reflect = stage('reflect');
+    const critique = stage('critique');
+    const panelText = [
+      `评审团：${(session.panel ?? []).join(' / ') || '单模型'}`,
+      `复盘：${reflect?.detail ?? reflect?.status ?? '—'}`,
+      `互审：${critique?.detail ?? critique?.status ?? '—'}`,
+    ].join(String.fromCharCode(10));
+    upsert({
+      id: 'selfopt-panel',
+      type: 'artifact',
+      position: { x: 360, y: 240 },
+      data: {
+        kind: 'artifact',
+        name: '复盘与互审',
+        role: `${session.panel?.length ?? 0} 位评审交叉质询`,
+        provider: '',
+        model: '',
+        effort: 'off',
+        status: statusOf('reflect'),
+        accent: '#8b5cf6',
+        taskId: '',
+        output: panelText.slice(0, 4000),
+        artifact: (reflect?.detail ?? '').slice(0, 120),
+        metric: '复盘',
+      },
+    });
+
     session.findings.forEach((finding, index) => {
       const status =
         finding.status === 'applied' ? 'done' as const :
@@ -727,20 +795,20 @@ function publishSelfOpt(session: {
         const count = (verdict: string) => reviews.filter((item) => item.verdict === verdict).length;
         return `互审：${count('confirm')} 确认 / ${count('revise')} 修正 / ${count('refute')} 驳回`;
       })();
-      const text = [
+      const findingText = [
         finding.proposedBy ? `提出：${finding.proposedBy}` : '',
         reviewLine,
         `依据：${finding.evidence}`,
         `改法：${finding.proposal}`,
         `验收：${finding.acceptance}`,
-        `状态：${finding.status}${finding.note ? `（${finding.note}）` : ''}${finding.commit ? ` · 提交 ${finding.commit}` : ''}`,
+        finding.files?.length ? `目标文件：${finding.files.join('、')}` : '',
       ]
         .filter(Boolean)
         .join(String.fromCharCode(10));
       upsert({
         id: `finding-${index + 1}`,
         type: 'artifact',
-        position: { x: 420, y: 230 + index * 170 },
+        position: { x: 680, y: 40 + index * 190 },
         data: {
           kind: 'artifact',
           name: `[${finding.severity}/${finding.kind}] ${finding.title}`.slice(0, 60),
@@ -751,20 +819,135 @@ function publishSelfOpt(session: {
           status,
           accent: finding.severity === 'high' ? '#f87171' : finding.severity === 'medium' ? '#e0a458' : '#4d6bfe',
           taskId: finding.id,
-          output: text.slice(0, 4000),
+          output: findingText.slice(0, 4000),
           artifact: `改法：${finding.proposal}`.slice(0, 120),
           metric: finding.status,
         },
       });
+
+      // 解决过程也上画布：真正改过的条目显示校验/复核/提交；
+      // 没改成的条目变成可运行的任务节点，交给团队接着做。
+      const attempted =
+        finding.status === 'applied' ||
+        (finding.status === 'failed' && !/^未执行/.test(finding.note ?? ''));
+      const match = memberFor(finding);
+      const owner = match.member;
+      if (attempted) {
+        const checks = finding.checks ?? [];
+        const checkLine = checks.length
+          ? `校验：${checks.map((check) => `${check.cmd} ${check.ok ? '通过' : '失败'}`).join('；')}`
+          : '校验：—';
+        const solveText = [
+          finding.status === 'applied' ? `结果：已落地${finding.commit ? ` · 提交 ${finding.commit}` : ''}` : `结果：失败${finding.note ? ` · ${finding.note}` : ''}`,
+          checkLine,
+          finding.review
+            ? `独立复核：${finding.review.ok ? '通过' : '驳回'}${finding.review.by ? `（${finding.review.by}）` : ''}${finding.review.note ? ` · ${finding.review.note}` : ''}`
+            : '',
+          finding.diffStat ? `改动：${finding.diffStat}` : '',
+          owner ? `候选负责人：${owner.name}（${owner.job}）` : '',
+        ]
+          .filter(Boolean)
+          .join(String.fromCharCode(10));
+        upsert({
+          id: `solve-${index + 1}`,
+          type: 'artifact',
+          position: { x: 980, y: 40 + index * 190 },
+          data: {
+            kind: 'artifact',
+            name: finding.status === 'applied' ? '修复 · 校验 · 提交' : '修复失败',
+            role: checks.length === 0 ? '未执行校验' : checks.map((check) => `${check.cmd}${check.ok ? '✓' : '✗'}`).join(' · '),
+            provider: '',
+            model: finding.review?.by ?? '',
+            effort: 'off',
+            status,
+            accent: finding.status === 'applied' ? '#10b981' : '#f87171',
+            taskId: finding.id,
+            output: solveText.slice(0, 4000),
+            artifact: (finding.commit ? `提交 ${finding.commit}` : finding.note ?? '').slice(0, 120),
+            metric: finding.commit ? `提交 ${finding.commit}` : '未提交',
+            memberId: owner?.id ?? '',
+            memberName: owner?.name ?? '',
+          },
+        });
+      } else {
+        const task = [
+          `按下面的改法完成修复，并说明验证结果。`,
+          `问题：${finding.title}`,
+          `依据：${finding.evidence}`,
+          `改法：${finding.proposal}`,
+          `验收：${finding.acceptance}`,
+          finding.note ? `上次未执行的原因：${finding.note}` : '',
+        ]
+          .filter(Boolean)
+          .join(String.fromCharCode(10));
+        upsert({
+          id: `solve-${index + 1}`,
+          type: 'agent',
+          position: { x: 980, y: 40 + index * 190 },
+          data: {
+            kind: 'agent',
+            name: `待办 · ${finding.title}`.slice(0, 40),
+            role: '自省未落地：已转成画布任务，运行本画布即交给团队执行',
+            task,
+            deliverable: '按改法完成修复，并给出验证命令与结果',
+            acceptanceCriteria: [finding.acceptance],
+            provider: owner?.model ? '' : '',
+            model: owner?.model ?? session.panel?.[0] ?? '',
+            effort: 'medium',
+            status: 'idle',
+            accent: '#e0a458',
+            connectionId: '',
+            memberId: owner?.id ?? '',
+            memberName: owner?.name ?? '',
+          },
+        });
+      }
     });
+
+    const applied = session.findings.filter((finding) => finding.status === 'applied');
+    const failedFindings = session.findings.filter((finding) => finding.status === 'failed');
+    const pending = session.findings.filter((finding) => finding.status !== 'applied' && !(finding.status === 'failed' && !/^未执行/.test(finding.note ?? '')));
+    upsert({
+      id: 'selfopt-summary',
+      type: 'artifact',
+      position: { x: 1280, y: 40 },
+      data: {
+        kind: 'artifact',
+        name: '本轮结果',
+        role: `${applied.length}/${session.findings.length} 条落地`,
+        provider: '',
+        model: '',
+        effort: 'off',
+        status: session.status === 'failed' ? 'failed' : session.status === 'running' ? 'running' : 'done',
+        accent: session.status === 'failed' ? '#f87171' : '#38d9c2',
+        taskId: '',
+        output: [
+          `发现 ${session.findings.length} 条 · 落地 ${applied.length} 条 · 失败 ${failedFindings.length} 条 · 待运行 ${pending.length} 条`,
+          applied.length ? `已提交：${applied.map((finding) => `${finding.commit ?? '?'} ${finding.title}`).join('；')}` : '',
+          pending.length ? '未落地的问题已变成黄色任务节点：运行本画布即可让团队继续处理。' : '',
+          `用量：${session.usedTokens} tokens`,
+        ]
+          .filter(Boolean)
+          .join(String.fromCharCode(10)),
+        artifact: `${applied.length}/${session.findings.length} 条落地`,
+        metric: session.status,
+      },
+    });
+
     const edgeExists = new Set(doc.edges.map((edge) => edge.id));
-    if (!edgeExists.has('so-edge-root')) {
-      ops.push({ op: 'add_edge', edge: { id: 'so-edge-root', source: 'selfopt-root', target: 'selfopt-survey', label: '体检', data: { kind: 'handoff' } } });
-    }
-    session.findings.forEach((_, index) => {
-      const id = `so-edge-f${index + 1}`;
+    const addEdge = (id: string, source: string, target: string, label: string, kind: string) => {
       if (edgeExists.has(id)) return;
-      ops.push({ op: 'add_edge', edge: { id, source: 'selfopt-survey', target: `finding-${index + 1}`, label: '问题', data: { kind: 'review' } } });
+      ops.push({ op: 'add_edge', edge: { id, source, target, label, data: { kind } } });
+    };
+    addEdge('so-edge-root', 'selfopt-root', 'selfopt-survey', '体检', 'handoff');
+    addEdge('so-edge-reflect', 'selfopt-survey', 'selfopt-panel', '复盘', 'review');
+    session.findings.forEach((finding, index) => {
+      addEdge(`so-edge-f${index + 1}`, 'selfopt-panel', `finding-${index + 1}`, '发现', 'review');
+      const attempted =
+        finding.status === 'applied' ||
+        (finding.status === 'failed' && !/^未执行/.test(finding.note ?? ''));
+      addEdge(`so-edge-s${index + 1}`, `finding-${index + 1}`, `solve-${index + 1}`, attempted ? '解决' : '转任务', attempted ? 'assign' : 'handoff');
+      addEdge(`so-edge-d${index + 1}`, `solve-${index + 1}`, 'selfopt-summary', '汇总', 'context');
     });
     if (ops.length > 0) store.apply(ops);
   } catch {
@@ -4028,6 +4211,11 @@ app.post('/api/selfopt/start', async (context) => {
     return context.json({ ok: false, error: 'unknown_mode_or_level' }, 400);
   }
   const rootDir = String(body?.rootDir ?? '') || defaultSelfOptRoot();
+  // 用户配置的团队也参与自省：成员模型优先进入评审团（有 key 的才生效）。
+  const sourceWorkspace = workspaceOf(context);
+  const teamModels = teamFor(sourceWorkspace)
+    .members.map((member) => member.model)
+    .filter((model): model is string => Boolean(model));
   try {
     const session = await selfOpt.start({
       rootDir,
@@ -4038,6 +4226,7 @@ app.post('/api/selfopt/start', async (context) => {
       findings: body?.findings ? Number(body.findings) : undefined,
       allowDirty: body?.allowDirty === true,
       actor: actorOf(context),
+      models: teamModels,
     });
     // 自省过程放到独立画布：体检、问题、改法都成为节点，可随时查看。
     // 同一个仓库复用同一张自省画布——每跑一次就新建一张，会把标签栏堆满。
@@ -4048,6 +4237,37 @@ app.post('/api/selfopt/start', async (context) => {
       .find((item) => !item.archivedAt && item.name === canvasName);
     const canvasWs = existingCanvas ?? workspaces.create(canvasName);
     if (existingCanvas) workspaces.restore(canvasWs.id);
+    if (existingCanvas) {
+      // 新一轮重新画流程：清掉上一轮的流程节点，别叠在一起。
+      const previous = canvasFor(canvasWs.id).read();
+      const cleanup: CanvasOp[] = [];
+      for (const node of previous.nodes) {
+        if (/^(selfopt-|finding-|solve-)/.test(node.id)) cleanup.push({ op: 'remove_node', id: node.id });
+      }
+      for (const edge of previous.edges) {
+        if (/^so-edge-/.test(edge.id)) cleanup.push({ op: 'remove_edge', id: edge.id });
+      }
+      if (cleanup.length > 0) canvasFor(canvasWs.id).apply(cleanup);
+    }
+    // 把用户在用的团队带进自省画布，评审团优先用成员模型。
+    if (teamFor(canvasWs.id).members.length === 0) copyTeam(sourceWorkspace, canvasWs.id);
+    // 未落地的任务要在这个仓库里执行，而不是服务端启动目录。
+    workspaces.setRootDir(canvasWs.id, session.rootDir);
+    // 自省画布要能直接运行未落地的任务：没有主控就补一个。
+    const canvasDoc = canvasFor(canvasWs.id).read();
+    if (!canvasDoc.nodes.some((node) => node.id === canvasDoc.orchestratorId)) {
+      const sourceDoc = canvasFor(sourceWorkspace).read();
+      const sourceOrchestrator = sourceDoc.nodes.find(
+        (node) => node.id === sourceDoc.orchestratorId
+      );
+      const orchestrator = sourceOrchestrator ?? (await synthesizedOrchestratorNode());
+      if (orchestrator) {
+        canvasFor(canvasWs.id).apply([
+          { op: 'add_node', node: orchestrator },
+          { op: 'set_orchestrator', id: orchestrator.id },
+        ]);
+      }
+    }
     selfoptCanvases.clear();
 selfoptSyncAt.clear();
 selfoptCanvases.set(session.id, canvasWs.id);
@@ -4080,6 +4300,13 @@ app.post('/api/selfopt/stop', (context) => {
 
 app.get('/api/selfopt/status', async (context) => {
   const roster = await availableSelfOptModels().catch(() => [] as string[]);
+  // 当前画布上的团队：自省会带上它，评审团优先用成员模型。
+  const team = teamFor(workspaceOf(context)).members.map((member) => ({
+    id: member.id,
+    name: member.name,
+    job: member.job,
+    model: member.model,
+  }));
   return context.json({
     ok: true,
     session: (() => {
@@ -4087,7 +4314,7 @@ app.get('/api/selfopt/status', async (context) => {
       if (!current) return null;
       return { ...current, canvasWorkspaceId: selfoptCanvases.get(current.id) ?? null };
     })(),
-    meta: { rootDir: defaultSelfOptRoot(), roster, ...describeSelfOpt() },
+    meta: { rootDir: defaultSelfOptRoot(), roster, team, ...describeSelfOpt() },
   });
 });
 
