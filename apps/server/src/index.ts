@@ -24,11 +24,13 @@ import {
   Orchestrator,
   SearchToolAdapter,
   buildChatRequest,
+  CONVERSATION_STYLES,
   discussionPrompt,
   isConversationStyle,
   probeConnection,
   redactSecrets,
   styleById,
+  suggestStyle,
   type CapabilityProfile,
   type Plan,
   type Protocol,
@@ -5584,6 +5586,24 @@ app.post('/api/deliverables/:taskId', async (context) => {
       500
     );
   }
+});
+
+/**
+ * 对话风格：节点、讨论、外部 agent 共用一份定义。
+ * `text` 参数给名称/角色时，顺带返回推断结果，UI 用它显示「自动＝哪一种」。
+ */
+app.get('/api/styles', (context) => {
+  const hint = String(context.req.query('text') ?? '');
+  return context.json({
+    ok: true,
+    styles: CONVERSATION_STYLES.map((style) => ({
+      id: style.id,
+      label: style.label,
+      scenario: style.scenario,
+      tags: style.tags,
+    })),
+    suggested: suggestStyle(hint),
+  });
 });
 
 /**

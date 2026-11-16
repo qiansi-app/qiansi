@@ -19,6 +19,7 @@ node scripts/check-version.mjs    # 版本号一致性
 | 产物纯函数 | `npx tsx scripts/check-artifacts.ts` | 扩展名识别、目录快照跳过依赖目录、前后差异只报新增/改动、空文件不计、同路径多来源合并、rootDir 内外路径换算 | `ARTIFACTS OK`（18 项） |
 | 产物账本与归因 | `npx tsx scripts/check-artifact-ledger.ts` | write_file 归因、命令产物归因、并行任务不重复认领、落盘与去重 | `LEDGER OK`（12 项） |
 | 纠错回路 | `npx tsx scripts/check-correction.mts` | 第一次提示词不含纠错段、第二次带失败原因与建议、成功的工具调用不进错误清单、attemptLog 两条 | `CORRECTION OK`（19 项） |
+| 对话风格 | `npx tsx scripts/check-styles.mts` | 九种风格三段齐全、中英文关键词推断、大小写不敏感、非法值回落、提示词拼装、**画布节点 style 字段真的进计划** | `STYLES OK`（59 项） |
 | 工具循环护栏 | 见 `scripts/`（历史脚本，如需重跑参考 CHANGELOG） | 重复写跳过、调用预算、字符预算、跨重试共享 | 14/14 |
 
 > `.mts` 后缀是必需的：`check-correction` 用了顶层 await，`.ts` 会被 tsx 当成 CJS 编译失败。

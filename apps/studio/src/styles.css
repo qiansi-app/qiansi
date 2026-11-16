@@ -794,6 +794,28 @@ textarea {
 .status-chip.failed { color: #f87171; background: rgba(248, 113, 113, 0.1); border-color: rgba(248, 113, 113, 0.2); }
 .status-chip.blocked { color: #f59e0b; background: rgba(245, 158, 11, 0.1); border-color: rgba(245, 158, 11, 0.22); }
 .model-inline { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 9.5px; color: var(--muted-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+
+/* 对话风格：节点上的小角标 + 检查器里的选择器。
+   自动推断用灰色（虚线感），手动指定用强调色——一眼能看出这个节点是不是被改过。 */
+.style-chip {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px dashed var(--line, #23282f);
+  border-radius: 999px;
+  color: var(--muted, #8a94a3);
+  font-size: 9.5px;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.style-chip.manual {
+  border-style: solid;
+  border-color: var(--accent, #38d9c2);
+  color: var(--accent, #38d9c2);
+}
+
+.style-picker { display: flex; flex-direction: column; gap: 6px; }
+.style-picker .style-reset { align-self: flex-start; }
 .effort-bars { display: inline-flex; align-items: flex-end; gap: 1.5px; flex: none; }
 .effort-bars i { width: 3px; height: 6px; border-radius: 1px; background: #2a3440; }
 .effort-bars i:nth-child(2) { height: 8px; }

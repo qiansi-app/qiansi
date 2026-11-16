@@ -1,6 +1,7 @@
 import { Copy, EyeOff, Eye, FilePlus, FolderOpen, Globe, GitBranch, Trash2, X } from 'lucide-react';
 import type { AgentNodeData, RegionMode, StudioNode } from '../data/demoGraph';
 import { catalogOf, type ModelDraft } from '../data/models';
+import { StylePicker } from './StylePicker';
 
 const kindLabel: Record<string, string> = {
   task: '任务模块',
@@ -131,6 +132,17 @@ export function NodeInspector({
           <div className="inspector-meta">
             运行时按模型 id 路由到对应的 key；同一把 key 的所有模型都在列表里。
           </div>
+        </div>
+      )}
+
+      {(kind === 'agent' || kind === 'orchestrator') && (
+        <div className="inspector-section">
+          <div className="inspector-label">对话风格</div>
+          <StylePicker
+            value={typeof data.style === 'string' ? data.style : undefined}
+            hint={`${data.name ?? ''} ${data.role ?? ''}`}
+            onChange={(style) => onPatch({ style })}
+          />
         </div>
       )}
 

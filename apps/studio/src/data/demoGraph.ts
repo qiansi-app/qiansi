@@ -48,6 +48,8 @@ export interface AgentNodeData extends Record<string, unknown> {
   status: NodeStatus;
   kind: NodeKind;
   accent: string;
+  /** 对话风格。未设置=按名称/角色自动推断；设置后即以它为准。 */
+  style?: string;
   /** 挂给团队成员：名字用于显示，职责/档位/记忆在运行时注入。 */
   memberId?: string;
   memberName?: string;

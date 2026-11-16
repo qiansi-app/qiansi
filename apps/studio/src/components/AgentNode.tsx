@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import type { AgentNodeData, EffortLevel, NodeStatus } from '../data/demoGraph';
 import { NodeFiles } from './NodeFiles';
+import { styleById, suggestStyle } from '@qiansi/engine';
 
 const statusText: Record<NodeStatus, string> = {
   idle: '待命',
@@ -99,6 +100,16 @@ export function AgentNode({ data, selected }: NodeProps) {
           {statusText[node.status]}
         </span>
         <span className="model-inline">{node.model}</span>
+        <span
+          className={`style-chip ${node.style ? 'manual' : ''}`}
+          title={
+            node.style
+              ? `对话风格：${styleById(node.style).label}（手动指定） · ${styleById(node.style).scenario}`
+              : `对话风格：${styleById(suggestStyle(`${node.name ?? ''} ${node.role ?? ''}`)).label}（按名称自动推断，可在右侧检查器修改）`
+          }
+        >
+          {styleById(node.style ?? suggestStyle(`${node.name ?? ''} ${node.role ?? ''}`)).label.split(' / ')[0]}
+        </span>
         <span
           className="effort-bars"
           title={`effort: ${node.effort} · 来源: ${node.effortSource ?? '默认'}`}
