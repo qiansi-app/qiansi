@@ -1,5 +1,5 @@
 export * from './types.js';
-export { Orchestrator } from './orchestrator.js';
+export { buildCorrectionBrief, Orchestrator } from './orchestrator.js';
 export type { OrchestratorOptions } from './orchestrator.js';
 export { profileById, translateEffort, buildChatRequest } from './capability.js';
 export type { EffortTranslation } from './capability.js';

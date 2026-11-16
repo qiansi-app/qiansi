@@ -68,6 +68,17 @@ export interface AgentNodeData extends Record<string, unknown> {
   /** Task / artifact nodes */
   output?: string;
   acceptance?: { pass: boolean; score?: number; reasons?: string[]; needsHuman?: boolean };
+  /** 这个任务真正产出/改动的文件（产物账本）。 */
+  files?: Array<{
+    path: string;
+    absolutePath?: string;
+    bytes: number;
+    kind: string;
+    source?: string;
+  }>;
+  /** 最近一次纠错：第几次尝试、为什么没通过。 */
+  correction?: { attempt: number; reason: string; fix?: string };
+  onRevealFile?: (absolutePath?: string) => void;
   onOpen?: (taskId: string) => void;
   /** File nodes */
   fileName?: string;

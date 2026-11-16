@@ -15,6 +15,8 @@ import type {
   RunResult,
   SearchFn,
   Subtask,
+  TaskAttempt,
+  TaskFile,
   TaskStatus,
   ToolboxOptions,
   ToolEvidence,
@@ -54,6 +56,16 @@ export interface OrchestratorOptions {
   /** Return the chosen option id. Omit to auto-abort when a run stalls. */
   onChoice?: (card: ChoiceCard) => Promise<string>;
   /**
+   * 任务第一次尝试开始前调用一次：服务端用它给工作目录拍快照。
+   * 拍快照失败不能拖垮任务——实现方自己吞异常。
+   */
+  beforeTask?: (task: Subtask) => Promise<void> | void;
+  /**
+   * 任务结束（成功或最终失败）时调用：服务端对比前后快照，返回这次真正
+   * 产出/改动的文件，交给引擎挂到任务上并推送 `task.files`。
+   */
+  afterTask?: (task: Subtask, outcome: { ok: boolean }) => Promise<TaskFile[]> | TaskFile[];
+  /**
    * 断点续跑：上一轮已完成任务的产出。既作为本轮的上游上下文注入，
    * 也让调度器把这些任务视为已完成（计划里不会再有它们）。
    */
@@ -80,6 +92,48 @@ export function pruneUpstream(
   if (text.length <= thresholdChars) return text;
   const omitted = text.length - headChars - tailChars;
   return `${text.slice(0, headChars)}\n…（中间省略 ${omitted} 字，原文共 ${text.length} 字）…\n${text.slice(-tailChars)}`;
+}
+
+/**
+ * 失败之后不要原样重发。
+ *
+ * 过去的重试只调 effort：评委说的「哪里不对」、工具报的错、上一轮到底调了什么，
+ * 全都留在内存里没人读。模型于是把同样的内容再写一遍——工具护栏还会把
+ * 字节相同的写入当成重复直接跳过，重试等于空转。
+ *
+ * 这里把失败证据压成一段可读的简报，塞进下一次尝试的系统提示词：
+ * 失败原因 + 建议改法 + 上一轮失败的工具调用 + 一条「先读再改」的指令。
+ */
+export function buildCorrectionBrief(
+  acceptance: AcceptanceResult,
+  evidence: ToolEvidence | undefined,
+  attempt: number
+): { text: string; toolErrors: string[] } {
+  const failures = (evidence?.tools ?? []).filter((tool) => !tool.ok);
+  const lines: string[] = [
+    `上一轮（第 ${attempt + 1} 次尝试）没有通过验收。这次必须做出实质修改，不要原样重发。`,
+  ];
+  const reasons = (acceptance.reasons ?? []).filter((reason) => reason.trim().length > 0);
+  if (reasons.length) lines.push(`未通过原因：${reasons.slice(0, 4).join('；')}`);
+  if (acceptance.suggestedFix) lines.push(`建议的修改：${acceptance.suggestedFix}`);
+  if (failures.length) {
+    lines.push('上一轮失败的工具调用（同样的调用再来一次会被跳过，必须先改内容或参数）：');
+    for (const failure of failures.slice(0, 3)) {
+      lines.push(`- ${failure.name} ${(failure.args ?? '').replace(/\s+/g, ' ').slice(0, 220)}`);
+      const output = (failure.content ?? '').replace(/\s+/g, ' ').slice(0, 200);
+      if (output) lines.push(`  返回：${output}`);
+    }
+  }
+  lines.push(
+    '如果上一轮已经写过文件但被退回：先读回当前内容，只改需要改的部分再保存；',
+    '改完自己核对一遍验收标准，确认这次和上一轮不一样。'
+  );
+  return {
+    text: lines.join('\n'),
+    toolErrors: failures
+      .slice(0, 3)
+      .map((failure) => `${failure.name}: ${(failure.content ?? '').replace(/\s+/g, ' ').slice(0, 120)}`),
+  };
 }
 
 export class Orchestrator {
@@ -253,6 +307,15 @@ export class Orchestrator {
     let effort = task.effort;
     /** 上一次尝试是否空产出；是则本轮要求直接作答。 */
     let directHint = false;
+    /** 上一次失败的简报：下一次尝试会把它写进系统提示词，而不是原样重发。 */
+    let correction: string | undefined;
+
+    // 任务开始前给工作目录拍一次快照，结束时才能算出这个任务真正产出了什么。
+    try {
+      await this.options.beforeTask?.(task);
+    } catch {
+      // 快照失败不该拖垮任务本身
+    }
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       if (this.budgetExceeded) {
@@ -295,7 +358,7 @@ export class Orchestrator {
       output = '';
       let streamError: string | undefined;
       try {
-        output = await this.streamTask(task, effort, dependencyOutputs, directHint);
+        output = await this.streamTask(task, effort, dependencyOutputs, directHint, correction);
       } catch (error) {
         streamError = error instanceof Error ? error.message : String(error);
         output = output || `Error: ${streamError}`;
@@ -315,9 +378,33 @@ export class Orchestrator {
 
       if (acceptance.pass) {
         task.status = 'done';
-        this.emit({ type: 'task.completed', taskId: task.id, output, artifacts: task.artifacts });
+        this.recordAttempt(task, { attempt, pass: true, score: acceptance.score, effort, reasons: acceptance.reasons });
+        const files = await this.collectFiles(task, true);
+        this.emit({
+          type: 'task.completed',
+          taskId: task.id,
+          output,
+          artifacts: files.length ? files.map((file) => file.path) : task.artifacts,
+          files,
+          attemptLog: task.attemptLog,
+        });
         return { ok: true, output };
       }
+
+      const brief = buildCorrectionBrief(
+        acceptance,
+        { tools: this.toolEvidence.get(task.id) ?? [] },
+        attempt
+      );
+      this.recordAttempt(task, {
+        attempt,
+        pass: false,
+        score: acceptance.score,
+        effort,
+        reasons: acceptance.reasons,
+        fix: acceptance.suggestedFix,
+        toolErrors: brief.toolErrors,
+      });
 
       if (attempt < maxRetries) {
         // An empty or near-empty answer means thinking (or truncation) consumed
@@ -332,26 +419,41 @@ export class Orchestrator {
         if (raised !== effort) {
           effort = raised;
           task.effort = raised;
-          this.emit({
-            type: 'task.revised',
-            taskId: task.id,
-            nextEffort: raised,
-            reason: emptyFailure
-              ? '产出为空：降低思考强度，把完成预算留给答案'
-              : acceptance.suggestedFix ?? (acceptance.reasons.join('; ') || 'acceptance failed'),
-          });
         }
+        // 把失败证据带进下一轮：重试必须是一次纠错，而不是原样重发。
+        correction = brief.text;
+        this.emit({
+          type: 'task.revised',
+          taskId: task.id,
+          nextEffort: raised,
+          reason: emptyFailure
+            ? '产出为空：降低思考强度，把完成预算留给答案'
+            : acceptance.suggestedFix ?? (acceptance.reasons.join('; ') || 'acceptance failed'),
+          attempt,
+          reasons: acceptance.reasons,
+          fix: acceptance.suggestedFix,
+          toolErrors: brief.toolErrors,
+        });
         continue;
       }
 
       const decision = await this.requestChoice(task, acceptance);
       if (decision === 'accept') {
         task.status = 'done';
-        this.emit({ type: 'task.completed', taskId: task.id, output, artifacts: task.artifacts });
+        const files = await this.collectFiles(task, true);
+        this.emit({
+          type: 'task.completed',
+          taskId: task.id,
+          output,
+          artifacts: files.length ? files.map((file) => file.path) : task.artifacts,
+          files,
+          attemptLog: task.attemptLog,
+        });
         return { ok: true, output };
       }
 
       task.status = 'failed';
+      await this.collectFiles(task, false);
       this.emit({
         type: 'task.failed',
         taskId: task.id,
@@ -363,11 +465,32 @@ export class Orchestrator {
     return { ok: false, output };
   }
 
+  /** 记一笔尝试：UI 与「纠错了几次」的报告都读这份。 */
+  private recordAttempt(task: Subtask, attempt: TaskAttempt): void {
+    task.attemptLog = [...(task.attemptLog ?? []), attempt];
+  }
+
+  /** 任务结束后收集产物；失败也要收集——用户同样想知道「跑挂了但写出了什么」。 */
+  private async collectFiles(task: Subtask, ok: boolean): Promise<TaskFile[]> {
+    if (!this.options.afterTask) return task.files ?? [];
+    try {
+      const files = await this.options.afterTask(task, { ok });
+      if (files.length) {
+        task.files = files;
+        this.emit({ type: 'task.files', taskId: task.id, nodeId: task.assignedNodeId, files });
+      }
+      return files;
+    } catch {
+      return task.files ?? [];
+    }
+  }
+
   private async streamTask(
     task: Subtask,
     effort: Subtask['effort'],
     dependencyOutputs: Record<string, string>,
-    directHint = false
+    directHint = false,
+    correction?: string
   ): Promise<string> {
     const profile = profileById(this.options.profiles, task.profileId);
     const baseAdapter = this.options.adapters[profile.protocol];
@@ -454,6 +577,12 @@ export class Orchestrator {
               ? [
                   'IMPORTANT: the previous attempt produced no answer because reasoning consumed the whole budget.',
                   'Answer directly this time. No analysis, no step-by-step reasoning, no preamble — write the deliverable itself.',
+                ]
+              : []),
+            ...(correction
+              ? [
+                  'Previous attempt failed acceptance. This run must correct it, not repeat it.',
+                  correction,
                 ]
               : []),
             'Return the finished work only. Do not narrate your process.',

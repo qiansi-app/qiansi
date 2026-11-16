@@ -12,6 +12,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import type { AgentNodeData, EffortLevel, NodeStatus } from '../data/demoGraph';
+import { NodeFiles } from './NodeFiles';
 
 const statusText: Record<NodeStatus, string> = {
   idle: '待命',
@@ -124,6 +125,13 @@ export function AgentNode({ data, selected }: NodeProps) {
         </button>
       ) : (
         <div className="node-artifact">{node.artifact ?? '暂无产物'}</div>
+      )}
+
+      <NodeFiles files={node.files} onReveal={node.onRevealFile} />
+      {node.correction && (
+        <div className="node-correction" title={node.correction.reason}>
+          纠错 {node.correction.attempt + 1}：{node.correction.reason.replace(/\s+/g, ' ').slice(0, 56)}
+        </div>
       )}
 
       <div className="node-metrics">

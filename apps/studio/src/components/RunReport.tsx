@@ -1,4 +1,5 @@
-import { AlertTriangle, CheckCircle2, Copy, Download, ListPlus, X, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Copy, Download, FolderOpen, ListPlus, X, XCircle } from 'lucide-react';
+import { formatBytes, kindLabel, revealArtifact } from '../file-format';
 import type { RunSummary, RunTaskView } from '../types';
 
 interface RunReportProps {
@@ -128,6 +129,31 @@ export function RunReport({
 
                 {task.acceptance && task.acceptance.reasons.length > 0 && (
                   <div className="report-reasons">{task.acceptance.reasons.join('；')}</div>
+                )}
+
+                {task.correction && (
+                  <div className="report-reasons">
+                    纠错 {task.correction.attempt + 1}：{task.correction.reason}
+                  </div>
+                )}
+
+                {task.files && task.files.length > 0 && (
+                  <div className="report-files">
+                    {task.files.map((file) => (
+                      <button
+                        key={file.absolutePath ?? file.path}
+                        type="button"
+                        className={`report-file ${file.kind}`}
+                        title={`${file.path} · 点击在资源管理器里定位`}
+                        onClick={() => void revealArtifact(file.absolutePath)}
+                      >
+                        <span className="node-file-kind">{kindLabel(file.kind)}</span>
+                        <span className="node-file-name">{file.path}</span>
+                        <span className="node-file-size">{formatBytes(file.bytes)}</span>
+                        <FolderOpen size={11} />
+                      </button>
+                    ))}
+                  </div>
                 )}
 
                 <pre className="report-output">{task.output ?? '（无输出）'}</pre>

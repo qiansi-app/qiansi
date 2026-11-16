@@ -41,6 +41,7 @@ interface ToolbarProps {
   onOpenModels: () => void;
   onOpenSettings: () => void;
   onOpenReport: () => void;
+  onOpenArtifacts: () => void;
   onReset: () => void;
   onClearCanvas: () => void;
   onExport: () => void;
@@ -107,6 +108,7 @@ export function Toolbar({
   onOpenModels,
   onOpenSettings,
   onOpenReport,
+  onOpenArtifacts,
   onReset,
   onClearCanvas,
   onExport,
@@ -351,6 +353,12 @@ export function Toolbar({
                 hint="分任务产出与验收"
                 disabled={!hasReport}
                 onClick={menuAction(onOpenReport)}
+              />
+              <MenuItem
+                icon={FolderOpen}
+                label="产物"
+                hint="每次运行落盘的文件与位置"
+                onClick={menuAction(onOpenArtifacts)}
               />
               <MenuItem
                 icon={ShieldAlert}

@@ -1962,3 +1962,131 @@ textarea {
 /* 层叠顺序：顶栏/标签行 > 画布内的进度条与浮层。固定定位的下拉挂在顶栏上下文里，
    顶栏的整体层级必须高于画布区，否则进度条会把菜单盖住。 */
 .toolbar { z-index: 40; }
+
+/* ── 产物：节点上的文件条、运行结果里的文件列表、聚合面板 ───────────── */
+
+.node-files {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 6px;
+}
+
+.node-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  border: 1px solid var(--line, #23282f);
+  border-radius: 6px;
+  background: var(--panel-2, #12161b);
+  color: var(--text, #d7dde5);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.node-file:hover { border-color: var(--accent, #38d9c2); }
+
+.node-file-kind {
+  flex: 0 0 auto;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #1d2530;
+  color: var(--muted, #8a94a3);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+}
+
+.node-file-kind.pdf { background: #3a1f22; color: #ff8b8b; }
+.node-file-kind.image { background: #1f2f24; color: #7fe0a0; }
+.node-file-kind.data { background: #1f2a3a; color: #8fc2ff; }
+.node-file-kind.archive { background: #2f2a1c; color: #e6c77a; }
+
+.node-file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-file-size { flex: 0 0 auto; color: var(--muted, #8a94a3); font-size: 10px; }
+.node-file-open { flex: 0 0 auto; opacity: 0.5; }
+.node-file:hover .node-file-open { opacity: 1; }
+.node-file-more { font-size: 10px; color: var(--muted, #8a94a3); padding-left: 2px; }
+
+.node-correction {
+  margin-top: 4px;
+  padding: 3px 6px;
+  border-left: 2px solid #e6a94a;
+  background: rgba(230, 169, 74, 0.08);
+  color: #e6c07a;
+  font-size: 10px;
+  border-radius: 0 4px 4px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.report-files { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+
+.report-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--line, #23282f);
+  border-radius: 6px;
+  background: var(--panel-2, #12161b);
+  color: var(--text, #d7dde5);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.report-file:hover { border-color: var(--accent, #38d9c2); }
+.report-file .node-file-name { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+
+.artifact-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--line, #23282f);
+  border-radius: 6px;
+  background: var(--panel-2, #12161b);
+}
+
+.artifact-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+}
+
+.artifact-task { flex: 0 0 auto; font-size: 10px; color: var(--muted, #8a94a3); }
+
+.artifact-preview {
+  border-top: 1px solid var(--line, #23282f);
+  max-height: 40%;
+  display: flex;
+  flex-direction: column;
+}
+
+.artifact-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--muted, #8a94a3);
+}
+
+.artifact-preview-head code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-preview .report-output { margin: 0; border-radius: 0; max-height: 32vh; }

@@ -1,6 +1,7 @@
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { CheckCircle2, ListChecks, Trash2, XCircle } from 'lucide-react';
 import type { AgentNodeData } from '../data/demoGraph';
+import { NodeFiles } from './NodeFiles';
 
 export function TaskNode({ data, selected }: NodeProps) {
   const node = data as unknown as AgentNodeData;
@@ -36,6 +37,12 @@ export function TaskNode({ data, selected }: NodeProps) {
         <span>{node.status === 'done' ? '已完成' : node.status}</span>
       </div>
       <div className="task-node-text">{(node.output ?? '等待产出…').replace(/\s+/g, ' ').slice(0, 160)}</div>
+      <NodeFiles files={node.files} onReveal={node.onRevealFile} />
+      {node.correction && (
+        <div className="node-correction" title={node.correction.reason}>
+          纠错 {node.correction.attempt + 1}：{node.correction.reason.replace(/\s+/g, ' ').slice(0, 60)}
+        </div>
+      )}
       {node.acceptance?.score !== undefined && (
         <div className="task-node-foot">
           验收 {node.acceptance.score.toFixed(2)}

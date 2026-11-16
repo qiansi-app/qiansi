@@ -10,6 +10,14 @@ export type Selection =
   | { kind: 'edge'; id: string }
   | null;
 
+export interface RunTaskFile {
+  path: string;
+  absolutePath?: string;
+  bytes: number;
+  kind: string;
+  source?: string;
+}
+
 export interface RunTaskView {
   taskId: string;
   nodeId: string;
@@ -18,6 +26,10 @@ export interface RunTaskView {
   effort?: string;
   status: 'pending' | 'running' | 'done' | 'failed';
   output?: string;
+  /** 这一步真正产出/改动的文件。 */
+  files?: RunTaskFile[];
+  /** 最近一次纠错：第几次、为什么。 */
+  correction?: { attempt: number; reason: string; fix?: string };
   acceptance?: {
     pass: boolean;
     score: number;

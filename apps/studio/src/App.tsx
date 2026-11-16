@@ -24,6 +24,7 @@ import { ArtifactModal } from './components/ArtifactModal';
 import { ExternalModal } from './components/ExternalModal';
 import { RunProgress } from './components/RunProgress';
 import { RunReport } from './components/RunReport';
+import { ArtifactsModal } from './components/ArtifactsModal';
 import { TeamModal } from './components/TeamModal';
 import { UserViewModal } from './components/UserViewModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -199,6 +200,7 @@ export function App() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
   const [approvalsOpen, setApprovalsOpen] = useState(false);
   const [keysOpen, setKeysOpen] = useState(false);
   const [attentionOpen, setAttentionOpen] = useState(false);
@@ -2783,22 +2785,45 @@ export function App() {
 
     on('task.revised', (event) => {
       const payload = JSON.parse(event.data) as {
-        event: { taskId: string; nextEffort: string; reason: string };
+        event: {
+          taskId: string;
+          nextEffort: string;
+          reason: string;
+          attempt?: number;
+          reasons?: string[];
+          fix?: string;
+        };
       };
-      updateTask(payload.event.taskId, { status: 'running' });
+      const correction = {
+        attempt: payload.event.attempt ?? 0,
+        reason: payload.event.reason,
+        fix: payload.event.fix ?? payload.event.reasons?.join('；'),
+      };
+      updateTask(payload.event.taskId, { status: 'running', correction });
       const nodeId = taskNodes.current[payload.event.taskId];
       if (nodeId) {
+        patchNode(nodeId, { correction, status: 'running' });
         push(
           nodeId,
           'assistant',
-          `验收未通过，升到 effort=${payload.event.nextEffort} 重试：${payload.event.reason}`
+          `第 ${(payload.event.attempt ?? 0) + 1} 次尝试未通过，开始纠错：${payload.event.reason}`
         );
       }
     });
 
+    on('task.files', (event) => {
+      const payload = JSON.parse(event.data) as {
+        event: { taskId: string; nodeId?: string; files: RunTaskView['files'] };
+      };
+      if (!payload.event.files?.length) return;
+      updateTask(payload.event.taskId, { files: payload.event.files });
+      const nodeId = payload.event.nodeId ?? taskNodes.current[payload.event.taskId];
+      if (nodeId) patchNode(nodeId, { files: payload.event.files });
+    });
+
     on('task.completed', (event) => {
       const payload = JSON.parse(event.data) as {
-        event: { nodeId?: string; taskId: string; output: string };
+        event: { nodeId?: string; taskId: string; output: string; files?: RunTaskView['files'] };
       };
       const existing = runTasksRef.current[payload.event.taskId];
       const nodeId = payload.event.nodeId ?? existing?.nodeId ?? 'unknown';
@@ -2806,7 +2831,9 @@ export function App() {
         status: 'done',
         output: payload.event.output,
         nodeId,
+        ...(payload.event.files?.length ? { files: payload.event.files } : {}),
       });
+      if (payload.event.files?.length) patchNode(nodeId, { files: payload.event.files });
       finishStream(nodeId, payload.event.taskId, payload.event.output);
       window.setTimeout(() => decorateEdgeArtifacts(), 30);
     });
@@ -3264,6 +3291,34 @@ export function App() {
             output: task.output,
           };
         }
+        // 产物账本：把这轮运行真正产出的文件贴回各自的任务与节点。
+        try {
+          const artifactResponse = await fetch(`/api/runs/${latest.runId}/artifacts`);
+          if (artifactResponse.ok) {
+            const payload = (await artifactResponse.json()) as {
+              files?: Array<NonNullable<RunTaskView['files']>[number] & { taskId?: string }>;
+            };
+            const byTask = new Map<string, RunTaskView['files']>();
+            for (const file of payload.files ?? []) {
+              const owner = (file as { taskId?: string }).taskId;
+              if (!owner) continue;
+              const list = byTask.get(owner) ?? [];
+              list.push(file);
+              byTask.set(owner, list);
+            }
+            for (const [taskId, files] of byTask) {
+              if (tasks[taskId]) tasks[taskId] = { ...tasks[taskId], files };
+            }
+            if (Object.keys(runTasksRef.current).length === 0) {
+              for (const [taskId, files] of byTask) {
+                const nodeId = tasks[taskId]?.nodeId;
+                if (nodeId) patchNode(nodeId, { files });
+              }
+            }
+          }
+        } catch {
+          // 账本读不到不影响历史回放
+        }
         const values = Object.values(tasks);
         setRunSummary({
           runId: latest.runId,
@@ -3558,6 +3613,7 @@ export function App() {
         onOpenModels={() => setEditorOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenReport={() => setReportOpen(true)}
+        onOpenArtifacts={() => setArtifactsOpen(true)}
         onReset={resetAll}
         onClearCanvas={() => setClearConfirmOpen(true)}
         onExport={() => window.open(`/api/canvas/export?ws=${encodeURIComponent(currentWorkspace())}`, '_blank')}
@@ -3820,6 +3876,8 @@ export function App() {
         onMaterializeTask={materializeTask}
         onMaterializeArtifact={materializeArtifact}
       />
+
+      <ArtifactsModal open={artifactsOpen} onClose={() => setArtifactsOpen(false)} />
 
       <UserViewModal
         open={userViewOpen}

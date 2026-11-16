@@ -263,6 +263,28 @@ export type TaskStatus =
 
 export type TaskAutonomy = 'investigate' | 'draft' | 'auto' | 'full';
 
+/** 一个任务产出或改动过的文件，由服务端在任务前后对比工作目录得出。 */
+export interface TaskFile {
+  /** 相对工作目录的展示路径（跑出目录时是绝对路径）。 */
+  path: string;
+  absolutePath?: string;
+  bytes: number;
+  mtime: number;
+  kind: string;
+  source: 'write_file' | 'command' | 'deliverable' | 'scan';
+}
+
+/** 一次尝试的结果摘要：重试历史要能被 UI 和下一次提示词读懂。 */
+export interface TaskAttempt {
+  attempt: number;
+  pass: boolean;
+  score?: number;
+  effort: Effort;
+  reasons?: string[];
+  fix?: string;
+  toolErrors?: string[];
+}
+
 export interface Subtask {
   id: string;
   title: string;
@@ -286,7 +308,12 @@ export interface Subtask {
   dependsOn: string[];
   status: TaskStatus;
   attempts: number;
+  /** 历史字段：早先只存相对路径字符串。 */
   artifacts?: string[];
+  /** 这个任务真正产出/改动的文件。 */
+  files?: TaskFile[];
+  /** 每次尝试的结果，用于「纠错了几次、每次为什么」。 */
+  attemptLog?: TaskAttempt[];
 }
 
 export interface Plan {
@@ -343,8 +370,27 @@ export type RunEvent =
   | { type: 'text.delta'; taskId: string; nodeId: string; text: string }
   | { type: 'reasoning.delta'; taskId: string; nodeId: string; text: string }
   | { type: 'task.acceptance'; taskId: string; result: AcceptanceResult }
-  | { type: 'task.completed'; taskId: string; output: string; artifacts?: string[] }
-  | { type: 'task.revised'; taskId: string; nextEffort: Effort; reason: string }
+  | {
+      type: 'task.completed';
+      taskId: string;
+      output: string;
+      artifacts?: string[];
+      files?: TaskFile[];
+      /** 每次尝试的结果：UI 用它显示「纠错了几次、每次为什么」。 */
+      attemptLog?: TaskAttempt[];
+    }
+  | {
+      type: 'task.revised';
+      taskId: string;
+      nextEffort: Effort;
+      reason: string;
+      /** 这是第几次尝试的修正（0 基）。 */
+      attempt?: number;
+      reasons?: string[];
+      fix?: string;
+      toolErrors?: string[];
+    }
+  | { type: 'task.files'; taskId: string; nodeId?: string; files: TaskFile[] }
   | { type: 'task.failed'; taskId: string; error: string }
   | {
       type: 'search.used';

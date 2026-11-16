@@ -12,10 +12,11 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import {
   AnthropicMessagesAdapter,
@@ -63,6 +64,7 @@ import {
 import { PolicyStore, scopeForRequest, type Mandate } from './policy.js';
 import { checkWorkspaceName, WorkspaceStore } from './workspaces.js';
 import { saveRunDeliverables } from './deliverables.js';
+import { ArtifactLedger, RunFileWatcher } from './artifact-ledger.js';
 import { EffectsLedger } from './effects.js';
 import { buildResumePlan } from './resume.js';
 import {
@@ -463,6 +465,8 @@ function recordExternalCall(input: {
 }
 
 const stateDir = ensureStateDir();
+/** 产物账本：每次运行产出的文件按 runId 落盘，画布与 API 都读它。 */
+const artifactLedger = new ArtifactLedger(join(stateDir, 'artifacts'));
 const workspaces = new WorkspaceStore(stateDir);
 /** 每个工作区一份 CanvasStore（惰性创建并缓存）。 */
 const canvasStores = new Map<string, CanvasStore>();
@@ -5029,6 +5033,8 @@ app.post('/api/commands', async (context) => {
     // 没设就用服务端目录；payload.tools === false 可整体关闭。
     const toolWorkspaceId = workspaceOf(context);
     const toolRootDir = workspaces.get(toolWorkspaceId)?.rootDir || process.cwd();
+    // 任务前后的目录对比：产物账本靠它把「这一步到底写了什么」变成数据。
+    const fileWatcher = new RunFileWatcher(toolRootDir);
     const nodeToolbox =
       body?.payload?.tools === false
         ? undefined
@@ -5104,6 +5110,21 @@ app.post('/api/commands', async (context) => {
       // 有工具箱时所有节点都能调用文件/终端/画布/联网工具。
       toolbox: nodeToolbox,
       toolboxFor,
+      // 产物：任务开始前拍快照，结束时对比并登记到账本（失败的调用同样要留档）。
+      beforeTask: (task) => fileWatcher.before(task.id),
+      afterTask: (task, outcome) => {
+        const files = fileWatcher.after(task.id);
+        if (files.length) {
+          artifactLedger.add(runId, toolWorkspaceId, task.id, task.assignedNodeId, files);
+          audit.record({
+            actor: 'artifact',
+            action: 'artifact.capture',
+            target: runId,
+            detail: { taskId: task.id, ok: outcome.ok, files: files.length },
+          });
+        }
+        return files;
+      },
       accept: createRoutedJudge({
         router: routerPick
           ? {
@@ -5147,6 +5168,15 @@ app.post('/api/commands', async (context) => {
           tokens: event.input + event.output,
           source: 'run',
         });
+      }
+      // 模型明确写了文件：比目录快照更准的归因（args 被截断时交给快照兜底）。
+      if (event.type === 'tool.called' && event.ok && event.tool === 'write_file') {
+        try {
+          const parsed = JSON.parse(event.args) as { path?: unknown };
+          if (typeof parsed?.path === 'string') fileWatcher.noteWrite(event.taskId, parsed.path);
+        } catch {
+          // args 不完整，忽略
+        }
       }
       if (event.type === 'task.acceptance' && event.result.gate) gateCounts[event.result.gate] += 1;
       if (event.type === 'task.acceptance') {
@@ -5548,6 +5578,109 @@ app.post('/api/deliverables/:taskId', async (context) => {
       detail: { taskId, bytes: found.bytes },
     });
     return context.json({ ok: true, file: found.file, bytes: found.bytes });
+  } catch (error) {
+    return context.json(
+      { error: redactSecrets(error instanceof Error ? error.message : String(error), []) },
+      500
+    );
+  }
+});
+
+/**
+ * 产物：按运行、按工作区列出这次到底产出了哪些文件，并支持预览与「在资源管理器里定位」。
+ * 预览/定位只认账本里登记过的路径——不能变成任意文件读取。
+ */
+app.get('/api/runs/:runId/artifacts', (context) => {
+  const runId = context.req.param('runId');
+  const record = artifactLedger.load(runId);
+  return context.json({ ok: true, runId, files: record?.files ?? [] });
+});
+
+app.get('/api/artifacts', (context) => {
+  const limit = Math.min(100, Math.max(1, Number(context.req.query('limit') ?? 20) || 20));
+  const wanted = context.req.header('x-qiansi-workspace') ?? context.req.query('ws');
+  const workspaceId = wanted ? workspaces.resolve(wanted).id : undefined;
+  const runs = artifactLedger
+    .list(limit)
+    .filter((record) => !workspaceId || (record.workspaceId ?? 'main') === workspaceId);
+  return context.json({
+    ok: true,
+    runs,
+    total: runs.reduce((sum, record) => sum + record.files.length, 0),
+  });
+});
+
+/** 账本里登记过的绝对路径才可读/可定位。 */
+function registeredArtifact(rawPath: string): { absolutePath: string } | null {
+  if (!rawPath) return null;
+  const target = resolve(rawPath);
+  for (const record of artifactLedger.list(200)) {
+    for (const file of record.files) {
+      if (file.absolutePath && resolve(file.absolutePath) === target) return { absolutePath: target };
+    }
+  }
+  return null;
+}
+
+app.get('/api/artifacts/preview', async (context) => {
+  const wanted = context.req.query('path') ?? '';
+  const registered = registeredArtifact(wanted);
+  if (!registered) return context.json({ error: 'artifact_not_found' }, 404);
+  try {
+    const stat = statSync(registered.absolutePath);
+    const extension = extname(registered.absolutePath).toLowerCase();
+    const binary = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf'].includes(extension);
+    if (binary) {
+      if (stat.size > 20 * 1024 * 1024) return context.json({ error: 'artifact_too_large' }, 413);
+      const type =
+        extension === '.pdf'
+          ? 'application/pdf'
+          : extension === '.png'
+            ? 'image/png'
+            : extension === '.gif'
+              ? 'image/gif'
+              : extension === '.webp'
+                ? 'image/webp'
+                : 'image/jpeg';
+      return new Response(readFileSync(registered.absolutePath), {
+        headers: { 'content-type': type, 'cache-control': 'no-store' },
+      });
+    }
+    const text = readFileSync(registered.absolutePath, 'utf8').slice(0, 200_000);
+    return context.json({ ok: true, path: registered.absolutePath, bytes: stat.size, text });
+  } catch (error) {
+    return context.json(
+      { error: redactSecrets(error instanceof Error ? error.message : String(error), []) },
+      500
+    );
+  }
+});
+
+app.post('/api/artifacts/reveal', async (context) => {
+  const body = (await context.req.json().catch(() => null)) as { path?: string } | null;
+  const registered = registeredArtifact(String(body?.path ?? ''));
+  if (!registered) return context.json({ error: 'artifact_not_found' }, 404);
+  try {
+    const { spawn: spawnProcess } = await import('node:child_process');
+    if (process.platform === 'win32') {
+      spawnProcess('explorer.exe', [`/select,${registered.absolutePath}`], {
+        detached: true,
+        stdio: 'ignore',
+      }).unref();
+    } else if (process.platform === 'darwin') {
+      spawnProcess('open', ['-R', registered.absolutePath], { detached: true, stdio: 'ignore' }).unref();
+    } else {
+      spawnProcess('xdg-open', [dirname(registered.absolutePath)], {
+        detached: true,
+        stdio: 'ignore',
+      }).unref();
+    }
+    audit.record({
+      actor: actorOf(context),
+      action: 'artifact.reveal',
+      target: registered.absolutePath,
+    });
+    return context.json({ ok: true });
   } catch (error) {
     return context.json(
       { error: redactSecrets(error instanceof Error ? error.message : String(error), []) },
