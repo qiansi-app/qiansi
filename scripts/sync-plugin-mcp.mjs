@@ -16,6 +16,7 @@ const source = join(root, 'packages', 'mcp', 'server.mjs');
 const targets = [
   join(root, 'plugin', 'qiansi', 'mcp', 'server.mjs'),
   join(root, 'codex', 'plugin', 'mcp', 'server.mjs'),
+  join(root, 'dsh', 'qiansi', 'mcp', 'server.mjs'),
 ];
 
 // 副本头部标注来源：插件被拷进宿主缓存后无法反查仓库路径。

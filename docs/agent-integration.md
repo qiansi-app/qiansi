@@ -269,3 +269,14 @@ MCP 的 `call_model` 已自动带上 session/agent/purpose；调用时传 `purpo
 - Studio 与 agent 同时改同一处时以 revision 先到者为准，后到者拿到 409 并接受服务端版本，不会静默覆盖。
 - 审批面板每 3 秒轮询一次；后续改 SSE。
 - 网关只实现了 OpenAI 兼容路径；Claude Code 走 MCP 调用（不需要 Anthropic 网关）。
+
+## DSH（DeepSeek Harness）插件
+
+`dsh/qiansi` 是一个可发布的 DSH 组合包（`qiansi-dsh`），把同一个 MCP server 注册进 DSH，工具名形如 `mcp__qiansi__*`。
+
+- **安装**：`dsh plugin --profile <name> add qiansi-dsh`（npm/市场）、tarball，或仓库内 `node dsh/qiansi/install.mjs --profile <name> --template headless`。三种形态实测都能启动并输出 `[qiansi-mcp] ready`。
+- **补丁**：静态 `cordis.patch.yml` 用 `!!js process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('qiansi-dsh/mcp/server.mjs')` 在启动时解析打包内的 server，不再依赖安装器写绝对路径；`baseUrl` 由 loader 注入（profile 目录的 file URL）。`!!js` 里没有 `require`/`import.meta`，Node 需 ≥22.3。
+- **兼容**：`engines.dsh: ">=0.2.2-rc.1 <0.3.0"`；桥接包是普通依赖，随包安装。
+- **工具**：43 个，新增运行诊断/重跑/停止、运行列表与实时进度、团队读写、自省历史/报告/落地核验、交付物落盘、用户视角验收。
+- **市场**：DSH 的市场是自托管 JSON 索引（格式 1）。牵丝的索引在 `dsh/marketplace/index.json`，用户把 `https://raw.githubusercontent.com/qiansi-app/qiansi/main/dsh/marketplace/index.json` 加进「发现 → 添加索引源」即可；校验命令 `node dsh/marketplace/validate.mjs`（优先用本机 DSH 的官方校验器）。
+- **发布**：`npm run pack:check` → `npm pack` → `npm publish --access public`（需要 npm 登录；发布后市场索引里的版本与时间戳同步更新）。GitHub topic `dsh-plugin`、npm 关键词 `dsh-plugin`/`deepseek-harness` 是 DSH 生态的发现渠道。

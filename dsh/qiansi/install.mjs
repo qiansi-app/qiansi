@@ -1,21 +1,24 @@
 #!/usr/bin/env node
 /**
- * Prepares the Qiansi DSH bundle.
+ * Installs the Qiansi DSH bundle into a profile.
  *
- *   node dsh/qiansi/install.mjs                    # generate cordis.patch.yml
+ * The bundle's patch is static: it resolves its own MCP server through the
+ * profile's module graph at boot
+ *
+ *   !!js process.getBuiltinModule('node:module').createRequire(baseUrl)
+ *        .resolve('qiansi-dsh/mcp/server.mjs')
+ *
+ * so there is nothing to generate and no absolute path to bake. This script
+ * only creates a runnable profile, installs the bundle, and checks the result.
+ *
  *   node dsh/qiansi/install.mjs --profile qiansi --template headless
- *                                                  # create a runnable profile and install into it
- *   node dsh/qiansi/install.mjs --verify qiansi    # compose the profile and show our entries
- *   node dsh/qiansi/install.mjs --desktop --print  # show the desktop-app layer, write nothing
- *   node dsh/qiansi/install.mjs --desktop          # append it to the desktop profile's user layer
- *   node dsh/qiansi/install.mjs --desktop --remove # take it back out
- *
- * The patch is generated rather than shipped because DSH evaluates `args` at
- * boot, before the bundle knows its own path; baking the absolute path in at
- * install time is the only deterministic option.
+ *   node dsh/qiansi/install.mjs --verify qiansi
+ *   node dsh/qiansi/install.mjs --desktop --print
+ *   node dsh/qiansi/install.mjs --desktop
+ *   node dsh/qiansi/install.mjs --desktop --remove
  */
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,23 +32,28 @@ function flag(name) {
   return index >= 0 ? args[index + 1] : undefined;
 }
 
-// 1. Bundle its own copy of the MCP server: the profile links this directory,
-//    so the child process must live inside it.
-const mcpDir = join(here, 'mcp');
-mkdirSync(mcpDir, { recursive: true });
-const mcpSource = join(repo, 'packages', 'mcp', 'server.mjs');
-const mcpTarget = join(mcpDir, 'server.mjs');
-copyFileSync(mcpSource, mcpTarget);
-console.log(`mcp server → ${mcpTarget}`);
-
-// 2. Generate the patch with the absolute entry path.
-const template = readFileSync(join(here, 'cordis.patch.yml.tpl'), 'utf8');
-const entry = mcpTarget.replace(/\\/g, '/');
-const patch = template.replace('__QIANSI_MCP_ENTRY__', entry);
-const patchPath = join(here, 'cordis.patch.yml');
-writeFileSync(patchPath, patch, 'utf8');
-console.log(`patch → ${patchPath}`);
-console.log(`  entry: ${entry}`);
+// 打包内必须自带 MCP server；仓库 checkout 里还要与源文件保持一致。
+const bundled = join(here, 'mcp', 'server.mjs');
+if (!existsSync(bundled)) {
+  console.error(`缺少 ${bundled}；发布包应当自带 mcp/server.mjs`);
+  process.exit(1);
+}
+const source = join(repo, 'packages', 'mcp', 'server.mjs');
+if (existsSync(source)) {
+  const strip = (text) =>
+    text
+      .split('\n')
+      .filter((line) => !line.startsWith('// Generated from '))
+      .join('\n')
+      .trim();
+  if (strip(readFileSync(source, 'utf8')) !== strip(readFileSync(bundled, 'utf8'))) {
+    console.warn('提示：dsh/qiansi/mcp/server.mjs 与 packages/mcp/server.mjs 不一致，先跑 npm run plugin:sync');
+  }
+}
+if (!existsSync(join(here, 'cordis.patch.yml'))) {
+  console.error('缺少 cordis.patch.yml（bundle 层）');
+  process.exit(1);
+}
 
 const profile = flag('profile');
 const templateName = flag('template');
@@ -59,10 +67,9 @@ function run(command, commandArgs, options = {}) {
   return result.status ?? 1;
 }
 
-// 3. Optionally install into a profile.
-//    `dsh plugin add` initializes a base-only profile, which has no app and
-//    therefore cannot boot. `--template <headless|web|tui>` first materializes
-//    the profile from that shipped template so the result is actually runnable.
+// `dsh plugin add` initializes a base-only profile, which has no app and
+// therefore cannot boot. `--template <headless|web|tui>` first materializes
+// the profile from that shipped template so the result is actually runnable.
 if (profile && templateName) {
   console.log(`\ninitializing profile "${profile}" from template "${templateName}"…`);
   const init = spawnSync(
@@ -78,30 +85,35 @@ if (profile && templateName) {
 
 if (profile) {
   console.log(`\ninstalling into profile "${profile}"…`);
-  let code = run('dsh', ['plugin', '--profile', profile, 'add', `link:${here}`]);
+  const code = run('dsh', ['plugin', '--profile', profile, 'add', `link:${here}`]);
   if (code !== 0) {
     console.error('install failed; check that `dsh` is on PATH and the registry is reachable');
     process.exit(code);
   }
-  // 桥接包没有 dsh.bundle，不会成为 profile 层；必须显式装进 profile，
-  // 否则补丁里引用的 '@deepseek-ai/dsh-mcp-client' 解析不到。
-  code = run('dsh', ['plugin', '--profile', profile, 'add', '@deepseek-ai/dsh-mcp-client@0.2.2-rc.1']);
-  if (code !== 0) {
-    console.error('mcp bridge install failed; the MCP tools will not register without it');
-    process.exit(code);
+  // bundle 的 dependencies 已声明 @deepseek-ai/dsh-mcp-client（hoisted 安装）。
+  // 少数非 hoisted 布局下依赖可能不可达，这里补一次显式安装；失败只警告。
+  const bridge = run('dsh', [
+    'plugin',
+    '--profile',
+    profile,
+    'add',
+    '@deepseek-ai/dsh-mcp-client@0.2.2-rc.1',
+  ]);
+  if (bridge !== 0) {
+    console.warn('提示：显式安装 MCP 桥失败；若启动后没有 mcp__qiansi__* 工具，再手动安装该包。');
   }
 }
 
-// 4. Optionally verify: dump the composed profile and grep for our entries.
-//    不加 --patch —— 装进 profile 后，bundle 自己的 cordis.patch.yml 就是层。
+// Optionally verify: dump the composed profile and grep for our entries.
+// 不加 --patch —— 装进 profile 后，bundle 自己的 cordis.patch.yml 就是层。
 const verify = flag('verify') ?? profile;
 if (verify) {
   console.log(`\ncomposing profile "${verify}"…`);
-  const result = spawnSync(
-    'dsh',
-    ['--profile', verify, '--dump-config'],
-    { encoding: 'utf8', shell: process.platform === 'win32', maxBuffer: 32 * 1024 * 1024 }
-  );
+  const result = spawnSync('dsh', ['--profile', verify, '--dump-config'], {
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+    maxBuffer: 32 * 1024 * 1024,
+  });
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
   const lines = output.split(/\r?\n/);
   const hits = lines.filter((line) => /qiansi/i.test(line));
@@ -113,14 +125,13 @@ if (verify) {
   }
 }
 
-// 5. Desktop app: the CLI refuses to manage its profile ("managed exclusively
-//    by the Electron application"), but cordis.patch.yml is documented as the
-//    user layer and is applied after every bundle. One insert entry is enough:
-//    @deepseek-ai/dsh-mcp-client resolves from the dsh installation, so the
-//    desktop profile needs no pnpm install and no package.json change.
+// Desktop app: the CLI refuses to manage its profile ("managed exclusively
+// by the Electron application"), but cordis.patch.yml is documented as the
+// user layer and is applied after every bundle. The desktop profile has no
+// qiansi-dsh package in its module graph, so this path still uses an absolute
+// entry into the repo checkout.
 if (args.includes('--desktop')) {
   const home = process.env.DSH_HOME ?? join(homedir(), '.dsh');
-  // --patch-file 指向别处，方便在模板 profile 上演练同一段 YAML。
   const patchFile =
     flag('patch-file') ?? join(home, 'profiles', 'desktop', 'cordis.patch.yml');
   if (!existsSync(patchFile)) {
@@ -132,6 +143,7 @@ if (args.includes('--desktop')) {
   const START = '# >>> qiansi-mcp (install.mjs)';
   const END = '# <<< qiansi-mcp (install.mjs)';
   const nodePath = process.execPath.replace(/\\/g, '/');
+  const entry = bundled.replace(/\\/g, '/');
   const block = [
     START,
     '- insert:',
@@ -184,7 +196,6 @@ if (args.includes('--desktop')) {
   }
 
   // 模板 profile 的用户层是「注释 + []」；直接往后追加会变成两个根节点。
-  // 只有空数组时把 [] 摘掉再写。
   const withoutComments = current.replace(/^[ \t]*#.*$/gm, '').trim();
   const base = withoutComments === '[]' ? current.replace(/\[\][ \t]*(\r?\n)?$/, '') : current;
   const trimmed = base.replace(/\s*$/, '');

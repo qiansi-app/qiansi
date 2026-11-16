@@ -2,22 +2,18 @@
 /**
  * Qiansi MCP server (stdio, zero dependencies).
  *
- * Tools:
- *   list_models          list the model pool exposed by the local gateway
- *   call_model           call a subordinate model through the gateway
- *   get_usage            token usage and pending approvals
- *   request_approval     ask the human to approve a risky action
- *   describe_canvas      compact text view of the canvas (start here)
- *   get_canvas           full canvas JSON
- *   get_canvas_svg       canvas as a standalone SVG
- *   add_node             add a model/task/artifact node
- *   update_node          patch a node's data
- *   connect_nodes        wire two nodes (assign | handoff | review | context)
- *   remove_node          delete a node and its edges
- *   set_orchestrator     choose which node is the main model
- *   adapt_canvas         make THIS session the orchestrator and prepare a run
- *   run_canvas           start one orchestration run from the canvas
- *   get_run_result       structured per-task result of a run
+ * Tools (the source of truth is the `tools` array below):
+ *   canvas      describe_canvas, get_canvas, get_canvas_svg, add_node, update_node,
+ *               connect_nodes, remove_node, set_orchestrator, adapt_canvas, export_canvas
+ *   runs        run_canvas, get_run_result, get_run_diagnosis, rerun_run, stop_run,
+ *               list_runs, get_active_run, save_deliverable, resume_project
+ *   team        get_team, update_team
+ *   self-opt    self_optimize, self_opt_status, self_opt_versions,
+ *               list_selfopt_sessions, get_selfopt_report, check_selfopt_landing
+ *   models      list_models, call_model, delegate, delegate_task, web_search, get_usage,
+ *               request_approval
+ *   workspace   list_workspaces, use_workspace, upload_file, handoff_from_agent
+ *   verification run_user_view, get_user_view
  *
  * Resources:
  *   qiansi://canvas          full canvas JSON
@@ -280,12 +276,16 @@ const tools = [
   {
     name: 'add_node',
     description:
-      'Add a node to the Qiansi canvas. kind is model (an AI that does work), task, or artifact. Position is optional and defaults to the right of the rightmost node.',
+      'Add a node to the Qiansi canvas. kind is model (an AI that does work), task, artifact, region (a labelled area), library (file library), file or external (a linked web resource). Position is optional and defaults to the right of the rightmost node.',
     inputSchema: {
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Node label shown on the canvas' },
-        kind: { type: 'string', description: 'model | task | artifact (default model)' },
+        kind: {
+          type: 'string',
+          enum: ['model', 'task', 'artifact', 'region', 'library', 'file', 'external'],
+          description: 'Node kind (default model)',
+        },
         role: { type: 'string', description: 'Short description of what this node does' },
         provider: { type: 'string', description: 'Optional key-source hint; the model id decides routing' },
         model: { type: 'string', description: 'Model id from list_models — any model a configured key can call' },
@@ -564,6 +564,145 @@ const tools = [
         restore: { type: 'boolean', description: 'Return to the original branch' },
         diff_id: { type: 'string', description: 'Show the diff of this version' },
       },
+    },
+  },
+  {
+    name: 'get_run_diagnosis',
+    description:
+      'Explain why a run failed and what can be done: failed tasks with errors, failure reasons, working-directory health, per-model key readiness, and which actions (resume / fresh rerun / user-view check) are available.',
+    inputSchema: {
+      type: 'object',
+      properties: { run_id: { type: 'string', description: 'Run id from run_canvas, delegate_task or resume_project' } },
+      required: ['run_id'],
+    },
+  },
+  {
+    name: 'rerun_run',
+    description:
+      'Re-run a finished or failed run. mode "resume" continues from the last checkpoint (default), "fresh" re-plans from the current canvas. Pass root_dir when the failure was a missing/incorrect working directory. Pair with get_run_diagnosis.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        run_id: { type: 'string' },
+        mode: { type: 'string', enum: ['resume', 'fresh'], description: 'resume (default) or fresh' },
+        root_dir: { type: 'string', description: 'Working directory to persist on the canvas before retrying' },
+      },
+      required: ['run_id'],
+    },
+  },
+  {
+    name: 'stop_run',
+    description: 'Stop a live run with the same policy check as the UI. Use this when a run is clearly failing or wasting tokens; it cannot be undone.',
+    inputSchema: {
+      type: 'object',
+      properties: { run_id: { type: 'string' } },
+      required: ['run_id'],
+    },
+  },
+  {
+    name: 'list_runs',
+    description: 'List recent runs (id, status, goal, tokens, workspace) so the agent can find a run id without guessing.',
+    inputSchema: {
+      type: 'object',
+      properties: { limit: { type: 'integer', minimum: 1, maximum: 100 } },
+    },
+  },
+  {
+    name: 'get_active_run',
+    description: 'The live run in progress (with per-task status) and the most recent finished run, without opening an SSE stream. Use it to poll progress after starting a run.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_team',
+    description: 'Read the canvas team roster: members (name, job, model, autonomy, tools, memory), playbook and warnings. This is the roster every run injects into task prompts.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'update_team',
+    description:
+      'Replace the canvas team roster or playbook. Members need a unique name and a distinct job; autonomy is investigate | draft | auto | full; tools restricts what a member may call. Returns warnings for overlap or sprawl.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        playbook: { type: 'string', description: 'Shared standards broadcast to every member' },
+        members: {
+          type: 'array',
+          description: 'Full member list (replaces the roster)',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              name: { type: 'string' },
+              job: { type: 'string' },
+              model: { type: 'string' },
+              autonomy: { type: 'string', enum: ['investigate', 'draft', 'auto', 'full'] },
+              tools: { type: 'array', items: { type: 'string' } },
+              memory: { type: 'string' },
+            },
+            required: ['name', 'job'],
+          },
+        },
+      },
+    },
+  },
+  {
+    name: 'list_selfopt_sessions',
+    description: 'History of self-optimization sessions for a repository: status, tokens, findings, applied count, versions, error. Use it to review past rounds, not just the in-memory current one.',
+    inputSchema: {
+      type: 'object',
+      properties: { root_dir: { type: 'string', description: 'Repository root; defaults to the server repo' } },
+    },
+  },
+  {
+    name: 'get_selfopt_report',
+    description: 'Read one session\'s human-readable report: per-finding checks, independent review, diff summary and commits.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Session id from list_selfopt_sessions or self_opt_status' },
+        root_dir: { type: 'string' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'check_selfopt_landing',
+    description: 'Verify with git whether the commits produced by self-optimization are still on the current branch (landed) or were dropped.',
+    inputSchema: {
+      type: 'object',
+      properties: { root_dir: { type: 'string' } },
+    },
+  },
+  {
+    name: 'save_deliverable',
+    description: 'Write a run task\'s output to a markdown file under ~/.qiansi/deliverables and return the file path plus the run directory.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        run_id: { type: 'string' },
+        task_id: { type: 'string', description: 'Task id (C1, C2, …) from get_run_result' },
+      },
+      required: ['run_id', 'task_id'],
+    },
+  },
+  {
+    name: 'run_user_view',
+    description: 'Open the project the way a user would (headless browser: page responds, content visible, no console errors, clickable, no overflow, screenshots) and return the verdict and checks. Requires a runnable web project or a running url.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        run_id: { type: 'string', description: 'Run to associate the check with (optional)' },
+        root_dir: { type: 'string' },
+        url: { type: 'string', description: 'Already-running URL to check instead of launching the project' },
+      },
+    },
+  },
+  {
+    name: 'get_user_view',
+    description: 'The latest user-view acceptance report for a workspace, or one by id.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Report id; omit for the latest in this workspace' } },
     },
   },
 ];
@@ -1191,6 +1330,106 @@ async function callTool(name, args = {}) {
         app: appHint(),
       };
     }
+  }
+
+  if (name === 'get_run_diagnosis') {
+    const runId = String(args.run_id ?? '').trim();
+    if (!runId) return { ok: false, error: 'run_id is required' };
+    return request(`/api/runs/${encodeURIComponent(runId)}/diagnosis`);
+  }
+
+  if (name === 'rerun_run') {
+    const runId = String(args.run_id ?? '').trim();
+    if (!runId) return { ok: false, error: 'run_id is required' };
+    const mode = args.mode === 'fresh' ? 'fresh' : 'resume';
+    return request(`/api/runs/${encodeURIComponent(runId)}/rerun`, {
+      method: 'POST',
+      body: JSON.stringify({
+        mode,
+        rootDir: args.root_dir ? String(args.root_dir) : undefined,
+      }),
+    });
+  }
+
+  if (name === 'stop_run') {
+    const runId = String(args.run_id ?? '').trim();
+    if (!runId) return { ok: false, error: 'run_id is required' };
+    return request('/api/commands', {
+      method: 'POST',
+      body: JSON.stringify({
+        commandId: randomUUID(),
+        type: 'run.stop',
+        payload: { runId },
+      }),
+    });
+  }
+
+  if (name === 'list_runs') {
+    const limit = args.limit ? `?limit=${Math.max(1, Math.min(100, Number(args.limit)))}` : '';
+    return request(`/api/runs${limit}`);
+  }
+
+  if (name === 'get_active_run') {
+    return request('/api/runs/active');
+  }
+
+  if (name === 'get_team') {
+    return request('/api/team');
+  }
+
+  if (name === 'update_team') {
+    return request('/api/team', {
+      method: 'PUT',
+      body: JSON.stringify({
+        playbook: args.playbook === undefined ? undefined : String(args.playbook),
+        members: Array.isArray(args.members) ? args.members : undefined,
+      }),
+    });
+  }
+
+  if (name === 'list_selfopt_sessions') {
+    const scope = args.root_dir ? `?rootDir=${encodeURIComponent(String(args.root_dir))}` : '';
+    return request(`/api/selfopt/sessions${scope}`);
+  }
+
+  if (name === 'get_selfopt_report') {
+    const id = String(args.id ?? '').trim();
+    if (!id) return { ok: false, error: 'id is required' };
+    const scope = args.root_dir ? `?rootDir=${encodeURIComponent(String(args.root_dir))}` : '';
+    return request(`/api/selfopt/sessions/${encodeURIComponent(id)}/report${scope}`);
+  }
+
+  if (name === 'check_selfopt_landing') {
+    const scope = args.root_dir ? `?rootDir=${encodeURIComponent(String(args.root_dir))}` : '';
+    return request(`/api/selfopt/landing${scope}`);
+  }
+
+  if (name === 'save_deliverable') {
+    const runId = String(args.run_id ?? '').trim();
+    const taskId = String(args.task_id ?? '').trim();
+    if (!runId || !taskId) return { ok: false, error: 'run_id and task_id are required' };
+    return request(`/api/deliverables/${encodeURIComponent(taskId)}`, {
+      method: 'POST',
+      body: JSON.stringify({ runId }),
+    });
+  }
+
+  if (name === 'run_user_view') {
+    return request('/api/user-view', {
+      method: 'POST',
+      body: JSON.stringify({
+        runId: args.run_id ? String(args.run_id) : undefined,
+        rootDir: args.root_dir ? String(args.root_dir) : undefined,
+        url: args.url ? String(args.url) : undefined,
+      }),
+    });
+  }
+
+  if (name === 'get_user_view') {
+    if (args.id) {
+      return request(`/api/user-view/${encodeURIComponent(String(args.id))}`);
+    }
+    return request('/api/user-view/latest');
   }
 
   throw new Error(`unknown tool: ${name}`);

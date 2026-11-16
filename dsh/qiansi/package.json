@@ -1,14 +1,43 @@
 {
   "name": "qiansi-dsh",
-  "version": "0.1.1",
-  "private": true,
+  "version": "0.2.0",
   "type": "module",
   "description": "牵丝 Qiansi as a DeepSeek Harness bundle: connects the canvas MCP server and exposes its tools as mcp__qiansi__*",
   "main": "index.js",
+  "bin": {
+    "qiansi-dsh": "bin/cli.mjs"
+  },
   "exports": {
     ".": "./index.js",
     "./mcp/server.mjs": "./mcp/server.mjs",
     "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "bin/cli.mjs",
+    "mcp/server.mjs",
+    "cordis.patch.yml",
+    "install.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "deepseek-harness",
+    "qiansi",
+    "mcp"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qiansi-app/qiansi.git",
+    "directory": "dsh/qiansi"
+  },
+  "homepage": "https://github.com/qiansi-app/qiansi/tree/main/dsh/qiansi",
+  "engines": {
+    "node": ">=22.3",
+    "dsh": ">=0.2.2-rc.1 <0.3.0"
   },
   "dsh": {
     "bundle": {
@@ -16,7 +45,8 @@
     }
   },
   "scripts": {
-    "install-bundle": "node install.mjs"
+    "install-bundle": "node install.mjs",
+    "pack:check": "node pack-check.mjs"
   },
   "dependencies": {
     "@deepseek-ai/dsh-mcp-client": "0.2.2-rc.1"
