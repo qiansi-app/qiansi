@@ -50,9 +50,22 @@ WebSearchService（apps/server/src/web-search.ts）
 - Key 通过配额感知的 `slotCredential` 读取，跟随当前激活的 Key，不会绕过额度管理。
 - 选中的 provider 失败时自动回退一次到无 Key 的 HTML 搜索，避免「Key 失效 → 整个搜索不可用」。
 - `QIANSI_SEARCH_PROVIDER` 可强制指定；`QIANSI_SEARCH_ENGINE` 可选 `search_std` / `search_pro` 等智谱档位。
-- 相同查询缓存 10 分钟，最多 120 条。
+- 相同查询缓存 10 分钟（时效查询 3 分钟），最多 120 条。
 
 `GET /api/search/status` 可查看当前 provider 与各 provider 是否就绪（不返回 Key）。
+
+## 检索管线（2026-11 升级，借鉴自开源与文献）
+
+一次搜索不再只有「一个 query → 一个源 → 短摘要」。管线（`apps/server/src/web-search.ts`）：
+
+1. **正文直达**：智谱 `content_size=high`，一条结果直接给 6–8KB 可读正文（实测掘金/CSDN/腾讯新闻等），工具消息前 3 名附 1200–1600 字正文，模型「读」而不是猜摘要；正文放 `SearchHit.content`，`snippet` 保持短版。
+2. **多源并发 + RRF 融合**：有 Key 的源与 HTML 源并发（不再串行兜底），按 Reciprocal Rank Fusion（K=60）融合；关键词源权重 1.0、HTML 源 0.7；URL 归一化（去 utm/spm/share 跟踪参数）去重；单站点最多占一半席位，防 SEO 刷屏。做法对齐 SearXNG 与 LangChain `EnsembleRetriever`、gpt-researcher 的多源聚合。
+3. **查询改写扇出**（`QIANSI_SEARCH_REWRITE=on`）：一次快模型调用生成 2 个互补变体，与原查询各查一路再融合（MultiQueryRetriever / deep-research 的 `generateSerpQueries`）；改写失败自动降级单路，不影响可用性。
+4. **LLM 重排**（默认开，`QIANSI_SEARCH_RERANK=off` 关闭）：命中 >4 时让快模型按相关性给出索引顺序（FlashRank/bge cross-encoder 的零依赖等价物）；失败保持原序。
+5. **时效**：`web_search` 工具新增 `freshness`（anyTime/week/month/year），query 里出现「最新/最近/今年/新闻」等词自动收窄到一年；周级结果缓存只保留 3 分钟（FreshQA 的教训）。
+6. **`read_url` 工具**：抓任意 http(s) 页面，去脚本/样式/导航后返回可读正文（2MB 上限、GBK 识别、10 分钟按 URL 缓存）。crawl4ai / Jina Reader 的本地等价物——本机实测 r.jina.ai 与 DuckDuckGo 直连不可达，因此不依赖外部阅读服务。
+
+研究依据与采纳/拒绝清单见 [search-research-2026-11-16.md](search-research-2026-11-16.md)。
 
 ## 成本与行为边界
 

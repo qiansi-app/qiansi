@@ -113,6 +113,8 @@ export interface SearchHit {
   title: string;
   url: string;
   snippet?: string;
+  /** 页面正文（zhipu content_size=high 直接返回）：给模型读的材料，不只是摘要。 */
+  content?: string;
   source?: string;
   publishedAt?: string;
 }
@@ -120,6 +122,8 @@ export interface SearchHit {
 export interface SearchQuery {
   query: string;
   maxResults?: number;
+  /** 时间窗：anyTime 默认；query 带「最新/今年」时服务端也会自动收窄到 year。 */
+  freshness?: 'anyTime' | 'week' | 'month' | 'year';
   signal?: AbortSignal;
 }
 

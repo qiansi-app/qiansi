@@ -21,7 +21,11 @@ export interface NodeToolboxDeps {
   workspaces: () => Array<{ id: string; name: string; archivedAt?: number }>;
   runs: () => Array<{ runId: string; status: string; goal: string; workspaceId?: string }>;
   runResult: (runId: string) => unknown;
-  search?: (query: string, maxResults: number) => Promise<Array<{ title: string; url: string; snippet?: string }>>;
+  search?: (
+    query: string,
+    maxResults: number,
+    freshness?: 'anyTime' | 'week' | 'month' | 'year'
+  ) => Promise<Array<{ title: string; url: string; snippet?: string; content?: string; publishedAt?: string }>>;
   audit: (entry: { action: string; target?: string; detail?: Record<string, unknown> }) => void;
 }
 
@@ -162,14 +166,33 @@ export function buildNodeToolbox(deps: NodeToolboxDeps): ToolboxOptions {
     tools.push(
       schema(
         'web_search',
-        '联网检索并返回标题、URL 与摘要。用于核实当前事实、价格、发布与统计；只引用返回的 URL，不得编造来源。',
+        '联网检索并返回标题、URL 与摘要（前几名带页面正文）。用于核实当前事实、价格、发布与统计；只引用返回的 URL，不得编造来源。时效性问题传 freshness。',
         {
           type: 'object',
           properties: {
             query: { type: 'string' },
             max_results: { type: 'integer', minimum: 1, maximum: 10 },
+            freshness: {
+              type: 'string',
+              enum: ['anyTime', 'week', 'month', 'year'],
+              description: '时间窗。默认 anyTime；问最新进展用 year 或 month。',
+            },
           },
           required: ['query'],
+          additionalProperties: false,
+        }
+      )
+    );
+    tools.push(
+      schema(
+        'read_url',
+        '抓取一个网页的可读正文（去脚本/导航，保留正文文本）。检索摘要不够时用它读原文；被墙或不可达的站点会明确报错。',
+        {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: '要读取的 http/https 链接' },
+          },
+          required: ['url'],
           additionalProperties: false,
         }
       )
@@ -306,14 +329,40 @@ export function buildNodeToolbox(deps: NodeToolboxDeps): ToolboxOptions {
           const query = String(args.query ?? '').trim();
           if (!query) throw new Error('query 为空');
           const max = Math.min(10, Math.max(1, Number(args.max_results ?? 6) || 6));
-          const hits = await deps.search(query, max);
+          const freshness = ['week', 'month', 'year'].includes(String(args.freshness))
+            ? (String(args.freshness) as 'week' | 'month' | 'year')
+            : 'anyTime';
+          const hits = await deps.search(query, max, freshness);
           const lines = [`检索「${query}」：${hits.length} 条`];
           hits.forEach((hit, index) => {
             lines.push(`${index + 1}. ${hit.title}`);
             lines.push(`   ${hit.url}`);
             if (hit.snippet) lines.push(`   ${hit.snippet.slice(0, 200)}`);
+            // 前 3 名带正文开头：模型能读到材料，而不只是猜摘要。
+            if (hit.content && index < 3) lines.push(`   正文: ${hit.content.slice(0, 1200)}`);
+            if (hit.publishedAt) lines.push(`   发布: ${hit.publishedAt.slice(0, 40)}`);
           });
-          return { content: clip(redactSecrets(lines.join('\n'), []), 8000) };
+          return { content: clip(redactSecrets(lines.join('\n'), []), 12_000) };
+        }
+        case 'read_url': {
+          if (!deps.search) throw new Error('联网检索不可用');
+          const rawUrl = String(args.url ?? '').trim();
+          let parsed: URL;
+          try {
+            parsed = new URL(rawUrl);
+          } catch {
+            throw new Error(`URL 不合法：${rawUrl.slice(0, 120)}`);
+          }
+          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            throw new Error('只支持 http/https 链接');
+          }
+          const page = await fetchPageText(rawUrl);
+          return {
+            content: clip(
+              redactSecrets(`已读取 ${rawUrl}\n标题：${page.title}\n\n${page.text}`, []),
+              12_000
+            ),
+          };
         }
         default:
           return { content: `未知工具：${call.name}`, isError: true };
@@ -341,6 +390,90 @@ interface ShellOutcome {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+}
+
+const PAGE_MAX_BYTES = 2 * 1024 * 1024;
+/** 同一页面的二次读取走缓存：模型常在同一次任务里重复打开同一个链接。 */
+const PAGE_CACHE_TTL_MS = 10 * 60_000;
+const PAGE_CACHE_MAX = 40;
+const pageCache = new Map<string, { at: number; page: { title: string; text: string } }>();
+
+export async function fetchPageText(
+  url: string,
+  timeoutMs = 20_000
+): Promise<{ title: string; text: string }> {
+  const cached = pageCache.get(url);
+  if (cached && Date.now() - cached.at < PAGE_CACHE_TTL_MS) return cached.page;
+  const response = await fetch(url, {
+    headers: {
+      'user-agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36',
+      'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}：该页面无法直接读取`);
+  }
+  const type = response.headers.get('content-type') ?? '';
+  const buffer = await response.arrayBuffer();
+  if (buffer.byteLength > PAGE_MAX_BYTES) {
+    throw new Error(`页面过大（${Math.round(buffer.byteLength / 1024)}KB），只读 2MB 以内的页面`);
+  }
+  const charset = /charset=([\w-]+)/i.exec(type)?.[1]?.toLowerCase() ?? 'utf-8';
+  let html = new TextDecoder(charset === 'gbk' || charset === 'gb2312' ? 'gbk' : 'utf-8').decode(
+    buffer
+  );
+  const title =
+    /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1]?.replace(/<[^>]+>/g, '').trim() ?? '';
+  if (
+    /text\/plain|application\/(json|xml)/i.test(type) ||
+    !/<html|<body|<div|<p/i.test(html.slice(0, 2000))
+  ) {
+    // 已经是纯文本/JSON/XML：直接清洗空白返回。
+    const page = { title, text: html.replace(/\s+/g, ' ').trim().slice(0, 40_000) };
+    rememberPage(url, page);
+    return page;
+  }
+  html = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<(nav|header|footer|aside|form|noscript)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ');
+  // 块级元素换行、行内元素留空格，保留一点结构。
+  const text = html
+    .replace(/<\/(p|div|li|h[1-6]|tr|section|article|blockquote|pre)>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&#x27;/g, "'")
+    .replace(/&#x?[\da-f]+;/gi, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join('\n')
+    .trim();
+  if (text.length < 20) {
+    throw new Error('页面没有可提取的正文（可能是纯脚本渲染），请改用检索结果');
+  }
+  const page = { title, text: text.slice(0, 40_000) };
+  rememberPage(url, page);
+  return page;
+}
+
+function rememberPage(url: string, page: { title: string; text: string }): void {
+  pageCache.set(url, { at: Date.now(), page });
+  if (pageCache.size > PAGE_CACHE_MAX) {
+    const oldest = [...pageCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) pageCache.delete(oldest[0]);
+  }
 }
 
 /**

@@ -5,6 +5,7 @@ import type {
   NormalizedStreamEvent,
   SearchFn,
   SearchHit,
+  SearchQuery,
   ToolCall,
   ToolSpec,
 } from '../types.js';
@@ -18,9 +19,10 @@ import type {
 export const WEB_SEARCH_TOOL: ToolSpec = {
   name: 'web_search',
   description:
-    'Search the public web and return ranked results (title, URL, snippet). ' +
+    'Search the public web and return ranked results (title, URL, excerpt; top hits include page content). ' +
     'Use it whenever the task depends on current or externally verifiable facts: news, prices, ' +
     'releases, statistics, people, quotations. Use 1-3 short, focused queries. ' +
+    'Pass freshness="year" (or "month"/"week") when the question concerns recent events. ' +
     'Cite the URLs you used and never invent a source. If the results do not answer the ' +
     'question, say what could not be verified.',
   parameters: {
@@ -35,6 +37,12 @@ export const WEB_SEARCH_TOOL: ToolSpec = {
         minimum: 1,
         maximum: 10,
         description: 'How many results to return (default 6).',
+      },
+      freshness: {
+        type: 'string',
+        enum: ['anyTime', 'week', 'month', 'year'],
+        description:
+          'Limit to recently published pages. Default anyTime; use "year" for anything time-sensitive.',
       },
     },
     required: ['query'],
@@ -67,6 +75,8 @@ function formatResults(query: string, hits: SearchHit[]): string {
     lines.push(`${index + 1}. ${clip(hit.title || '(untitled)', 160)}`);
     lines.push(`   URL: ${hit.url}`);
     if (hit.snippet) lines.push(`   ${clip(hit.snippet, MAX_SNIPPET)}`);
+    // 排名前 3 的命中直接给正文开头：模型能「读」到页面，而不是只看摘要猜。
+    if (hit.content && index < 3) lines.push(`   Content: ${clip(hit.content, 1600)}`);
     if (hit.publishedAt) lines.push(`   Published: ${clip(hit.publishedAt, 40)}`);
   });
   lines.push(
@@ -78,14 +88,16 @@ function formatResults(query: string, hits: SearchHit[]): string {
   return content;
 }
 
-function parseCall(call: ToolCall): { query: string; maxResults?: number } {
+function parseCall(call: ToolCall): { query: string; maxResults?: number; freshness?: string } {
   try {
     const parsed = JSON.parse(call.arguments || '{}') as Record<string, unknown>;
     const query = typeof parsed.query === 'string' ? parsed.query.trim() : '';
     const maxResults = Number(parsed.max_results ?? parsed.maxResults);
+    const freshness = typeof parsed.freshness === 'string' ? parsed.freshness : undefined;
     return {
       query,
       maxResults: Number.isFinite(maxResults) ? maxResults : undefined,
+      freshness,
     };
   } catch {
     return { query: '' };
@@ -189,7 +201,7 @@ export class SearchToolAdapter implements ChatAdapter {
       ];
 
       for (const call of searchCalls) {
-        const { query, maxResults } = parseCall(call);
+        const { query, maxResults, freshness } = parseCall(call);
         let hits: SearchHit[] = [];
         let failure = '';
         if (!query) {
@@ -202,6 +214,7 @@ export class SearchToolAdapter implements ChatAdapter {
                 this.options.maxResults ?? 6,
                 Math.max(1, maxResults ?? this.options.maxResults ?? 6)
               ),
+              freshness: freshness as SearchQuery['freshness'],
               signal: request.signal,
             });
           } catch (error) {

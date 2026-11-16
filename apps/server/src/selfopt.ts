@@ -400,7 +400,13 @@ export interface SelfOptDeps {
   ) => Promise<{ text: string; usage: { total: number }; model?: string }>;
   /** 可用模型清单：评审团从这里取不同厂商的模型。 */
   roster?: () => Promise<Array<{ model: string; label?: string }>>;
-  search?: (query: string, maxResults: number) => Promise<Array<{ title: string; url: string; snippet?: string }>>;
+  search?: (
+    query: string,
+    maxResults: number,
+    freshness?: 'anyTime' | 'week' | 'month' | 'year'
+  ) => Promise<
+    Array<{ title: string; url: string; snippet?: string; content?: string; publishedAt?: string }>
+  >;
   runShell?: (cmdLine: string, timeoutMs: number, cwd: string) => Promise<ShellResult>;
   runGit?: (args: string[], cwd: string) => Promise<ShellResult>;
   /** 每次状态变化回调：用它把体检/问题同步到画布。 */
@@ -1321,13 +1327,17 @@ export class SelfOptEngine {
     const chunks: string[] = [];
     for (const query of queries) {
       try {
-        const hits = await search(query, 5);
+        // 对标要的是近一年的做法与产品，不是十年前的老帖。
+        const hits = await search(query, 5, 'year');
         if (hits.length === 0) continue;
         chunks.push(
           `### 查询：${query}\n` +
             hits
               .slice(0, 5)
-              .map((hit) => `- ${hit.title} (${hit.url})\n  ${(hit.snippet ?? '').slice(0, 260)}`)
+              .map(
+                (hit) =>
+                  `- ${hit.title} (${hit.url})${hit.publishedAt ? ` [${hit.publishedAt.slice(0, 10)}]` : ''}\n  ${(hit.snippet ?? '').slice(0, 260)}`
+              )
               .join('\n')
         );
       } catch (error) {

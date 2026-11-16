@@ -550,9 +550,21 @@ async function slotCredential(
 /**
  * 服务端搜索：模型只发 query，真正的联网由这里完成。Key 走配额感知的
  * slotCredential（订阅优先），因此智谱订阅的搜索额度会被优先使用。
+ * llm 钩子用于查询改写（QIANSI_SEARCH_REWRITE=on）与结果重排：
+ * 用最便宜的快模型，失败就退回纯检索，不影响可用性。
  */
 const webSearch = new WebSearchService(vault, {
   keyFor: async (slot) => (await slotCredential(slot))?.secret,
+  llm: async (system, user, maxTokens) => {
+    const result = await selfOptChat(
+      [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      { maxTokens: Math.max(120, maxTokens ?? 200), timeoutMs: 15_000 }
+    );
+    return result.text;
+  },
 });
 
 /** 自我优化的默认仓库根：从 cwd 往上找第一个带 .git 的目录。 */
@@ -961,7 +973,7 @@ const selfOpt = new SelfOptEngine({
   onProgress: (session) => publishSelfOpt(session),
   chat: selfOptChat,
   roster: async () => (await availableSelfOptModels()).map((model) => ({ model })),
-  search: (query, maxResults) => webSearch.search({ query, maxResults }),
+  search: (query, maxResults, freshness) => webSearch.search({ query, maxResults, freshness }),
 });
 
 /** The port the listener actually bound, which can differ from QIANSI_PORT. */
@@ -3389,7 +3401,8 @@ ${rosterText ? `\n团队成员（一人一职，优先把任务交给职责最�
 12. 最终交付节点（把成果交给用户的那一步）的 acceptance 里要有一条形态标准：交付物形态与用户要求的形态一致；
 13. 目标保真是红线：允许提升目标层级（对结果负责），不允许更换交付物形态；
 14. 每个工作节点都能调用本地工具：读写工作目录内的文件、执行 shell 命令、查询画布、联网检索。目标要求改代码/跑测试/写文件时，把动作写进工单，验收写成可判定的结果（例如「npm test 退出码为 0」「文件 X 中包含 Y」）；不需要工具的任务不要强行调用。
-15. 名册优先：给了团队成员时，每个工作节点填 member（成员称呼），选唯一职责与任务最贴近的人；同一个人可以接多个节点，但不要把与他职责无关的任务塞给他；名册里没有合适人选时 member 留空，不要硬指派。`,
+15. 研究型任务按这个循环写工单：先列 2-3 个互补检索方向 → web_search 后再用 read_url 读前几个命中的正文 → 把事实（含数字/日期/主体）记成 learnings → 根据缺口提出下一轮查询，直到预算用尽；交付必须按编号引用来源 URL，检索不到的部分明确写「未能核实」，不得编造。
+16. 名册优先：给了团队成员时，每个工作节点填 member（成员称呼），选唯一职责与任务最贴近的人；同一个人可以接多个节点，但不要把与他职责无关的任务塞给他；名册里没有合适人选时 member 留空，不要硬指派。`,
       },
     ];
 
@@ -5036,7 +5049,7 @@ app.post('/api/commands', async (context) => {
                 workspaceId: item.workspaceId,
               })),
             runResult: (id) => store.snapshot(id) ?? { error: 'run_not_found', runId: id },
-            search: (query, maxResults) => webSearch.search({ query, maxResults }),
+            search: (query, maxResults, freshness) => webSearch.search({ query, maxResults, freshness }),
             audit: (entry) =>
               audit.record({
                 actor: 'node-tool',
