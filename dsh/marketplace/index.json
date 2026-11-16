@@ -26,8 +26,8 @@
         "zh": "牵丝画布"
       },
       "description": {
-        "en": "Put the Qiansi multi-model canvas into DSH: canvas tools, runs, team, self-optimization — exposed as mcp__qiansi__*.",
-        "zh": "把牵丝的多模型协作画布接进 DSH：画布、运行、团队、自我优化，统一暴露为 mcp__qiansi__*。"
+        "en": "Put the Qiansi multi-model canvas into DSH: canvas tools, runs, team, self-optimization — exposed as mcp__qiansi__*. Ships its own canvas server, so installing is enough to start working.",
+        "zh": "把牵丝的多模型协作画布接进 DSH：画布、运行、团队、自我优化，统一暴露为 mcp__qiansi__*。包内自带画布服务，装完即可用。"
       },
       "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjI4IiBmaWxsPSIjMGUxMzE4Ii8+PHBhdGggZD0iTTMyIDY0YzE2LTI2IDQ4LTI2IDY0IDAtMTYgMjYtNDggMjYtNjQgMFoiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzM4ZDljMiIgc3Ryb2tlLXdpZHRoPSI3IiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PGNpcmNsZSBjeD0iNjQiIGN5PSI2NCIgcj0iOSIgZmlsbD0iIzM4ZDljMiIvPjxwYXRoIGQ9Ik02NCAzMnYxME02NCA4NnYxMCIgc3Ryb2tlPSIjMzhkOWMyIiBzdHJva2Utd2lkdGg9IjciIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg==",
       "author": "Qiansi",
@@ -47,6 +47,16 @@
         ]
       },
       "versions": [
+        {
+          "version": "0.3.0",
+          "publishTimestamp": 1794839422,
+          "source": {
+            "type": "npm"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.1 <0.3.0"
+          }
+        },
         {
           "version": "0.2.0",
           "publishTimestamp": 1794837822,

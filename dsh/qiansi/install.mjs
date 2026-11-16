@@ -55,6 +55,21 @@ if (!existsSync(join(here, 'cordis.patch.yml'))) {
   process.exit(1);
 }
 
+// 内置服务：发布包里必须有；仓库 checkout 里没有就先打一次（需要根目录的 esbuild）。
+const serverBundle = join(here, 'server', 'server.cjs');
+if (!existsSync(serverBundle)) {
+  const buildScript = join(here, 'build-server.mjs');
+  if (existsSync(join(repo, 'node_modules', 'esbuild'))) {
+    console.log('内置服务还没有打包，先执行 build-server.mjs…');
+    const build = spawnSync(process.execPath, [buildScript], { stdio: 'inherit' });
+    if (build.status !== 0) {
+      console.error('内置服务打包失败；插件将只能复用已在运行的牵丝。');
+    }
+  } else {
+    console.warn('提示：缺少 server/server.cjs 且仓库里没有 esbuild，插件只能复用已在运行的牵丝。');
+  }
+}
+
 const profile = flag('profile');
 const templateName = flag('template');
 
@@ -204,10 +219,10 @@ if (args.includes('--desktop')) {
   writeFileSync(patchFile, `${trimmed}${trimmed.trim() ? '\n\n' : '\n'}${block}`, 'utf8');
   console.log(`已写入 ${patchFile}\n备份：${backup}`);
   console.log('重启 DeepSeek Harness 后，会话里会出现 mcp__qiansi__* 工具。');
-  console.log('（牵丝服务要先跑起来；没起时插件不会注册任何工具。）');
+  console.log('（插件自带画布服务：本机没有牵丝在跑时，它会自己拉起一个。）');
   process.exit(0);
 }
 
 console.log(`\nnext:
-  dsh --profile ${profile ?? '<name>'}            # boot; mcp__qiansi__* appear once the canvas service is up
+  dsh --profile ${profile ?? '<name>'}            # boot; the bundled canvas server starts on demand
   QIANSI_DSH_DEBUG=1 dsh --profile ${profile ?? '<name>'}   # same, with our status line on stderr`);

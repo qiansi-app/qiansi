@@ -35,12 +35,19 @@ import { randomUUID } from 'node:crypto';
 /**
  * The packaged desktop app picks a free port on every launch and publishes it to
  * ~/.qiansi/server-port. Resolve the URL per request so a restart on a different
- * port never leaves the agent pointing at a dead one.
+ * port never leaves the agent pointing at a dead one. `QIANSI_HOME` pins an
+ * isolated instance (tests, a second profile) and then nothing else is consulted.
  */
+function stateDirs() {
+  const explicit = process.env.QIANSI_HOME?.trim();
+  if (explicit) return [explicit];
+  return [join(homedir(), '.qiansi'), join(homedir(), '.agentweave')];
+}
+
 function readPort() {
-  for (const dir of ['.qiansi', '.agentweave']) {
+  for (const dir of stateDirs()) {
     try {
-      const value = Number(readFileSync(join(homedir(), dir, 'server-port'), 'utf8').trim());
+      const value = Number(readFileSync(join(dir, 'server-port'), 'utf8').trim());
       if (Number.isInteger(value) && value > 0 && value < 65536) return value;
     } catch {
       // try the next location
@@ -59,9 +66,9 @@ const agent = process.env.QIANSI_AGENT ?? process.env.AGENTWEAVE_AGENT ?? 'claud
 function readToken() {
   if (process.env.QIANSI_TOKEN) return process.env.QIANSI_TOKEN;
   if (process.env.AGENTWEAVE_TOKEN) return process.env.AGENTWEAVE_TOKEN;
-  for (const dir of ['.qiansi', '.agentweave']) {
+  for (const dir of stateDirs()) {
     try {
-      return readFileSync(join(homedir(), dir, 'server-token'), 'utf8').trim();
+      return readFileSync(join(dir, 'server-token'), 'utf8').trim();
     } catch {
       // try the next location
     }

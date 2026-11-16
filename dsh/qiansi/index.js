@@ -3,17 +3,15 @@
  *
  * The tools themselves come from @deepseek-ai/dsh-mcp-client, which speaks MCP
  * to the Qiansi server and registers every tool as mcp__qiansi__<name>. This
- * plugin only reports whether the canvas service is reachable, because the most
- * common failure is simply "the app is not running yet" — and a one-line hint in
- * the log is worth more than a stack trace from the MCP child process.
+ * plugin makes that server exist: if a Qiansi instance already answers (desktop
+ * app, VS Code panel, `npm run server:start`), it is reused untouched; otherwise
+ * the single-file server bundled inside this package is started here, so a plain
+ * `dsh plugin add qiansi-dsh` is enough to make the tools work.
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-function stateDir() {
-  return process.env.QIANSI_HOME ?? join(homedir(), '.qiansi');
-}
+import { ensureServer, healthy, logPath, serverBundlePath, stateDir } from './server-bridge.mjs';
 
 function readPort() {
   try {
@@ -23,31 +21,6 @@ function readPort() {
     // no port file: the app has never run on this machine
   }
   return Number(process.env.QIANSI_PORT ?? 8787);
-}
-
-async function probe(port, timeoutMs) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
-      signal: controller.signal,
-    });
-    return response.ok;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * DSH 启动时事件循环被插件加载挤满，1.5 秒的探测会误判成「服务没起」。
- * 给一次更宽的重试，仍然失败才下结论。
- */
-async function healthy(port) {
-  if (await probe(port, 4000)) return true;
-  await new Promise((resolve) => setTimeout(resolve, 800));
-  return probe(port, 6000);
 }
 
 export const name = 'qiansi-dsh';
@@ -68,26 +41,66 @@ function report(ctx, level, message) {
 }
 
 export async function apply(ctx, config = {}) {
-  const port = readPort();
-  const up = await healthy(port);
-  if (up) {
+  const namespace = config.serverName ?? 'qiansi';
+  const tools = `mcp__${namespace}__*`;
+
+  // autoStart: false 退回旧行为——只探测，不起服务。
+  const result =
+    config.autoStart === false
+      ? existingOnly(config)
+      : await ensureServer({
+          port: config.port === undefined ? undefined : Number(config.port),
+          timeoutMs: config.startTimeoutMs ?? 30_000,
+          // 默认沿用 8787 兜底端口；隔离测试传 [] 就不会连到本机别的实例。
+          fallbackPorts: Array.isArray(config.fallbackPorts)
+            ? config.fallbackPorts
+            : fallbackPortsFromEnv(),
+        });
+
+  if (result.ok) {
     report(
       ctx,
       'info',
-      `[qiansi] canvas reachable at http://127.0.0.1:${port} — tools are mcp__${config.serverName ?? 'qiansi'}__*`
+      result.started
+        ? `[qiansi] canvas started at http://127.0.0.1:${result.port} (bundled server, pid ${result.pid}) — tools are ${tools}`
+        : `[qiansi] canvas reachable at http://127.0.0.1:${result.port} — tools are ${tools}`
     );
   } else {
     report(
       ctx,
       'warn',
-      `[qiansi] 画布服务没有应答 http://127.0.0.1:${port}。` +
-        '先启动牵丝（桌面版 / VS Code 画布面板 / npm run server:start），再重启 DSH；' +
-        '服务没起时 mcp__qiansi__* 工具不会注册。'
+      `[qiansi] 画布服务没有就绪：${result.reason ?? '未知原因'}。` +
+        `内置服务：${serverBundlePath()}；日志：${logPath()}；` +
+        `也可以手动启动牵丝（桌面版 / VS Code 画布面板 / npm run server:start）后重启 DSH。`
     );
   }
   // The plugin holds no resources of its own; the MCP child is owned by
-  // @deepseek-ai/dsh-mcp-client's own entry in cordis.patch.yml.
+  // @deepseek-ai/dsh-mcp-client's own entry in cordis.patch.yml, and the server
+  // we started is deliberately left running for the desktop app to reuse.
   return () => undefined;
+}
+
+/**
+ * QIANSI_DSH_PORT_FALLBACK 用来关掉 8787 兜底：设成空串就只在
+ * QIANSI_PORT / 端口文件上找服务，不会挂到本机另一个实例上。
+ */
+function fallbackPortsFromEnv() {
+  const raw = process.env.QIANSI_DSH_PORT_FALLBACK;
+  if (raw === undefined) return undefined;
+  return raw
+    .split(',')
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isInteger(value) && value > 0 && value < 65536);
+}
+
+async function existingOnly(config) {  const port = config.port === undefined ? readPort() : Number(config.port);
+  if (await healthy(port)) return { ok: true, port, started: false };
+  return {
+    ok: false,
+    port,
+    started: false,
+    reason: `自动启动已关闭（autoStart: false），http://127.0.0.1:${port} 没有应答`,
+  };
 }
 
 export function describe() {
@@ -95,5 +108,11 @@ export function describe() {
     stateDir: stateDir(),
     port: readPort(),
     portFile: existsSync(join(stateDir(), 'server-port')),
+    serverBundle: serverBundlePath(),
+    serverBundlePresent: existsSync(serverBundlePath()),
+    logPath: logPath(),
   };
 }
+
+/** 便于测试与 CLI 复用。 */
+export { ensureServer } from './server-bridge.mjs';

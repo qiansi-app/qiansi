@@ -1,8 +1,8 @@
 {
   "name": "qiansi-dsh",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
-  "description": "牵丝 Qiansi as a DeepSeek Harness bundle: connects the canvas MCP server and exposes its tools as mcp__qiansi__*",
+  "description": "牵丝 Qiansi as a DeepSeek Harness bundle: ships the canvas server and exposes its tools as mcp__qiansi__*",
   "main": "index.js",
   "bin": {
     "qiansi-dsh": "bin/cli.mjs"
@@ -10,12 +10,15 @@
   "exports": {
     ".": "./index.js",
     "./mcp/server.mjs": "./mcp/server.mjs",
+    "./server-bridge.mjs": "./server-bridge.mjs",
     "./package.json": "./package.json"
   },
   "files": [
     "index.js",
+    "server-bridge.mjs",
     "bin/cli.mjs",
     "mcp/server.mjs",
+    "server/server.cjs",
     "cordis.patch.yml",
     "install.mjs",
     "README.md",
@@ -45,8 +48,11 @@
     }
   },
   "scripts": {
+    "build:server": "node build-server.mjs",
+    "prepack": "node build-server.mjs",
     "install-bundle": "node install.mjs",
-    "pack:check": "node pack-check.mjs"
+    "pack:check": "node pack-check.mjs",
+    "bridge:check": "node bridge-check.mjs"
   },
   "dependencies": {
     "@deepseek-ai/dsh-mcp-client": "0.2.2-rc.1"

@@ -275,6 +275,7 @@ MCP 的 `call_model` 已自动带上 session/agent/purpose；调用时传 `purpo
 `dsh/qiansi` 是一个可发布的 DSH 组合包（`qiansi-dsh`），把同一个 MCP server 注册进 DSH，工具名形如 `mcp__qiansi__*`。
 
 - **安装**：`dsh plugin --profile <name> add qiansi-dsh`（npm/市场）、tarball，或仓库内 `node dsh/qiansi/install.mjs --profile <name> --template headless`。三种形态实测都能启动并输出 `[qiansi-mcp] ready`。
+- **自带服务（0.3.0 起）**：包内 `server/server.cjs` 是 `apps/server` 的 esbuild 单文件（672 kB，无原生模块）。插件 `apply()` 按「显式 port → `QIANSI_PORT` → `~/.qiansi/server-port` → 8787」探测，全无应答才 detached 拉起并等就绪（日志 `~/.qiansi/logs/server.log`），已有实例一律复用。`qiansi-dsh server start|stop` 手动管理；`QIANSI_HOME` 把服务端、MCP 客户端、端口/令牌解析一起隔离到指定目录。
 - **补丁**：静态 `cordis.patch.yml` 用 `!!js process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('qiansi-dsh/mcp/server.mjs')` 在启动时解析打包内的 server，不再依赖安装器写绝对路径；`baseUrl` 由 loader 注入（profile 目录的 file URL）。`!!js` 里没有 `require`/`import.meta`，Node 需 ≥22.3。
 - **兼容**：`engines.dsh: ">=0.2.2-rc.1 <0.3.0"`；桥接包是普通依赖，随包安装。
 - **工具**：43 个，新增运行诊断/重跑/停止、运行列表与实时进度、团队读写、自省历史/报告/落地核验、交付物落盘、用户视角验收。

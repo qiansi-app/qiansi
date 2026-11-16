@@ -2,9 +2,11 @@
 /**
  * qiansi-dsh CLI。
  *
- *   qiansi-dsh mcp       启动 MCP server（DSH 的 patch 用它作为 stdio 子进程）
- *   qiansi-dsh install   生成带绝对路径的 patch 并装进 DSH profile（转发 install.mjs）
- *   qiansi-dsh status    探测本机牵丝服务是否可达，打印端口与工具命名空间
+ *   qiansi-dsh mcp            启动 MCP server（DSH 的 patch 用它作为 stdio 子进程）
+ *   qiansi-dsh install        把组合包装进 DSH profile（转发 install.mjs）
+ *   qiansi-dsh status         探测本机牵丝服务是否可达，打印端口与工具命名空间
+ *   qiansi-dsh server start   现在就把内置的牵丝服务拉起来（插件启动时也会自动做）
+ *   qiansi-dsh server stop    停止本机服务
  *
  * 发布到 npm 后，DSH 组合包的 patch 可以写 `npx -y qiansi-dsh@<version> mcp`
  * 而不再依赖安装时生成的绝对路径。
@@ -14,6 +16,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { ensureServer, logPath, readPortFile, stopServer } from '../server-bridge.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const command = process.argv[2] ?? '';
@@ -47,11 +51,39 @@ async function status() {
     console.error(`qiansi-dsh: canvas answered HTTP ${response.status} at ${url}`);
     return 1;
   } catch {
-    console.error(
-      `qiansi-dsh: canvas not reachable at ${url} — start Qiansi (desktop app, VS Code panel, or \`npm run server:start\`) first`
-    );
+    console.error(`qiansi-dsh: canvas not reachable at ${url} — run \`qiansi-dsh server start\`, or let the DSH plugin start it automatically`)
     return 1;
   }
+}
+
+async function serverCommand(sub) {
+  if (sub === 'start') {
+    const result = await ensureServer({});
+    if (!result.ok) {
+      console.error(`qiansi-dsh: ${result.reason ?? 'could not start the bundled server'}`);
+      console.error(`log: ${logPath()}`);
+      return 1;
+    }
+    console.log(
+      result.started
+        ? `started bundled qiansi server at http://127.0.0.1:${result.port} (pid ${result.pid})`
+        : `qiansi already running at http://127.0.0.1:${result.port}`
+    );
+    console.log(`log: ${logPath()}`);
+    return 0;
+  }
+  if (sub === 'stop') {
+    const result = await stopServer(readPortFile() ?? undefined);
+    if (!result.ok) {
+      console.error(`qiansi-dsh: stop failed at port ${result.port} (${result.reason ?? `HTTP ${result.status}`})`);
+      return 1;
+    }
+    console.log(`stopped qiansi server on port ${result.port}`);
+    return 0;
+  }
+  if (sub === 'status' || sub === undefined) return status();
+  console.error('usage: qiansi-dsh server <start|stop|status>');
+  return 2;
 }
 
 function version() {
@@ -89,10 +121,14 @@ async function main() {
     return new Promise(() => {}); // install() 退出时自行 process.exit
   }
   if (command === 'status') return status();
-  console.error('usage: qiansi-dsh <mcp|install|status>');
-  console.error('  mcp       start the MCP server over stdio (used by the DSH bundle patch)');
-  console.error('  install   generate cordis.patch.yml and install into a DSH profile');
-  console.error('  status    probe the local Qiansi server');
+  if (command === 'server') return serverCommand(rest[0]);
+  console.error('usage: qiansi-dsh <mcp|install|status|server>');
+  console.error('  mcp              start the MCP server over stdio (used by the DSH bundle patch)');
+  console.error('  install          install this bundle into a DSH profile');
+  console.error('  status           probe the local Qiansi server');
+  console.error('  server start     start the Qiansi server bundled in this package (the plugin also does this)');
+  console.error('  server stop      stop the local Qiansi server');
+  console.error('  server status    alias of `status`');
   return 2;
 }
 

@@ -31,8 +31,10 @@ check('仓库地址带目录', Boolean(pkg.repository?.url && pkg.repository?.di
 
 const required = [
   'index.js',
+  'server-bridge.mjs',
   'bin/cli.mjs',
   'mcp/server.mjs',
+  'server/server.cjs',
   'cordis.patch.yml',
   'install.mjs',
   'README.md',
@@ -43,6 +45,19 @@ for (const file of required) {
   check(`文件存在 ${file}`, existsSync(path) && statSync(path).size > 0);
 }
 check('files 列表覆盖运行必需文件', (pkg.files ?? []).includes('mcp/server.mjs'));
+check('files 列表带上内置服务', (pkg.files ?? []).includes('server/server.cjs'));
+check('files 列表带上 server-bridge', (pkg.files ?? []).includes('server-bridge.mjs'));
+
+// 内置服务：必须是打包好的单文件，且真的能独立跑
+const serverBundle = join(here, 'server', 'server.cjs');
+if (existsSync(serverBundle)) {
+  const size = statSync(serverBundle).size;
+  const text = readFileSync(serverBundle, 'utf8');
+  check('内置服务体积合理（>200KB，说明依赖已内联）', size > 200 * 1024, `${size} bytes`);
+  check('内置服务是 CJS 单文件', text.includes('module.exports') || text.includes('__commonJS'));
+  check('内置服务不含外部 require 的仓库模块', !text.includes("require('@qiansi/"));
+}
+check('index.js 会自动拉起内置服务', readFileSync(join(here, 'index.js'), 'utf8').includes('ensureServer'));
 
 const patch = existsSync(join(here, 'cordis.patch.yml'))
   ? readFileSync(join(here, 'cordis.patch.yml'), 'utf8')
