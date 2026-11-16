@@ -31,7 +31,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/qiansi-app/qiansi.git",
+    "url": "git+https://github.com/qiansi-app/qiansi.git",
     "directory": "dsh/qiansi"
   },
   "homepage": "https://github.com/qiansi-app/qiansi/tree/main/dsh/qiansi",
