@@ -5066,9 +5066,11 @@ app.post('/api/commands', async (context) => {
     const toolboxFor = nodeToolbox
       ? (task: { autonomy?: 'investigate' | 'draft' | 'auto' | 'full'; toolAllow?: string[]; research?: boolean }) => {
           const restricted = restrictToolbox(nodeToolbox, task.autonomy ?? 'auto', task.toolAllow);
-          // 研究型任务给足工具轮次：检索 → read_url → 追问是正常的 3-4 轮，
-          // 6 轮上限会把「再查一次」卡死；读/写类任务保持原预算。
-          return task.research && restricted ? { ...restricted, maxRounds: 10 } : restricted;
+          // 研究型任务给足工具轮次与调用次数：检索 → read_url → 追问是正常的
+          // 3-4 轮；6 轮 / 24 次会把「再查一次」卡死。读/写类任务保持原预算。
+          return task.research && restricted
+            ? { ...restricted, maxRounds: 10, maxCalls: 36, maxToolChars: 600_000 }
+            : restricted;
         }
       : undefined;
 

@@ -18,6 +18,7 @@ import type {
   TaskStatus,
   ToolboxOptions,
   ToolEvidence,
+  ToolLoopState,
   UsageSnapshot,
 } from './types.js';
 
@@ -91,6 +92,8 @@ export class Orchestrator {
     string,
     Array<{ name: string; ok: boolean; args?: string; content?: string }>
   >();
+  /** 工具循环预算：按任务跨「验收重试」共享，否则每次重试都会重新烧一遍。 */
+  private readonly toolStates = new Map<string, ToolLoopState>();
 
   constructor(private readonly options: OrchestratorOptions) {}
 
@@ -375,9 +378,13 @@ export class Orchestrator {
     const toolbox = this.options.toolboxFor
       ? this.options.toolboxFor(task)
       : this.options.toolbox;
+    const toolState =
+      this.toolStates.get(task.id) ?? { executed: 0, written: new Set<string>(), chars: 0 };
+    this.toolStates.set(task.id, toolState);
     const adapter = toolbox
       ? new ServerToolAdapter(baseAdapter, {
           ...toolbox,
+          state: toolState,
           onCall: (info) => {
             const list = this.toolEvidence.get(task.id) ?? [];
             // 留下 args 与结果片段：验收要核对「引用的 URL 是否真的检索/读取过」。

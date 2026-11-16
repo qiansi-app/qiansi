@@ -92,11 +92,30 @@ export interface ToolEvidence {
  * queries, web search. The model only chooses a tool and its arguments; the
  * server validates paths/commands and executes it.
  */
+/** 任务级工具循环状态：跨「验收重试」共享，防止每次重试重新烧一遍预算。 */
+export interface ToolLoopState {
+  /** 已执行的工具调用次数（重复被跳过的不计）。 */
+  executed: number;
+  /** 成功写过的「规范化路径 + 内容」指纹：完全相同再写会被跳过。 */
+  written: Set<string>;
+  /** 累计工具参数 + 结果字符数：大文件反复重写会把上下文撑爆。 */
+  chars: number;
+}
+
 export interface ToolboxOptions {
   tools: ToolSpec[];
   execute: ToolExecutor;
   /** Maximum tool rounds per task (each round is one extra model call). */
   maxRounds?: number;
+  /**
+   * 单个任务最多执行多少次工具调用（跳过的不计）。默认 24。
+   * 这是「写成功即收手」护栏的一部分：模型会反复写同一个文件直到预算烧穿。
+   */
+  maxCalls?: number;
+  /** 累计工具参数+结果字符上限，默认 400k；研究任务可放宽。 */
+  maxToolChars?: number;
+  /** 任务级状态：由编排器创建并在同一任务的多次尝试之间共享。 */
+  state?: ToolLoopState;
   /** Called after each tool execution (logging / live UI). */
   onCall?: (info: {
     id: string;
