@@ -24,7 +24,8 @@
     "vscode:ext": "npm run build && node apps/vscode/qiansi-canvas/scripts/build.mjs",
     "status": "tsx packages/cli/src/index.ts status",
     "server:start": "tsx packages/cli/src/index.ts start",
-    "server:stop": "tsx packages/cli/src/index.ts stop"
+    "server:stop": "tsx packages/cli/src/index.ts stop",
+    "handoff:pack": "node scripts/pack-handoff.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
