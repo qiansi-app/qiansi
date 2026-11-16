@@ -163,8 +163,41 @@ function toolEvidenceLine(evidence?: ToolEvidence): string {
   return `本次任务实际调用的工具：${parts.join('、')}。`;
 }
 
-export function createRoutedJudge(options: RoutedJudgeOptions) {
-  const minConfidence = options.routerMinConfidence ?? 0.7;
+const URL_IN_TEXT = /https?:\/\/[^\s)\]}>"'，。；、]+/g;
+
+/** 归一化引用 URL：比 host+path，忽略 www、跟踪参数与末尾标点。 */
+function normalizeCitedUrl(raw: string): string {
+  try {
+    const url = new URL(raw.replace(/[.,;:!?]+$/, ''));
+    return `${url.hostname.replace(/^www\./, '')}${url.pathname}`.replace(/\/$/, '');
+  } catch {
+    return raw.replace(/[.,;:!?]+$/, '');
+  }
+}
+
+/**
+ * 引用忠实度（ALCE / promptfoo context-faithfulness 的轻量版）：
+ * 只要本次任务真的检索/读取过网页，产出里引用的 URL 必须出现在工具证据里。
+ * 这一条是确定性的——不靠评委，编造的来源直接判失败。
+ */
+function citationAudit(
+  output: string,
+  evidence?: ToolEvidence
+): { cited: number; unverifiable: string[] } | null {
+  const tools = (evidence?.tools ?? []).filter((tool) => tool.ok);
+  const searched = tools.some((tool) => tool.name === 'web_search' || tool.name === 'read_url');
+  if (!searched) return null;
+  const pool = new Set<string>();
+  for (const tool of tools) {
+    for (const text of [tool.args ?? '', tool.content ?? '']) {
+      for (const match of text.match(URL_IN_TEXT) ?? []) pool.add(normalizeCitedUrl(match));
+    }
+  }
+  const cited = [...new Set((output.match(URL_IN_TEXT) ?? []).map(normalizeCitedUrl))];
+  return { cited: cited.length, unverifiable: cited.filter((url) => !pool.has(url)) };
+}
+
+export function createRoutedJudge(options: RoutedJudgeOptions) {  const minConfidence = options.routerMinConfidence ?? 0.7;
   const routerTimeoutMs = options.routerTimeoutMs ?? 12000;
   const fullTimeoutMs = options.fullTimeoutMs ?? 25000;
   const teamLine = options.teamContext ? `\n团队身份：\n${options.teamContext}` : '';
@@ -177,6 +210,20 @@ export function createRoutedJudge(options: RoutedJudgeOptions) {
     const early = structuralCheck(output, evidence);
     if (early) return early;
     const evidenceLine = toolEvidenceLine(evidence);
+    // 引用核查：检索过的任务，编造的来源直接判失败（确定性检查，先于评委）。
+    const citation = citationAudit(output, evidence);
+    if (citation && citation.unverifiable.length > 0) {
+      return {
+        pass: false,
+        score: 0.2,
+        reasons: [
+          `引用了未在检索证据中的来源：${citation.unverifiable.slice(0, 3).join('、')}`,
+        ],
+        suggestedFix:
+          '只引用 web_search/read_url 实际返回过的 URL；查不到的部分写明「未能核实」，不要补一个看起来合理的来源。',
+        gate: 'structural',
+      };
+    }
 
     if (options.router && routerFailures < 2) {
       const excerpt = output.length > 4000 ? `${output.slice(0, 4000)}\n……（已截断）` : output;
@@ -237,8 +284,9 @@ export function createRoutedJudge(options: RoutedJudgeOptions) {
         excerpt,
         '',
         '验收标准里要求调用某工具或读写文件时，以工具证据为准；不要因为产出文本没有提到工具就判失败。',
+        '若产出包含事实性主张（数字、日期、结论、引述），逐条检查能否在产出或工具证据中找到支撑；找不到支撑的主张放进 unsupported 数组，没有就返回空数组。',
         '请严格验收。只返回一个 JSON 对象，不要 Markdown、不要代码围栏、不要解释：',
-        '{"pass":true|false,"score":0到1,"reasons":["..."],"suggested_fix":"..."}',
+        '{"pass":true|false,"score":0到1,"reasons":["..."],"suggested_fix":"...","unsupported":["找不到支撑的主张"]}',
       ]
         .filter(Boolean)
         .join('\n'),
@@ -302,6 +350,20 @@ export function createRoutedJudge(options: RoutedJudgeOptions) {
       const repairedVerdict =
         repaired.aborted || repaired.failed ? null : extractJson(repaired.text);
       if (repairedVerdict) {
+        const repairedUnsupported = Array.isArray(repairedVerdict.unsupported)
+          ? repairedVerdict.unsupported.map(String).filter(Boolean)
+          : [];
+        if (citation && repairedUnsupported.length > 0) {
+          return {
+            pass: false,
+            score: Math.min(Number(repairedVerdict.score ?? 0.4), 0.4),
+            reasons: [
+              `${repairedUnsupported.length} 处主张在检索材料中找不到支撑：${repairedUnsupported.slice(0, 2).join('；')}`,
+            ],
+            suggestedFix: '补充能支撑这些主张的来源，或删掉/标注为未能核实。',
+            gate: 'full',
+          };
+        }
         return {
           pass: Boolean(repairedVerdict.pass),
           score: Number(repairedVerdict.score ?? 0),
@@ -320,6 +382,22 @@ export function createRoutedJudge(options: RoutedJudgeOptions) {
         score: 0.6,
         needsHuman: true,
         reasons: ['评委返回无法解析，重问一次仍未通过，已标记为需人工确认'],
+        gate: 'full',
+      };
+    }
+
+    // 引用过网页的任务：评委指认的「无支撑主张」直接判失败（promptfoo / ALCE 做法）。
+    const unsupportedClaims = Array.isArray(verdict.unsupported)
+      ? verdict.unsupported.map(String).filter(Boolean)
+      : [];
+    if (citation && unsupportedClaims.length > 0) {
+      return {
+        pass: false,
+        score: Math.min(Number(verdict.score ?? 0.4), 0.4),
+        reasons: [
+          `${unsupportedClaims.length} 处主张在检索材料中找不到支撑：${unsupportedClaims.slice(0, 2).join('；')}`,
+        ],
+        suggestedFix: '补充能支撑这些主张的来源，或删掉/标注为未能核实。',
         gate: 'full',
       };
     }

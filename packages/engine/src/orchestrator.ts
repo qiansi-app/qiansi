@@ -87,7 +87,10 @@ export class Orchestrator {
   private readonly tokenEvents: Array<{ ts: number; tokens: number }> = [];
   private budgetExceeded = false;
   /** 每个任务当前尝试实际调用过的工具，验收时作为证据。 */
-  private readonly toolEvidence = new Map<string, Array<{ name: string; ok: boolean }>>();
+  private readonly toolEvidence = new Map<
+    string,
+    Array<{ name: string; ok: boolean; args?: string; content?: string }>
+  >();
 
   constructor(private readonly options: OrchestratorOptions) {}
 
@@ -377,7 +380,13 @@ export class Orchestrator {
           ...toolbox,
           onCall: (info) => {
             const list = this.toolEvidence.get(task.id) ?? [];
-            list.push({ name: info.name, ok: info.ok });
+            // 留下 args 与结果片段：验收要核对「引用的 URL 是否真的检索/读取过」。
+            list.push({
+              name: info.name,
+              ok: info.ok,
+              args: info.arguments.slice(0, 500),
+              content: info.content.slice(0, 3000),
+            });
             this.toolEvidence.set(task.id, list);
             this.emit({
               type: 'tool.called',

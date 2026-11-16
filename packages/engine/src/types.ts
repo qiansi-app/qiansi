@@ -84,7 +84,7 @@ export type ToolExecutor = (call: ToolCall) => Promise<ToolExecution>;
 
 /** 一次任务尝试里实际发生过的工具调用，交给验收评委当证据。 */
 export interface ToolEvidence {
-  tools: Array<{ name: string; ok: boolean }>;
+  tools: Array<{ name: string; ok: boolean; args?: string; content?: string }>;
 }
 
 /**
@@ -254,10 +254,15 @@ export interface Subtask {
   acceptanceCriteria: string;
   /** 对话风格：决定这个任务怎么组织输出、怎么把上游交给下游。 */
   style?: import("./styles.js").ConversationStyle;
-  /** 团队自治档位：调查/草稿只能用只读工具，执行/全权才允许改动。 */
+  /** 团队成员自治档位：调查/草稿只能用只读工具，执行/全权才允许改动。 */
   autonomy?: TaskAutonomy;
   /** 团队成员被允许的工具白名单；缺省表示沿用档位限制。 */
   toolAllow?: string[];
+  /** 负责这个任务的名册成员（回写长期记忆、报告里标注）。 */
+  memberId?: string;
+  memberName?: string;
+  /** 研究型任务：检索/阅读要多给几轮工具预算。 */
+  research?: boolean;
   machineCheckable: boolean;
   dependsOn: string[];
   status: TaskStatus;

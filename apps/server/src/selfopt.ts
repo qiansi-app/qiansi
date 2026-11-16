@@ -600,6 +600,60 @@ class BudgetExceeded extends Error {
   }
 }
 
+export function buildRepoMap(
+  files: Array<{ path: string }>,
+  rootDir: string,
+  budget = 9_000
+): string {
+    const exportRe =
+      /^\s*export\s+(?:default\s+)?(?:async\s+)?(?:function|class|interface|type|const|let|enum)\s+([A-Za-z_$][\w$]*)/gm;
+    const symbols = new Map<string, string[]>();
+    const corpus: string[] = [];
+    for (const file of files.slice(0, 220)) {
+      if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(file.path)) continue;
+      try {
+        const text = readFileSync(join(rootDir, file.path.split('/').join(sep)), 'utf8');
+        corpus.push(text);
+        const names: string[] = [];
+        for (const match of text.matchAll(exportRe)) names.push(match[1]!);
+        if (names.length > 0) symbols.set(file.path, names);
+      } catch {
+        // 读不到的文件不进地图
+      }
+    }
+    if (symbols.size === 0) return '';
+    const blob = corpus.join('\n');
+    const counts = new Map<string, number>();
+    for (const names of symbols.values()) {
+      for (const name of names) {
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const hits = blob.match(new RegExp(`\\b${escaped}\\b`, 'g'))?.length ?? 0;
+        counts.set(name, Math.max(0, hits - 1));
+      }
+    }
+    const entries = [...symbols.entries()]
+      .map(([file, names]) => {
+        const ranked = [...names]
+          .sort((a, b) => (counts.get(b) ?? 0) - (counts.get(a) ?? 0))
+          .slice(0, 10);
+        const weight = names.reduce((sum, name) => sum + (counts.get(name) ?? 0), 0);
+        return { file, ranked, weight };
+      })
+      .sort((a, b) => b.weight - a.weight);
+    const lines: string[] = [];
+    let used = 0;
+    for (const entry of entries) {
+      const line = `${entry.file}: ${entry.ranked
+        .map((name) => `${name}(${counts.get(name) ?? 0})`)
+        .join(', ')}`;
+      if (used + line.length > budget) break;
+      lines.push(line);
+      used += line.length + 1;
+    }
+    return lines.join('\n');
+  }
+
+
 export class SelfOptEngine {
   private session: SelfOptSession | null = null;
   private stopped = false;
@@ -1351,6 +1405,15 @@ export class SelfOptEngine {
 
   // -- 复盘 ----------------------------------------------------------------
 
+  /**
+   * 符号级 repo map（借鉴 aider 的 repomap）：每个文件列出导出符号与被引用次数，
+   * 按权重排序后塞进 token 预算。比「按文件大小取前 8KB」更能让复盘模型
+   * 看到系统骨架——哪些函数被到处引用、哪些模块是孤岛。
+   */
+  private buildRepoMap(survey: SurveyReport, rootDir: string, budget = 9_000): string {
+    return buildRepoMap(survey.files, rootDir, budget);
+  }
+
   private buildDigest(survey: SurveyReport, rootDir: string): string {
     const structure = survey.files
       .slice(0, 160)
@@ -1387,6 +1450,7 @@ export class SelfOptEngine {
       `## 最近改动（diff）\n${survey.recentDiff || '（无）'}`,
       `## 热点文件\n${survey.recentFiles.slice(0, 12).join('\n')}`,
       `## TODO\n${todos || '（无）'}`,
+      `## 符号地图（按被引用次数，名字(n)）\n${this.buildRepoMap(survey, rootDir) || '（无导出符号）'}`,
       `## 结构\n${structure}`,
       hot ? `## 热点文件开头\n${hot}` : '',
     ]

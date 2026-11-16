@@ -1,0 +1,387 @@
+<title>牵丝商业化计划</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600;700&display=swap">
+<style>
+  :root {
+    --bg: #f6f8f9;
+    --surface: #ffffff;
+    --ink: #15232d;
+    --muted: #5a6b78;
+    --line: #d8e0e6;
+    --accent: #0f766e;
+    --accent-soft: #e0f2f0;
+    --warn: #b45309;
+    --warn-soft: #fdf1e0;
+    --code-bg: #eef3f5;
+    --shadow: 0 1px 2px rgba(21, 35, 45, 0.05), 0 8px 24px rgba(21, 35, 45, 0.06);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0c1419;
+      --surface: #121d24;
+      --ink: #dce6f2;
+      --muted: #93a6b4;
+      --line: #22323d;
+      --accent: #38d9c2;
+      --accent-soft: #10302d;
+      --warn: #f2b36b;
+      --warn-soft: #2a2114;
+      --code-bg: #101b22;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.35);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0c1419;
+    --surface: #121d24;
+    --ink: #dce6f2;
+    --muted: #93a6b4;
+    --line: #22323d;
+    --accent: #38d9c2;
+    --accent-soft: #10302d;
+    --warn: #f2b36b;
+    --warn-soft: #2a2114;
+    --code-bg: #101b22;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.35);
+    color-scheme: dark;
+  }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+    line-height: 1.75;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 0 64px;
+    font-size: 16px;
+  }
+
+  .page { max-width: 780px; margin: 0 auto; }
+
+  header.masthead {
+    padding-block: 56px 32px;
+    border-bottom: 2px solid var(--ink);
+    margin-bottom: 40px;
+  }
+  .kicker {
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 700;
+    margin-bottom: 14px;
+  }
+  h1 {
+    font-family: "Noto Serif SC", "Songti SC", serif;
+    font-size: clamp(30px, 5vw, 46px);
+    line-height: 1.25;
+    margin: 0 0 14px;
+    text-wrap: balance;
+    letter-spacing: 0.01em;
+  }
+  .lede { font-size: 17px; color: var(--muted); max-width: 62ch; margin: 0; }
+  .meta { margin-top: 18px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  h2 {
+    font-family: "Noto Serif SC", "Songti SC", serif;
+    font-size: 26px;
+    line-height: 1.35;
+    margin: 56px 0 16px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    text-wrap: balance;
+  }
+  h3 { font-size: 17px; margin: 26px 0 10px; }
+  p { margin: 0 0 14px; }
+  ul, ol { margin: 0 0 16px; padding-left: 1.35em; }
+  li { margin-bottom: 8px; }
+  strong { font-weight: 700; }
+  .muted { color: var(--muted); }
+  .nowrap { white-space: nowrap; }
+
+  .summary {
+    background: var(--surface);
+    border-left: 4px solid var(--accent);
+    border-radius: 10px;
+    padding: 22px 24px;
+    box-shadow: var(--shadow);
+    margin-bottom: 8px;
+  }
+  .summary p { margin: 0; font-size: 16.5px; }
+
+  .grid2 {
+    display: grid;
+    grid-template-columns: 1.15fr 1fr;
+    gap: 18px;
+  }
+  @media (max-width: 640px) { .grid2 { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .card h3 { margin-top: 0; }
+  .card ul { margin-bottom: 0; }
+  .card li:last-child { margin-bottom: 0; }
+
+  .icp { display: grid; gap: 12px; }
+  .icp .card strong { display: block; margin-bottom: 4px; }
+  .icp .card p { margin: 0; font-size: 15px; color: var(--muted); }
+  .not-sell {
+    margin-top: 14px;
+    background: var(--warn-soft);
+    border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+    color: var(--ink);
+    border-radius: 10px;
+    padding: 14px 18px;
+    font-size: 15px;
+  }
+  .not-sell b { color: var(--warn); }
+
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+  .table-wrap { overflow-x: auto; margin: 0 0 18px; border-radius: 10px; border: 1px solid var(--line); }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: var(--code-bg); font-weight: 700; font-size: 13.5px; letter-spacing: 0.02em; }
+  tr:last-child td { border-bottom: none; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    font-size: 13.5px;
+    line-height: 1.7;
+    margin: 0 0 18px;
+  }
+  code { font-family: "JetBrains Mono", Consolas, monospace; }
+
+  .pill {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 2px 9px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    margin-right: 6px;
+    white-space: nowrap;
+  }
+
+  .timeline { list-style: none; padding: 0; margin: 0 0 18px; }
+  .timeline li {
+    display: grid;
+    grid-template-columns: 92px 1fr;
+    gap: 16px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .timeline li:last-child { border-bottom: none; }
+  .timeline .when { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--accent); }
+  .timeline p { margin: 0; }
+
+  .actions ol { counter-reset: action; list-style: none; padding: 0; }
+  .actions li {
+    counter-increment: action;
+    position: relative;
+    padding-left: 44px;
+    margin-bottom: 16px;
+  }
+  .actions li::before {
+    content: counter(action, decimal-leading-zero);
+    position: absolute; left: 0; top: 2px;
+    font-family: "Noto Serif SC", serif;
+    font-weight: 700;
+    color: var(--accent);
+    font-size: 15px;
+  }
+
+  footer {
+    margin-top: 56px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+</style>
+
+<div class="page">
+  <header class="masthead">
+    <div class="kicker">内部决策稿 · 2026-11-16</div>
+    <h1>牵丝商业化与盈利计划</h1>
+    <p class="lede">把「多个模型一起干一件真活」的过程变成可付费的产品，而不是又一个卖 token 的中转站。</p>
+    <div class="meta">事实基线：仓库现状与本机实测 · 所有市场数字标注「待验证」，不引用未经核实的外部数据</div>
+  </header>
+
+  <div class="summary">
+    <p><strong>摘要：</strong>牵丝是 MIT 开源、本地优先的多 AI 协作画布。商业化的核心不是卖 token、不是云托管，而是把<strong>多模型协作过程本身</strong>作为付费价值：Pro 年度授权承载自动化与规模化，工作流/手册包降低首次成功成本，支持与咨询兜住长尾。单维护者、零现金投入的约束下走「先卖后做」：4 周内用预订页验证付费意愿，没有真实留资就不写付费墙代码，退回开源 + 赞助。</p>
+  </div>
+
+  <h2>现状与约束</h2>
+  <div class="grid2">
+    <div class="card">
+      <h3>产品现状</h3>
+      <ul>
+        <li>Electron 桌面版 + VS Code 画布扩展 + 本地服务（Hono + SSE）；v0.1.0 公开预览。</li>
+        <li>MIT 开源、单用户本地运行、无云服务、无账号体系。</li>
+        <li>核心差异五点：<strong>画布即工作流</strong>（模型是节点，连线带分派/交接/审校/上下文语义）、<strong>团队名册</strong>（一人一职 + 手册广播 + 自治档位 + 工具白名单）、<strong>自省闭环</strong>（体检→对标→复盘→互审→执行→校验→快照）、<strong>用户视角验收</strong>、<strong>会话接管</strong>（外部 agent 的会话自动变成画布并开跑）。</li>
+        <li>另有 MCP server 与 Claude Code 插件，外部 agent 可读写同一张画布。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>约束（决定什么不能做）</h3>
+      <ul>
+        <li><strong>人力</strong>：一人全职 + 兼职支持，没有销售与客服。</li>
+        <li><strong>技术</strong>：不做云后端、不承诺 SLA、不做多人实时协作、不做在线托管版。</li>
+        <li><strong>红线</strong>：本地优先与「数据不出机器」、MIT 承诺、验收闭环与 effort 校准永不砍。</li>
+        <li><strong>预算</strong>：现金接近零，主要成本是时间与自测 token。</li>
+        <li><strong>节奏</strong>：4 周一个验证周期，每周期必须有可对外演示的交付物，否则回退。</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>目标客户</h2>
+  <p class="muted">从已经在用的人开始卖，不从泛人群开始。</p>
+  <div class="icp">
+    <div class="card">
+      <strong>① 个人专业使用者（首选）</strong>
+      <p>独立研究者、内容生产者、独立开发者；已为 2 个以上模型付费，正在用 Claude Code / Codex / Cursor 干活。痛点是多模型结果无法对照、返工理由不可追溯、token 花在哪看不见——这些正是画布与成本观测直接解决的。</p>
+    </div>
+    <div class="card">
+      <strong>② 小团队技术负责人（3–10 人）</strong>
+      <p>需要把「怎么让 AI 干活」固化成可交付、可教学、可导出的图，而不是散落在各人的对话框里。</p>
+    </div>
+    <div class="card">
+      <strong>③ 多模型选型与交叉验证场景</strong>
+      <p>需要留档「每个模型说了什么、谁被驳回」，用于选型决策与对外交付留证。</p>
+    </div>
+  </div>
+  <div class="not-sell"><b>明确不卖：</b>多人实时协作、定时触发与上百个 SaaS 集成、SSO/RBAC 的企业客户。当前形态满足不了，硬卖会拖垮单人支持。各层规模与付费意愿待验证——用访谈与预订页测，不用二手报告。</div>
+
+  <h2>价值主张</h2>
+  <p><strong>把「多个模型一起干一件真活」的过程变成一张能跑、能查、能交付的图。</strong></p>
+  <ul>
+    <li><strong>看得见哪一步塌了</strong>：失败只重跑那个节点，不整轮重来。</li>
+    <li><strong>钱花在哪可解释</strong>：按模型分开的 token 观测，超预算弹选择卡而不是静默烧钱。</li>
+    <li><strong>交接不靠人记</strong>：团队名册、手册广播、自治档位与工具权限在运行时强制。</li>
+    <li><strong>数据不出机器</strong>：key 与文件留在本地，适配器直连厂商，不经过我们的服务器。</li>
+    <li><strong>已有 agent 不白学</strong>：会话接管让 Claude Code / Codex 拥有共享的、可视化的多模型状态。</li>
+    <li><strong>交付物是图</strong>：画布可导出独立 HTML，别人 30 秒看懂流程。</li>
+  </ul>
+  <p class="muted">反向定位：不与 Claude Code 抢「写代码」，不与 n8n 抢「连应用」，不与 Dify 抢「发布成服务」。只做「一次有多个模型参与、需要给人看清楚谁做了什么」的那一层。</p>
+
+  <h2>产品形态与版本</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th style="width:120px">版本</th><th>内容</th><th style="width:160px">定位</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill">Free</span></td><td>MIT 源码 + 便携版 + VS Code 扩展 + MCP/插件；核心闭环不阉割。</td><td>陌生人 10 分钟跑通示例</td></tr>
+        <tr><td><span class="pill">Pro</span></td><td>离线许可证文件、本地校验、不联网激活；付费边界放在自动化与规模化：自动续跑轮次、自省预算循环与快照管理、运行历史归档与批量导出、多套名册切换、优先支持。</td><td>承载主要收入</td></tr>
+        <tr><td><span class="pill">Team</span></td><td>团队模板/手册包 + 只读导出与 audit 审计 + 席位授权；暂不做云，等 Pro 有稳定付费用户后再开。</td><td>预留</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="muted">版本节奏：v0.1 预览（已完成）→ v0.5 付费试点（许可 + 升级页）→ v1.0 正式定价。</p>
+
+  <h2>收入模型</h2>
+  <ol>
+    <li><strong>主收入：Pro 年度授权</strong>（每用户每年）。不采用一次性买断——单人维护需要可预期的续费覆盖支持时间。</li>
+    <li><strong>次收入：工作流/手册包</strong>（一次性）。把「调研简报」「内容生产」「代码复审」等已验证可用的图连同手册打包，降低首次成功成本。</li>
+    <li><strong>补充：商业支持与定制咨询</strong>（按天）。只接「用牵丝做自己的流程」，不接功能外包。</li>
+    <li><strong>不做</strong>：代售 token 或按 token 抽成（无云、无合规主体，与自带 key 的本地优先承诺冲突）；广告与数据变现。</li>
+  </ol>
+  <h3>怎么算账（价格待验证，先给结构）</h3>
+  <pre><code>年收入 ≈ Pro 年费 × 付费用户数 + 包单价 × 包销量 + 咨询日费 × 咨询天数
+年成本 ≈ 支持工时 × 时薪 + 签名证书年费 + 商标/法务一次性
+毛利   ≈ 年收入 − 年成本（边际成本≈0，真正的约束是支持工时）</code></pre>
+  <p><strong>决策线：</strong>支持工时 / 付费用户超过可用工时的 20%，就停止扩量，先补文档与自助排查。</p>
+
+  <h2>定价</h2>
+  <ul>
+    <li><strong>原则</strong>：锚定「省下的模型浪费」与「一次重活的人工工时」，不锚竞品订阅价。</li>
+    <li><strong>结构</strong>：Free 免费；Pro 年付，含 1 台设备离线许可与 12 个月更新；Team 按席位年付。</li>
+    <li><strong>具体数字</strong>、早期用户折扣、学生/开源维护者折扣幅度均待验证——用预订页 + 访谈做价格敏感度测试（愿意付/犹豫/拒绝三档），不靠猜。</li>
+    <li>不做永久免费 Pro；不做按调用量阶梯（调用量不在我们手里）。退款 14 天无理由，换真实反馈。</li>
+  </ul>
+
+  <h2>获客渠道</h2>
+  <ol>
+    <li><strong>GitHub + Release</strong>：README 双语的「10 分钟跑通」是第一转化页；每版配真实运行 GIF 与产物截图。</li>
+    <li><strong>MCP / 插件生态</strong>：Claude Code 插件市场与 VS Code Marketplace 是用户主动搜得到的入口，安装压到一行。</li>
+    <li><strong>内容复用</strong>：多模型分工复盘、同任务不同模型成本对照、自省闭环改代码的 diff 记录；一次实测多平台分发，不做日常运营。</li>
+    <li><strong>社区与私域</strong>：Issue / Discussions 当支持台；活跃用户拉进小群做内测。</li>
+    <li><strong>合作</strong>：AI 工具 newsletter 与测评作者，用免费 Pro 授权换真实长测评，不付软文费。</li>
+  </ol>
+
+  <h2>成本结构</h2>
+  <ul>
+    <li><strong>人力（最大成本）</strong>：开发与支持同一人，支持时间最先撞墙。</li>
+    <li><strong>模型 token</strong>：自测、演示与问题复现；用户日常运行由自带 key 支付，不构成我们的成本。</li>
+    <li><strong>代码签名证书</strong>：Windows 签名尚未落地（当前 CI 出包、本机安全软件会拦截），年费待验证。</li>
+    <li><strong>分发与托管</strong>：GitHub Release 与静态导出页，成本接近零。</li>
+    <li><strong>法务与商标</strong>：命名查重清单已有，注册费用待验证。</li>
+  </ul>
+  <p class="muted">边际成本结论：一份许可的增量成本接近零，成本曲线是「人力固定 + 支持随用户线性增长」——必须用文档与自助排查压支持工时。</p>
+
+  <h2>里程碑</h2>
+  <ul class="timeline">
+    <li><span class="when">M0 · 已完成</span><p><strong>基线</strong>：v0.1 预览、便携版、MCP、VS Code 扩展。验收：陌生人按 README 10 分钟内跑通示例。</p></li>
+    <li><span class="when">M1 · 4 周</span><p><strong>需求验证</strong>：10 份用户访谈 + 预订落地页 + 价格三档测试。验收：≥10 次真实访谈；预订页有真实留资；结论写成「做/不做/改」三条。</p></li>
+    <li><span class="when">M2 · 8 周</span><p><strong>付费最小实现</strong>：离线许可校验 + Pro 功能边界 + 升级页。验收：走通「下载→试用→付费→解锁」，退款可执行。</p></li>
+    <li><span class="when">M3 · 12 周</span><p><strong>首批付费</strong>：首批付费用户 + 3 篇可公开案例。验收：有真实付费流水；3 个用户愿意署名；支持工时/用户可测。</p></li>
+    <li><span class="when">M4 · 6 个月</span><p><strong>形态判断</strong>：Team 试点或转向赞助/支持为主。验收：续费率与支持成本决定继续投 Pro 还是收缩。</p></li>
+  </ul>
+
+  <h2>风险与对策</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th style="width:170px">风险</th><th style="width:130px">影响</th><th>对策与兜底</th></tr></thead>
+      <tbody>
+        <tr><td>没人愿意付费（最可能）</td><td>商业化失败</td><td>先卖后做：预订页无真实留资就不写 Pro 代码，退回开源 + 赞助。</td></tr>
+        <tr><td>单人支持过载</td><td>质量与健康双崩</td><td>支持只走 Issue/邮件、限定响应窗口；文档与自助排查优先；拒绝定制。</td></tr>
+        <tr><td>上游 API 与协议变动</td><td>核心功能间歇不可用</td><td>适配器 fixture 测试 + 探测接口 + 一键停用厂商；坏模型不拖垮整轮。</td></tr>
+        <tr><td>付费墙易被绕过 / 开源被白嫖</td><td>收入漏损</td><td>接受漏损；离线许可只做「体面」级别，价值放在支持、模板与团队包。</td></tr>
+        <tr><td>安全软件拦截与签名缺失</td><td>下载转化与信任受损</td><td>CI 出包 + 校验和 + 文档说明；证书到位后再投渠道。</td></tr>
+        <tr><td>大厂 agent 自带画布/多模型</td><td>差异被抹平</td><td>守住三点：本地优先、跨厂商、产物与验收可追溯；不与其通用能力正面竞争。</td></tr>
+        <tr><td>关键人风险</td><td>项目停摆</td><td>文档齐全、发布流程脚本化、MIT 源码可被接管。</td></tr>
+        <tr><td>法律与命名</td><td>上线受阻</td><td>沿用命名查重清单，商用前完成商标检索（费用待验证）。</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>验证指标</h2>
+  <ul>
+    <li><strong>获客</strong>：README 访问→下载、下载→首次启动、Star→下载；基线待验证，M2 后按周记录。</li>
+    <li><strong>激活</strong>：首次真实 live 运行完成率、示例 10 分钟跑通率、首次成功前放弃点。</li>
+    <li><strong>价值</strong>：7 日内第二次运行比例、每用户每周画布数、返修轮次、平均单任务验收分。</li>
+    <li><strong>付费</strong>：预订留资→付费转化、Pro 转化率、退款率、续费率、支持工时/付费用户。</li>
+    <li><strong>成本护栏</strong>：单次运行 token 上限触发次数、越过预算比例、模型失败自动降级成功率。</li>
+    <li><strong>砍线（go/no-go）</strong>：M1 无真实预订 → 停止 Pro 开发；M3 付费用户低于阶段内定目标且支持工时不可控 → 收缩为开源 + 赞助。</li>
+  </ul>
+
+  <h2>接下来 90 天能直接做的动作</h2>
+  <div class="actions">
+    <ol>
+      <li><strong>第 1–2 周</strong>：把 README 的「10 分钟跑通」重写成带截图的分步教程，配一段真实运行 GIF；统计访问→下载基线。</li>
+      <li><strong>第 3–4 周</strong>：做一页预订页（邮箱 + 愿付价格档三选一），在插件市场与两个内容渠道投放，凑够 10 份访谈。</li>
+      <li><strong>第 5–8 周</strong>：仅当 M1 有真实留资，才做离线许可 + Pro 功能边界（自动续跑、自省预算循环、历史归档）。</li>
+      <li><strong>第 9–12 周</strong>：首批付费与 3 篇可公开案例；把支持入口收拢到 Issue 模板，实测支持工时。</li>
+    </ol>
+  </div>
+
+  <footer>
+    本文由牵丝画布上的「商业化计划草稿」节点（deepseek-flash）产出，经人工校订与事实核对；所有「待验证」项都以自有实测填充，不引用外部市场数字。对应仓库文档：docs/commercialization.md。
+  </footer>
+</div>

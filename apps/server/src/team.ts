@@ -289,3 +289,46 @@ export function restrictToolbox(
     },
   };
 }
+
+/** 验收结论的形状：与引擎的 GatedResult 子集兼容，避免反向依赖。 */
+export interface AcceptanceNote {
+  pass?: boolean;
+  score?: number;
+  reasons?: string[];
+  suggestedFix?: string;
+}
+
+/**
+ * 成员长期记忆回写（借鉴 CrewAI 的 memory）：一次运行结束，把「任务 → 通过/未过
+ * → 原因/改进」记到负责成员名下，下一次任务 prompt 自动带上。只保留最近 10 条、
+ * 1600 字，避免记忆变成第二个上下文黑洞。
+ */
+export function recordMemberLessons(
+  store: TeamStore,
+  plan: { subtasks: Array<{ id: string; title: string; memberId?: string; status: string }> },
+  acceptance: Record<string, AcceptanceNote>,
+  runStatus: string
+): number {
+  const assigned = plan.subtasks.filter((task) => task.memberId);
+  if (assigned.length === 0) return 0;
+  const team = store.read();
+  if (team.members.length === 0) return 0;
+  const day = new Date().toISOString().slice(0, 10);
+  let updated = 0;
+  for (const task of assigned) {
+    const member = team.members.find((item) => item.id === task.memberId);
+    if (!member) continue;
+    const verdict = acceptance[task.id];
+    const ok = task.status === 'done' || verdict?.pass === true;
+    const reason = ok
+      ? `完成${typeof verdict?.score === 'number' ? `（${verdict.score.toFixed(2)}）` : ''}`
+      : (verdict?.reasons?.[0] ?? (runStatus === 'failed' ? '运行失败' : '未完成'));
+    const fix = verdict?.suggestedFix ? `；改进：${verdict.suggestedFix}` : '';
+    const line = `[${day}] ${task.title.slice(0, 40)} → ${ok ? '通过' : '未过'}：${String(reason).slice(0, 80)}${String(fix).slice(0, 120)}`;
+    const lines = [...(member.memory ? member.memory.split('\n') : []), line].filter(Boolean);
+    member.memory = lines.slice(-10).join('\n').slice(-1600);
+    updated += 1;
+  }
+  if (updated > 0) store.write(team);
+  return updated;
+}

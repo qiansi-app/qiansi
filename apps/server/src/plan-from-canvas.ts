@@ -79,6 +79,17 @@ export function diagnoseCanvas(document: CanvasDocument): {
  * Returns null when the canvas is not runnable, so the caller can refuse the
  * run (or, for demos only, fall back) instead of pretending the drawing ran.
  */
+/**
+ * 研究型任务判定：开了联网，或工单/验收在要检索、调研、核实、文献、竞品。
+ * 研究型任务在运行层拿到更多工具轮次（检索 → read_url → 追问是正常 3-4 轮）。
+ */
+export function looksLikeResearch(text: string, webSearch?: boolean): boolean {
+  if (webSearch === true) return true;
+  return /(检索|搜索|调研|研究|核实|查证|文献|资料|对比|竞品|survey|research|search|verify|cite|citation)/i.test(
+    text
+  );
+}
+
 export function buildPlanFromCanvas(
   document: CanvasDocument,
   goal: string,
@@ -156,6 +167,9 @@ export function buildPlanFromCanvas(
     const member = memberId
       ? options.team?.members.find((item) => item.id === memberId)
       : undefined;
+    // 研究型任务：读工单/验收是否在要检索、调研、核实、文献；也给工具预算放宽用。
+    const researchText = `${workOrder} ${deliverable} ${String(data.role ?? '')} ${acceptanceCriteria}`;
+    const research = looksLikeResearch(researchText, data.webSearch === true);
 
     return {
       id: lane,
@@ -166,6 +180,9 @@ export function buildPlanFromCanvas(
         deliverable ? `交付物：${deliverable}` : '',
         acceptanceFromNode.length > 0
           ? `验收标准（主控会逐条对照）：\n${acceptanceFromNode.map((item) => `- ${item}`).join('\n')}`
+          : '',
+        research
+          ? '研究纪律：先用 2-3 个互补查询检索，再对关键结果用 read_url 读正文；把事实（含数字/日期/主体）记成要点；引用必须来自你实际检索或读取的 URL，检索不到的部分明确写「未能核实」。'
           : '',
         `总目标：${runGoal}`,
         filesForTask(options.files ?? [], index, targets.length),
@@ -179,6 +196,9 @@ export function buildPlanFromCanvas(
       acceptanceCriteria,
       autonomy: member?.autonomy ?? asAutonomy(data.autonomy),
       toolAllow: member?.tools,
+      memberId: member?.id,
+      memberName: member?.name,
+      research,
       style: isConversationStyle(data.style)
         ? data.style
         : suggestStyle(`${String(data.name ?? "")} ${String(data.role ?? "")}`),

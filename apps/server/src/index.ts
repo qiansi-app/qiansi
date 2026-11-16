@@ -85,6 +85,7 @@ import {
   TEAM_MEMBER_CAP,
   TeamStore,
   normalizeTeamInput,
+  recordMemberLessons,
   restrictToolbox,
   teamWarnings,
   type TeamDoc,
@@ -497,6 +498,7 @@ function copyTeam(fromWorkspace: string, toWorkspace: string): TeamDoc {
   }
   return doc;
 }
+
 const audit = new AuditLog(stateDir);
 const policy = new PolicyStore(stateDir);
 const quota = new QuotaStore(stateDir);
@@ -5062,8 +5064,12 @@ app.post('/api/commands', async (context) => {
     // 团队自治档位与成员能力：只读档位只能读，成员还可以再关掉某些工具。
     // 工具列表和实际执行两层都收紧，模型即使硬要调用也会被拒绝。
     const toolboxFor = nodeToolbox
-      ? (task: { autonomy?: 'investigate' | 'draft' | 'auto' | 'full'; toolAllow?: string[] }) =>
-          restrictToolbox(nodeToolbox, task.autonomy ?? 'auto', task.toolAllow)
+      ? (task: { autonomy?: 'investigate' | 'draft' | 'auto' | 'full'; toolAllow?: string[]; research?: boolean }) => {
+          const restricted = restrictToolbox(nodeToolbox, task.autonomy ?? 'auto', task.toolAllow);
+          // 研究型任务给足工具轮次：检索 → read_url → 追问是正常的 3-4 轮，
+          // 6 轮上限会把「再查一次」卡死；读/写类任务保持原预算。
+          return task.research && restricted ? { ...restricted, maxRounds: 10 } : restricted;
+        }
       : undefined;
 
     const orchestrator = new Orchestrator({
@@ -5119,6 +5125,11 @@ app.post('/api/commands', async (context) => {
       }),
     });
     const gateCounts = { structural: 0, cheap: 0, full: 0 };
+    /** 每个任务的验收结论：运行结束回写成员长期记忆要用。 */
+    const acceptanceByTask: Record<
+      string,
+      { pass?: boolean; score?: number; reasons?: string[]; suggestedFix?: string }
+    > = {};
     orchestrator.on((event) => {
       store.append(runId, redactRunEvent(event));
       if (event.type === 'usage') {
@@ -5136,6 +5147,14 @@ app.post('/api/commands', async (context) => {
         });
       }
       if (event.type === 'task.acceptance' && event.result.gate) gateCounts[event.result.gate] += 1;
+      if (event.type === 'task.acceptance') {
+        acceptanceByTask[event.taskId] = {
+          pass: event.result.pass,
+          score: event.result.score,
+          reasons: event.result.reasons,
+          suggestedFix: event.result.suggestedFix,
+        };
+      }
       if (event.type !== 'run.finished') return;
       runAborts.delete(runId);
       if (activeLiveRunId === runId) activeLiveRunId = null;
@@ -5147,6 +5166,21 @@ app.post('/api/commands', async (context) => {
         target: runId,
         detail: { ...gateCounts, router: routerPick?.model ?? null },
       });
+      // 团队记忆回写：不论成败，负责人都记下「这次结果与改法」，下次任务带上。
+      const lessons = recordMemberLessons(
+        new TeamStore(workspaces.dirOf(runWorkspace)),
+        planToRun,
+        acceptanceByTask,
+        event.status
+      );
+      if (lessons > 0) {
+        audit.record({
+          actor: 'server',
+          action: 'team.memory',
+          target: runWorkspace,
+          detail: { lessons, runId },
+        });
+      }
       // 失败归因与自动重试计划：先算清楚「为什么失败、还会不会重试」，
       // 再决定回写画布（授权被撤销时只记录、不写画布）。
       const finishedRecord = store.get(runId);
