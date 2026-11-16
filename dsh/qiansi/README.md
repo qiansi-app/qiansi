@@ -87,8 +87,23 @@ cd dsh/qiansi
 npm run pack:check                 # 包清单、补丁、与源文件同步、市场索引一致性
 node ../../dsh/marketplace/validate.mjs   # 用本机 DSH 官方校验器校验索引
 npm pack                           # 产物用于 tarball 安装
-npm publish --access public        # 需要 npm 登录（见下）
+npm publish --access public        # 需要 npm 登录 + 2FA 或 bypass-2FA 令牌
 ```
+
+### npm 令牌怎么配（2026-11 规则）
+
+账号开着 2FA 时，命令行直接发布会被 403 拒绝（`Two-factor authentication or granular access token with bypass 2fa enabled is required`）。两条路：
+
+- **一次性验证码**：`npm publish --access public --otp=123456`（30 秒内有效，适合手动发一次）；
+- **Granular Access Token（推荐）**：npmjs.com → Access Tokens → Generate New Token → Granular：
+  - Permissions 选 **Read and write**；
+  - Packages 只勾 `qiansi-dsh`（最小权限）；
+  - **Bypass 2FA 勾上**（写权限令牌默认 false，不勾就必须每次给 OTP）；
+  - 设一个到期日；创建后 `npm config set //registry.npmjs.org/:_authToken=<token>`。
+
+注意 npm 的路线图：**带 bypass-2FA 的直接发布令牌从 2027-01 起被取消**。到时应切换成「读写（仅阶段）」令牌 + `npm stage publish`，由维护者用 `npm stage approve <stage-id> --otp <code>` 推广。现在先用 bypass 令牌把 0.2.0 发出去，后续版本可以提前演练 stage 流程。
+
+### 市场索引
 
 市场索引在 `dsh/marketplace/index.json`（格式 1，图标为内联 SVG）。发新版本时更新三处：`package.json.version`、索引里的 `versions[].version` 与 `publishTimestamp`、以及 README 里的 tarball 文件名。索引托管在仓库里，任何 https 静态地址都能作为索引源。
 
