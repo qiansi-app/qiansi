@@ -9,7 +9,7 @@
 **A. 从插件市场 / npm（推荐）**
 
 ```bash
-dsh plugin --profile qiansi add qiansi-dsh            # 发布后生效
+dsh plugin --profile qiansi add qiansi-dsh            # 已发布 0.2.0，直接从 npm 装
 ```
 
 或者在 DSH 的 **插件 → 发现 → 添加索引源** 里填入：

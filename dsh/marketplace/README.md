@@ -38,4 +38,4 @@ https://raw.githubusercontent.com/qiansi-app/qiansi/main/dsh/marketplace/index.j
 
 每个 version：精确 SemVer `version`、`publishTimestamp`（Unix 秒）、`source`（`{type:'npm', registry?}` 或 `{type:'git', url, commit(40 位小写 sha), path?}`）、`engines {dsh}`。
 
-安装时 DSH 会把条目转换成 `name@version`（npm）或固定 commit 的 `git+https`（git）。牵丝目前用 npm 源；在尚未发布时，用户可用 tarball 或 `link:` 方式安装。
+安装时 DSH 会把条目转换成 `name@version`（npm）或固定 commit 的 `git+https`（git）。牵丝用 npm 源，`qiansi-dsh@0.2.0` 已于 2026-11-16 发布到公共注册表；无法联网时可用 tarball 或 `link:` 方式安装。
